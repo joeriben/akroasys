@@ -1,5 +1,95 @@
 # T5ynth Development Log
 
+## 2026-08-07 — the typing keyboard stopped asking the system which keys are down
+
+BJ, on the typing keyboard: *"Taste a funktioniert komplett im Mac, hängt
+nirgendwo, a a a a kann ganz normal verwendet werden. Im Synth: Neustart. Ich
+spiele Taste s (ein D). Taste a (ein C) klingt sofort mit und hängt. → Panic.
+Alles aus. Ab dann Taste a: kein Sound."* And, holding s and pressing the octave
+keys: *"Taste a (C) klingt mit obwohl nicht gedrückt — und hängt wieder."*
+
+One measurement explains every one of those sentences. `CGEventSourceKeyState`,
+the API `t5::physicalKeyDown` used to read, reports **keycode 0x00 — physical A,
+the typing keyboard's C — as held, permanently, with nothing pressed**. A sweep of
+0x00…0x7F finds exactly that one key; `kCGEventSourceStateHIDSystemState` and
+`kCGEventSourceStateCombinedSessionState` both say it, and Carbon `GetKeys()`
+agrees, so all three read one shared, global map that no process here can clear.
+`tools/probe_physkey.cpp` is that measurement.
+
+From there the symptoms follow mechanically. `scanComputerKeyboard` re-reads
+*every* mapped key on *every* keypress, so pressing s started C as well; nothing
+ever released it, because release needs the read to go false. Panic silenced the
+voice but left `computerKeyboardNotesDown[0]` true, so the next a press compared
+equal to the stored state and did nothing at all — the dead key. And
+`shiftComputerKeyboardOctave` releases held notes before applying the new offset,
+after which the same scan immediately re-started the phantom C: y or x alone, a
+hanging C, no note key touched.
+
+The instrument reads physical key POSITIONS rather than characters so that the
+same keys play the same notes on a German and a US layout, and that stays. Two
+things changed underneath it.
+
+**A note may only BEGIN on an actual keystroke.** The scan used to ask one
+question — *is this key down?* — and answer it for all twenty keys on every key
+press, which is what turned one wrong bit into a phantom note on every other
+key's press. It now asks two, and they come from different places. What starts a
+note is a STRIKE: a key-down event that has arrived and that no pass has acted on
+yet, drained once per pass. What ends one is the held-state. A key that wrongly
+reads "down" can then only delay a release; it can never manufacture an attack.
+This is the part that makes the class of bug impossible rather than the instance
+of it fixed, and it has a second, unrelated benefit: a tap short enough to be
+over before the message thread gets to it now sounds, where asking "is it down
+now?" already answered no and dropped the note.
+
+**Held-state is the AND of two sources**, because each covers exactly the other's
+failure — and both failures are the same thing, a note that will not stop. The
+app-local map fed by our own `NSEvent` key events (`PhysicalKeyStateMac.mm`, a
+local monitor, no Input-Monitoring permission) cannot report a release it never
+received: AppKit delivers no key-up while Command is held, and its own header
+states a local monitor is not called for events consumed by nested event-tracking
+loops — control tracking, menu tracking, window dragging. The system key state
+cannot miss a release, and it is the one that latched. Either source saying "up"
+ends the note. Where a keycode is latched the AND degenerates to the map alone,
+which is why it is a floor and not the guarantee, and why starting a note does
+not depend on it at all.
+
+The map additionally forgets everything while Command is held (both edges,
+derived per event from the event's own flags, so a `flagsChanged` swallowed by a
+tracking loop cannot strand it either way), on `NSApplicationDidResignActive`,
+and on `NSMenuDidEndTracking`. Window dragging is deliberately left uncovered:
+`NSWindowDidMoveNotification` fires for every window in the process moving for
+any reason, and JUCE builds each dropdown by adding a window to the desktop and
+then positioning it — so that observer would kill a held chord every time a combo
+box is opened. Measured, not assumed.
+
+Because the scan may no longer start anything by itself,
+`shiftComputerKeyboardOctave` re-starts the still-held notes at the new offset
+explicitly. Holding a key and pressing the octave keys still moves the note; it
+just no longer happens as a side effect of re-reading key state.
+
+Two more things worth keeping in mind for anything that touches this file. The
+map is process-global, so it must never be cleared from per-editor state — a
+second plugin editor sitting with its typing keyboard off would otherwise wipe,
+twenty times a second, the key state the instance you are playing reads from. And
+the local monitor runs inside `sendEvent:` *before* the responder chain, which is
+what lets `MainPanel::keyPressed` read an already up-to-date map for the very key
+press being delivered; that ordering is AppKit's documented contract and was
+verified against a running app rather than assumed.
+
+Two defects in this area are older than this change and survive it, both in the
+same shape: a key released and struck again inside one 50 ms poll tick is
+swallowed, because `computerKeyboardNotesDown` is only reconciled by the poll, so
+a fast repeated note can sound as one held note (the same applies to two quick
+taps of an octave key). The strike bit is exactly the signal that would tell a
+re-strike from OS auto-repeat, so this is now cheap to fix — but it changes when
+notes retrigger, which is a separate decision from stopping the phantom.
+
+Not fixed, and now stated where it matters rather than papered over: on Windows
+JUCE's `isKeyCurrentlyDown` goes to `GetAsyncKeyState`, the same kind of global
+state, so a key held in another application is visible to the fallback path in
+`PhysicalKeyState.cpp` too. That path is already layout-dependent and wants its
+own scancode rewrite; both belong in the same change.
+
 ## 2026-08-05 — Shift is fine adjustment, on every control that is dragged
 
 BJ, after playing the new envelope curves: *"die Maus-Skalierung ist etwas zu grob

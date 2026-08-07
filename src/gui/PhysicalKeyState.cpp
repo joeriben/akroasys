@@ -1,25 +1,9 @@
 #include "PhysicalKeyState.h"
 
-#if defined(__APPLE__)
-
-// Isolated translation unit: include CoreGraphics WITHOUT JuceHeader so the
-// Carbon `Point` type (MacTypes.h) cannot collide with juce::Point.
-#include <CoreGraphics/CoreGraphics.h>
-
-namespace t5
-{
-bool physicalKeyDown (int virtualKeyCode)
-{
-    // CGEventSourceKeyState reads physical key state by position — a state query,
-    // not an event tap / global monitor, so it needs no Input-Monitoring
-    // permission. CombinedSessionState also reflects synthetic events, so
-    // automated UI tests register too.
-    return CGEventSourceKeyState (kCGEventSourceStateCombinedSessionState,
-                                  static_cast<CGKeyCode> (virtualKeyCode));
-}
-}
-
-#else
+// macOS lives in PhysicalKeyStateMac.mm: it needs AppKit, and its key map is fed
+// by this application's own key EVENTS instead of the system key state, which is
+// global and can latch a key "down" forever (see PhysicalKeyState.h).
+#if ! defined(__APPLE__)
 
 #include <JuceHeader.h>
 
@@ -52,6 +36,20 @@ bool physicalKeyDown (int virtualKeyCode)
     return juce::KeyPress::isKeyCurrentlyDown ((int) juce::CharacterFunctions::toLowerCase (ch))
         || juce::KeyPress::isKeyCurrentlyDown ((int) juce::CharacterFunctions::toUpperCase (ch));
 }
+
+// No separate strike channel here: JUCE's key state is all these platforms offer,
+// so a note begins on "the key reads down", exactly as it did before.
+bool physicalKeyWasStruck (int virtualKeyCode) { return physicalKeyDown (virtualKeyCode); }
+void drainPhysicalKeyStrikes() {}
+
+// No monitor here — but not because this branch is safe. On Windows JUCE's
+// isKeyCurrentlyDown goes to GetAsyncKeyState, which is the same kind of global
+// key state macOS had to stop trusting, so a key held in another application is
+// visible here too. Untouched for now: this path is already layout-DEPENDENT and
+// needs its own scancode rewrite, and that is where to fix both at once. Linux
+// (X11, per-peer tracking) is app-local and does not have the problem.
+void startPhysicalKeyMonitor() {}
+void stopPhysicalKeyMonitor()  {}
 }
 
 #endif

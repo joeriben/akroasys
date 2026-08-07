@@ -594,6 +594,13 @@ target_sources(T5ynth PRIVATE
     src/presets/PresetUpdater.cpp
 )
 
+# The typing keyboard's physical key map is fed by real AppKit key events on
+# macOS, so its implementation is Objective-C++ (PhysicalKeyState.cpp compiles to
+# nothing there and carries the other platforms' fallback).
+if(APPLE)
+    target_sources(T5ynth PRIVATE src/gui/PhysicalKeyStateMac.mm)
+endif()
+
 # target_sources/link additions must stay inside this if(): CsoundEngine.cpp
 # #includes <csound/csound.h> at file scope and cannot even preprocess without
 # the framework's headers on the include path.

@@ -486,6 +486,10 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
 {
     setOpaque(true);
     computerKeyboardActiveNotes.fill(-1);
+    // Feeds t5::physicalKeyDown from this app's own key events. Ref-counted, so a
+    // second plugin editor in the same host shares the one monitor; ~MainPanel
+    // hands its reference back.
+    t5::startPhysicalKeyMonitor();
     // Allow keyboard shortcuts (⌘S) to reach the panel even when no inner
     // text editor has focus.
     setWantsKeyboardFocus(true);
@@ -2910,6 +2914,7 @@ MainPanel::~MainPanel()
     processorRef.onSnapshotRequested = nullptr;
     processorRef.onCacheToggleRequested = nullptr;
     releaseComputerKeyboardNotes();
+    t5::stopPhysicalKeyMonitor();
     stopTimer();
 
     if (!juce::JUCEApplicationBase::isStandaloneApp())
@@ -3621,8 +3626,26 @@ void MainPanel::shiftComputerKeyboardOctave(int delta)
         return;
     }
 
+    // A key still held moves WITH the octave rather than falling silent — that is
+    // what the octave keys are for while playing. Done here, explicitly, from the
+    // notes that were actually sounding: the scan cannot do it, because there it
+    // would be a note beginning without a keystroke, which is precisely what it
+    // must refuse.
+    const auto wasDown = computerKeyboardNotesDown;
     releaseComputerKeyboardNotes();
     computerKeyboardOctaveOffset = nextOffset;
+
+    for (int i = 0; i < kComputerKeyboardKeyCount; ++i)
+    {
+        if (!wasDown[static_cast<size_t>(i)]
+            || !t5::physicalKeyDown(kComputerKeyboardNoteKeys[i]))
+            continue;
+
+        computerKeyboardNotesDown[static_cast<size_t>(i)] = true;
+        const int note = computerKeyboardNoteForIndex(i);
+        computerKeyboardActiveNotes[static_cast<size_t>(i)] = note;
+        processorRef.beginComputerKeyboardNote(note, 0.82f);
+    }
     statusBar.setStatusText("Kbd octave: " + computerKeyboardBaseNoteName());
 }
 
@@ -3648,16 +3671,23 @@ bool MainPanel::scanComputerKeyboard(bool allowStart)
                    "(computerKeyboardNotesDown/ActiveNotes are sized by it).");
     bool anyDown = false;
 
-    // Octave: flags always track (so a release re-arms the edge); shift only when
-    // allowed to start (i.e. from the focus-scoped keyPressed path).
+    // Two different questions, deliberately answered by two different things. What
+    // BEGINS anything is a STRIKE — an actual key-down event that no pass has acted
+    // on yet. What ENDS it is the held-state. A key that reads "down" while nobody
+    // is touching it can then only delay a release; it can never start a note, and
+    // this is exactly what a stuck key used to do: one keycode wrongly reading down
+    // (0x00, physical A) started a C on every OTHER key's press, hung, and made A
+    // itself dead. Do not "simplify" this back into one predicate.
     const bool octaveDown = t5::physicalKeyDown(kComputerKeyboardOctaveDownKey);
-    if (octaveDown && !computerKeyboardOctaveDownKeyDown && allowStart)
+    if (allowStart && t5::physicalKeyWasStruck(kComputerKeyboardOctaveDownKey)
+        && !computerKeyboardOctaveDownKeyDown)
         shiftComputerKeyboardOctave(-1);
     computerKeyboardOctaveDownKeyDown = octaveDown;
     anyDown |= octaveDown;
 
     const bool octaveUp = t5::physicalKeyDown(kComputerKeyboardOctaveUpKey);
-    if (octaveUp && !computerKeyboardOctaveUpKeyDown && allowStart)
+    if (allowStart && t5::physicalKeyWasStruck(kComputerKeyboardOctaveUpKey)
+        && !computerKeyboardOctaveUpKeyDown)
         shiftComputerKeyboardOctave(1);
     computerKeyboardOctaveUpKeyDown = octaveUp;
     anyDown |= octaveUp;
@@ -3665,28 +3695,38 @@ bool MainPanel::scanComputerKeyboard(bool allowStart)
     for (int i = 0; i < kComputerKeyboardKeyCount; ++i)
     {
         const bool down = t5::physicalKeyDown(kComputerKeyboardNoteKeys[i]);
-        anyDown |= down;
+        // Read, not consumed: an octave shift above has just released every held
+        // note, and the same pass has to be able to re-start them at the new offset.
+        // The whole pass drains once, at the end.
+        const bool struck = allowStart
+                         && t5::physicalKeyWasStruck(kComputerKeyboardNoteKeys[i]);
+        anyDown |= down || struck;
 
-        if (down == computerKeyboardNotesDown[static_cast<size_t>(i)])
-            continue;
-        if (down && !allowStart)
-            continue;   // release-only path: don't begin notes
-
-        computerKeyboardNotesDown[static_cast<size_t>(i)] = down;
-        if (down)
+        auto& isDown = computerKeyboardNotesDown[static_cast<size_t>(i)];
+        if (struck && !isDown)
         {
+            isDown = true;
             const int note = computerKeyboardNoteForIndex(i);
             computerKeyboardActiveNotes[static_cast<size_t>(i)] = note;
             processorRef.beginComputerKeyboardNote(note, 0.82f);
         }
-        else
+        else if (!down && isDown)
         {
+            isDown = false;
             const int note = computerKeyboardActiveNotes[static_cast<size_t>(i)];
             if (note >= 0)
                 processorRef.endComputerKeyboardNote(note);
             computerKeyboardActiveNotes[static_cast<size_t>(i)] = -1;
         }
     }
+
+    // One drain per note-starting pass, so a strike is acted on exactly once. The
+    // release-only poll deliberately does NOT drain: it would eat the strike that
+    // keyPressed is about to act on. A strike that outlives its pass (the keyboard
+    // was off, an overlay was up) is not stale — a key-up clears it too, so its
+    // survival means the key is genuinely still held.
+    if (allowStart)
+        t5::drainPhysicalKeyStrikes();
     return anyDown;
 }
 
@@ -3722,15 +3762,20 @@ void MainPanel::pollComputerKeyboard()
         releaseComputerKeyboardNotes();
         computerKeyboardOctaveDownKeyDown = false;
         computerKeyboardOctaveUpKeyDown = false;
+        // Releases THIS editor's notes only. The physical key map is process-wide and
+        // stays untouched: a second plugin instance sitting here with its typing
+        // keyboard off would otherwise wipe, 20 times a second, the key state the
+        // instance you are actually playing reads from. The map's own forgetting
+        // (app inactive, Command held) lives in PhysicalKeyStateMac.mm.
         return;
     }
 
     // Release-only reconcile (allowStart=false): note-ON is the focus-scoped
-    // keyPressed path. The poll MUST NOT begin notes — t5::physicalKeyDown is a
-    // GLOBAL read, so starting here would pick up the host's / another app's
-    // keystrokes. Intended consequence: a note key still physically held across a
-    // focus-loss/disable is released by the guard above and stays silent until
-    // re-pressed. Do NOT "fix" that by starting notes here — it reopens the leak.
+    // keyPressed path. The poll MUST NOT begin notes — inside a DAW the key map is
+    // fed by the whole HOST's key events, so starting here would pick up typing
+    // aimed at the host. Intended consequence: a note key still physically held
+    // across a focus-loss/disable is released by the guard above and stays silent
+    // until re-pressed. Do NOT "fix" that by starting notes here — it reopens the leak.
     scanComputerKeyboard(false);
 }
 

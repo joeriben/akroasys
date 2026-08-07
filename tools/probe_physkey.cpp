@@ -9,6 +9,14 @@
 //
 // Build: clang++ -std=c++17 -O0 -o probe tools/probe_physkey.cpp -framework CoreGraphics
 // (this variant calls CGEventSourceKeyState directly — no PhysicalKeyState.cpp).
+//
+// ANSWERED, 2026-08-07. (a) keycode 0x00 is uniquely stuck-true: a sweep of
+// 0x00…0x7F reports exactly one key down with nothing pressed. (b) NEITHER source
+// state is reliable — HIDSystemState and CombinedSessionState both say DN, and
+// Carbon GetKeys() agrees, so all three read one shared, global, latchable map
+// that this process cannot clear. The synth therefore stopped reading system key
+// state altogether: t5::physicalKeyDown is now fed by the app's own AppKit key
+// events (PhysicalKeyStateMac.mm). This probe stays as the measurement.
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <cstdio>
