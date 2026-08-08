@@ -14,9 +14,11 @@
 // 0x00…0x7F reports exactly one key down with nothing pressed. (b) NEITHER source
 // state is reliable — HIDSystemState and CombinedSessionState both say DN, and
 // Carbon GetKeys() agrees, so all three read one shared, global, latchable map
-// that this process cannot clear. The synth therefore stopped reading system key
-// state altogether: t5::physicalKeyDown is now fed by the app's own AppKit key
-// events (PhysicalKeyStateMac.mm). This probe stays as the measurement.
+// that this process cannot clear. The synth therefore stopped STARTING notes from
+// system key state: a note now begins only on a real AppKit key event
+// (PhysicalKeyStateMac.mm), and the reading probed here survives only as one half
+// of what ENDS a note — where a latch can no longer do harm, because the event side
+// has to agree with it. This probe stays as the measurement.
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <cstdio>

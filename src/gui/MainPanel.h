@@ -225,9 +225,13 @@ private:
     double cacheHitUntilSec = 0.0;
     bool computerKeyboardEnabled = false;
     int computerKeyboardOctaveOffset = 0;
-    bool computerKeyboardOctaveDownKeyDown = false;
-    bool computerKeyboardOctaveUpKeyDown = false;
     bool spaceRestKeyDown_ = false;   // step-record: Space-rest edge (re-armed when the key lifts)
+    // Octave-key edge, kept per editor because that is the only place it may live
+    // where a strike is not a key event (see t5::physicalKeyStrikesAreEvents).
+    bool computerKeyboardOctaveDownHeld_ = false;
+    bool computerKeyboardOctaveUpHeld_ = false;
+    bool computerKeyboardOctaveDownPolled_ = false;   // read down by the PREVIOUS poll pass
+    bool computerKeyboardOctaveUpPolled_ = false;
     static constexpr int kComputerKeyboardKeyCount = 20; // C4–G5: a…k octave + o l p ö ä + #  (ü has no note)
     std::array<bool, kComputerKeyboardKeyCount> computerKeyboardNotesDown {};
     std::array<int, kComputerKeyboardKeyCount> computerKeyboardActiveNotes {};
@@ -260,7 +264,7 @@ private:
                                 int calibEpoch);
     void triggerMainGeneration();
     void setComputerKeyboardEnabled(bool enabled);
-    void shiftComputerKeyboardOctave(int delta);
+    bool shiftComputerKeyboardOctave(int delta);   // true if the offset actually moved
     void pollComputerKeyboard();
     void releaseComputerKeyboardNotes();
     bool isTextEditingFocus() const;

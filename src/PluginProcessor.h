@@ -495,7 +495,10 @@ public:
     void beginStepHoldPreview(int midiNote, float velocity = 0.8f);
     void updateStepHoldPreview(int midiNote, float velocity = 0.8f);
     void endStepHoldPreview();
-    void beginComputerKeyboardNote(int midiNote, float velocity = 0.8f);
+    // isKeystroke=false means "the same note continuing at a new pitch" — the octave
+    // keys moving a key that is still held. It sounds identically and is NOT offered
+    // to step-record, which must only ever capture what the player actually struck.
+    void beginComputerKeyboardNote(int midiNote, float velocity = 0.8f, bool isKeystroke = true);
     void endComputerKeyboardNote(int midiNote);
     void allComputerKeyboardNotesOff();
 

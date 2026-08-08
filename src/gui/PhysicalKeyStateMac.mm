@@ -45,7 +45,7 @@ bool testBit (const std::atomic<std::uint64_t>* mask, int vk)
     return ((word >> (vk & 63)) & 1ull) != 0ull;
 }
 
-void setBits (unsigned short vk, bool down)
+void setBits (unsigned short vk, bool down, bool strike)
 {
     if (vk >= 128)
         return;
@@ -54,7 +54,8 @@ void setBits (unsigned short vk, bool down)
     if (down)
     {
         gHeld[vk >> 6].fetch_or (bit, std::memory_order_relaxed);
-        gStruck[vk >> 6].fetch_or (bit, std::memory_order_relaxed);
+        if (strike)
+            gStruck[vk >> 6].fetch_or (bit, std::memory_order_relaxed);
     }
     else
     {
@@ -65,14 +66,20 @@ void setBits (unsigned short vk, bool down)
 
 void observe (NSMutableArray* into, NSNotificationName name)
 {
+    // queue:nil, NOT mainQueue. A queue makes delivery asynchronous — the block
+    // becomes an operation that runs on some later run-loop turn, arbitrarily
+    // ordered against AppKit's event dispatch. It would then be able to land AFTER
+    // a key that was already queued behind the notification has started its note,
+    // and wipe the held-state out from under it: the first note struck after
+    // closing a menu would die within one poll tick with the key still down.
+    // queue:nil runs the block synchronously on the posting thread (the main
+    // thread for both of these), i.e. at the moment the state actually changes.
     id token = [[NSNotificationCenter defaultCenter]
         addObserverForName: name
                     object: nil
-                     queue: [NSOperationQueue mainQueue]
+                     queue: nil
                 usingBlock: ^(NSNotification*)
     {
-        // Delivery via the queue is asynchronous, so this can still fire after the
-        // last editor handed its reference back.
         if (gMonitorRefs > 0)
         {
             gCommandDown = false;
@@ -118,11 +125,18 @@ bool physicalKeyDown (int virtualKeyCode)
                                   static_cast<CGKeyCode> (virtualKeyCode));
 }
 
-// A note may only BEGIN on an actual key-down event. This is what makes a stuck
-// bit — from either source, from any cause, present or future — unable to invent a
+// A note may only BEGIN on an actual key-down event. That is what makes a key stuck
+// DOWN — in either source, from any cause, present or future — unable to invent a
 // note: it can at worst delay a release, never manufacture an attack. It is also
 // why a very short tap still sounds, where asking "is it down now?" would already
 // answer no and drop the note entirely.
+//
+// Note what this does NOT claim. A strike has no second opinion behind it the way
+// held-state does; it is trusted because a key-down event really did arrive. What
+// it can outlive is its own key-up, in the two loops named below that nothing
+// covers (a title-bar drag, an NSControl held with the mouse). The callers therefore
+// drain on EVERY pass, the release-only poll included, so such a strike is swept
+// within one poll tick instead of waiting to become an attack nobody played.
 bool physicalKeyWasStruck (int virtualKeyCode)
 {
     if (virtualKeyCode < 0 || virtualKeyCode >= 128)
@@ -131,11 +145,17 @@ bool physicalKeyWasStruck (int virtualKeyCode)
     return testBit (gStruck, virtualKeyCode);
 }
 
+bool physicalKeyStrikesAreEvents() { return true; }
+
 void drainPhysicalKeyStrikes()
 {
     gStruck[0].store (0ull, std::memory_order_relaxed);
     gStruck[1].store (0ull, std::memory_order_relaxed);
 }
+
+// Nothing extra to do: a strike here is an event that has already happened, so
+// dropping the pending ones drops the held keys' strikes with them.
+void discardPhysicalKeyStrikes() { drainPhysicalKeyStrikes(); }
 
 void startPhysicalKeyMonitor()
 {
@@ -168,9 +188,20 @@ void startPhysicalKeyMonitor()
                 return ev;
         }
 
+        // Two kinds of key-down carry no strike, though both still count as held.
+        // A repeat, because the OS sends auto-repeat as further key-DOWNs with no
+        // key-up between them, and telling a held key from a key struck again is the
+        // only thing that separates "keep sounding" from "play the note again".
+        // And a Control/Option chord, because it is never a note (plainKeyboardCommand,
+        // MainPanel) — no pass will act on it, so recording one would leave a strike
+        // lying around to be picked up by the next plain keystroke and played.
         const NSEventType type = [ev type];
-        if (type == NSEventTypeKeyDown || type == NSEventTypeKeyUp)
-            setBits ([ev keyCode], type == NSEventTypeKeyDown);
+        const bool chord = ([ev modifierFlags]
+                             & (NSEventModifierFlagControl | NSEventModifierFlagOption)) != 0;
+        if (type == NSEventTypeKeyDown)
+            setBits ([ev keyCode], true, ! [ev isARepeat] && ! chord);
+        else if (type == NSEventTypeKeyUp)
+            setBits ([ev keyCode], false, false);
 
         return ev;
     }] retain];
@@ -187,14 +218,22 @@ void startPhysicalKeyMonitor()
     //   key-up goes missing, and a note that stops early is recoverable where a note
     //   that never stops is not.
     //
-    // Window dragging is the loop deliberately NOT covered. The obvious observer,
-    // NSWindowDidMoveNotification, fires for every window in the process moving for
-    // any reason — and JUCE builds each PopupMenu/ComboBox dropdown by adding a
-    // window to the desktop and THEN positioning it (juce_PopupMenu.cpp), so every
-    // dropdown in this UI would post one and kill any held chord. Losing a key-up to
-    // a title-bar drag is the smaller harm, and it can only hang a keycode the
-    // system state has latched (see physicalKeyDown); it heals on the next press of
-    // that key, on a menu, or on the app going inactive.
+    // The OTHER two loops AppKit names are deliberately NOT covered, and both are
+    // named here rather than quietly dropped:
+    //   window dragging — the obvious observer, NSWindowDidMoveNotification, fires
+    //   for every window in the process moving for any reason, and JUCE builds each
+    //   PopupMenu/ComboBox dropdown by adding a window to the desktop and THEN
+    //   positioning it (juce_PopupMenu.cpp), so every dropdown in this UI would post
+    //   one and kill a held chord. Measured, not assumed.
+    //   control tracking — an NSControl held with the mouse (a host's fader or
+    //   button, a native title-bar control). There is no end-of-tracking
+    //   notification to hang this on, and the general alternative — clearing when a
+    //   mouse gesture ends — would cut a held note every time the player touches a
+    //   knob, which is a worse and far more frequent harm.
+    // What both cost is one lost key-up, and a lost key-up can only HANG a note on a
+    // keycode whose system state is latched (see physicalKeyDown); anywhere else the
+    // AND still ends it. Even there it heals on the next press of that key, on a
+    // menu, or on the app going inactive.
     NSMutableArray* tokens = [[NSMutableArray alloc] init];
     observe (tokens, NSApplicationDidResignActiveNotification);
     observe (tokens, NSMenuDidEndTrackingNotification);

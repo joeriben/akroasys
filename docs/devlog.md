@@ -62,10 +62,13 @@ any reason, and JUCE builds each dropdown by adding a window to the desktop and
 then positioning it — so that observer would kill a held chord every time a combo
 box is opened. Measured, not assumed.
 
-Because the scan may no longer start anything by itself,
-`shiftComputerKeyboardOctave` re-starts the still-held notes at the new offset
-explicitly. Holding a key and pressing the octave keys still moves the note; it
-just no longer happens as a side effect of re-reading key state.
+Holding a key and pressing the octave keys still moves the note, but it is now
+said rather than implied: the shift releases the sounding notes and reports
+whether the offset actually moved, and the scan carries the set of keys that were
+sounding into the note loop, which re-begins the ones still held. That is also
+where a key struck in the same pass as an octave change gets begun exactly once
+instead of twice. The re-begin is flagged as a continuation, not a keystroke, so
+Step-Record no longer writes a step per held note every time the octave moves.
 
 Two more things worth keeping in mind for anything that touches this file. The
 map is process-global, so it must never be cleared from per-editor state — a
@@ -76,13 +79,51 @@ what lets `MainPanel::keyPressed` read an already up-to-date map for the very ke
 press being delivered; that ordering is AppKit's documented contract and was
 verified against a running app rather than assumed.
 
-Two defects in this area are older than this change and survive it, both in the
-same shape: a key released and struck again inside one 50 ms poll tick is
-swallowed, because `computerKeyboardNotesDown` is only reconciled by the poll, so
-a fast repeated note can sound as one held note (the same applies to two quick
-taps of an octave key). The strike bit is exactly the signal that would tell a
-re-strike from OS auto-repeat, so this is now cheap to fix — but it changes when
-notes retrigger, which is a separate decision from stopping the phantom.
+The strike also settled a defect older than all of this. A key released and
+struck again inside one 50 ms poll tick used to be swallowed — the release is
+only ever reconciled by the poll, so the second attack found the note still
+marked down and did nothing, and a repeated note at any speed a player actually
+reaches came out as one held note. The same cost two quick taps of an octave key
+one of their shifts. What made it unfixable before was that "key down again" and
+"key still down" were the same observation; the strike separates them, because OS
+auto-repeat arrives as further key-downs and is excluded from it (`isARepeat`).
+A strike on a note that is already sounding is therefore a second keystroke and
+nothing else, and it now ends the note and plays it again. On macOS the octave
+keys stopped consulting their edge flags for the same reason — a flag that can
+only re-arm from a pass was an imitation of the strike, and a worse one.
+
+All of that is macOS, and the difference to the other platforms turned out to be
+the most instructive part of the change. Windows and Linux have no key-event
+stream here, so a strike there can only mean "the key reads down", which repeats
+for as long as the key is held — and that is not an edge. Two attempts to
+manufacture the edge inside `PhysicalKeyState` both failed, in opposite
+directions and each for a reason worth keeping: a snapshot of "what was down at
+the last drain" swallowed real keystrokes, because the drain also runs from the
+release-only poll and Windows' `GetAsyncKeyState` goes true the instant a key is
+pressed, before its message is dispatched; a mark set on first use instead let a
+SECOND plugin editor's 20 Hz poll mark the keystroke the first editor was about
+to play — the same shape as the earlier bug where one editor wiped the key map
+another was reading.
+
+The rule those two failures point at: **where the edge cannot come from an event,
+it belongs to the instance that plays, not to a shared place.** So
+`PhysicalKeyState` keeps no state off macOS at all, `physicalKeyStrikesAreEvents()`
+says which world you are in, and `MainPanel` supplies the edge from what it
+already knows — the note's own sounding-state, and a per-editor flag for the
+octave keys. Playing behaviour there is what it was before this change, with the
+two things only an event stream can do still missing: it cannot see a release and
+re-press that falls between two polls, and it cannot retrigger a note that is
+already sounding. Two details of that flag are better than before, and both are
+the same insight in small. A single poll tick may not arm it: on Windows the key
+state goes true at the hardware event while JUCE's timer tick is a posted message
+that overtakes queued key input, so a tick landing in that gap would mark the
+press as already handled and the octave keystroke would do nothing at all. But
+never arming it from the poll is wrong too — a key held through a state where the
+poll runs and `keyPressed` does not would then shift the octave on the next plain
+keystroke, unasked. The gap lasts one dispatch and a held key lasts ticks, so two
+successive ticks tell them apart. And where the poll bails out early the flag is
+set to what the keys read at that moment rather than cleared, so a key held
+through an overlay is not a fresh press on the way out.
 
 Not fixed, and now stated where it matters rather than papered over: on Windows
 JUCE's `isKeyCurrentlyDown` goes to `GetAsyncKeyState`, the same kind of global

@@ -6,6 +6,7 @@
 #if ! defined(__APPLE__)
 
 #include <JuceHeader.h>
+#include <cstdint>
 
 namespace t5
 {
@@ -37,17 +38,30 @@ bool physicalKeyDown (int virtualKeyCode)
         || juce::KeyPress::isKeyCurrentlyDown ((int) juce::CharacterFunctions::toUpperCase (ch));
 }
 
-// No separate strike channel here: JUCE's key state is all these platforms offer,
-// so a note begins on "the key reads down", exactly as it did before.
-bool physicalKeyWasStruck (int virtualKeyCode) { return physicalKeyDown (virtualKeyCode); }
-void drainPhysicalKeyStrikes() {}
+// No key EVENTS to draw on here, so a strike can only be "the key reads down", and
+// it therefore repeats for as long as the key is held. Whoever calls it owns the
+// edge — see physicalKeyStrikesAreEvents in the header for why that edge may not
+// live here. Nothing in this file keeps state, deliberately: every attempt to hold
+// the edge process-wide (a snapshot at each drain, a mark set on first use) either
+// swallowed a keystroke that arrived in the gap between GetAsyncKeyState going true
+// and the key message being dispatched, or let a second plugin editor's 20 Hz poll
+// mark the keystroke the first one was about to play.
+bool physicalKeyWasStruck (int virtualKeyCode)  { return physicalKeyDown (virtualKeyCode); }
+bool physicalKeyStrikesAreEvents()              { return false; }
+void drainPhysicalKeyStrikes()                  {}
+void discardPhysicalKeyStrikes()                {}
 
 // No monitor here — but not because this branch is safe. On Windows JUCE's
 // isKeyCurrentlyDown goes to GetAsyncKeyState, which is the same kind of global
 // key state macOS had to stop trusting, so a key held in another application is
 // visible here too. Untouched for now: this path is already layout-DEPENDENT and
-// needs its own scancode rewrite, and that is where to fix both at once. Linux
-// (X11, per-peer tracking) is app-local and does not have the problem.
+// needs its own scancode rewrite, and that is where to fix both at once. Linux is
+// not the exception it looks like: JUCE keeps its own key table there, but it
+// selects KeymapStateMask and memcpy's the SERVER's key_vector into that table on
+// every KeymapNotify — which X sends after every FocusIn and every EnterNotify — so
+// simply moving the pointer into the window republishes whatever the whole machine
+// is holding. A key held in another window can therefore begin a note here, exactly
+// as on Windows. Both are pre-existing and unchanged; both end with that rewrite.
 void startPhysicalKeyMonitor() {}
 void stopPhysicalKeyMonitor()  {}
 }

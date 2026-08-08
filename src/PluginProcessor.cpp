@@ -693,7 +693,7 @@ void T5ynthProcessor::endStepHoldPreview()
 // external MIDI (-1) so the two can be released independently.
 static constexpr int kComputerKeyboardSourceId = 15;
 
-void T5ynthProcessor::beginComputerKeyboardNote(int midiNote, float velocity)
+void T5ynthProcessor::beginComputerKeyboardNote(int midiNote, float velocity, bool isKeystroke)
 {
     // Computer-keyboard notes bypass the MIDI buffer (direct voiceManager call), so
     // the replay transport's midiMessages.clear() cannot neutralise them — gate here
@@ -731,7 +731,11 @@ void T5ynthProcessor::beginComputerKeyboardNote(int midiNote, float velocity)
 
     // Step-record: capture this played note into the current step (self-gates
     // on stepRecordArmed; runs on the message thread under the callback lock).
-    recordStepNote(note, vel);
+    // Only a real keystroke advances the pattern — an octave key moving a note the
+    // player is still holding is the same note, not a new one, and writing a step
+    // for it would fill the pattern with notes nobody played.
+    if (isKeystroke)
+        recordStepNote(note, vel);
 }
 
 void T5ynthProcessor::endComputerKeyboardNote(int midiNote)
