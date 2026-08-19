@@ -724,11 +724,31 @@ oscillator alone, because what it stores is rendered diffusion output.
 <table>
   <tr><th>Control</th><th>What it stores</th><th>How to use it</th></tr>
   <tr>
-    <td><strong>CACHE OFF / 2 / 4 / 8 / 16 / 32 / 64</strong></td>
+    <td><strong>CACHE OFF / 2 / 4 / 8 / 16</strong></td>
     <td>A round-robin list of generated audio results for the current generation setup. Once filled, Generate plays through the cached results instead of running inference again.</td>
-    <td>Choose a cache size, generate until it fills, then use Generate as a fast audition button. Cache capacity and already generated cache audio are saved in <code>.t5p</code> presets and restored when the preset is loaded.</td>
+    <td>Choose a cache size, generate until it fills, then use Generate as a fast audition button. Cache capacity and already generated cache audio are saved in <code>.t5p</code> presets and restored when the preset is loaded. A preset saved with an older, deeper cache (32 or 64) still loads; its cache is kept at 16.</td>
+  </tr>
+  <tr>
+    <td><strong>A/S</strong> (offline take)</td>
+    <td>How the cache RECORDS, not what it stores. Off, the Drift keeps sweeping while a render is in flight, so the cache catches whichever points the machine happens to be ready for. On, the generation parameters wait at each cache point until the render lands and then step on by exactly one Regenerate interval.</td>
+    <td>Switch it on before filling a cache you want to keep. The recorded run is then the same on a fast and a slow computer, and Resynth and Re-Prompt keep every step of their chain instead of skipping the ones that fell during a render.</td>
   </tr>
 </table>
+<p>
+The offline take applies while a cache is <em>recording</em>: it needs a cache
+size, a Regenerate setting other than Manual, and a Drift slot aimed at one of
+the generation parameters (Alpha, Noise, Magnitude, an Axis, Resynth). With the
+cache Off nothing about live play changes. While the take records, the Drift's
+generation-side sweep stands still between cache points &mdash; the ghost
+markers hold their position, which is the recording waiting, not a stall.
+Everything the Drift can reach in the sound itself (filter, pitch, scan, delay,
+reverb, envelope amounts) keeps moving throughout. An LFO aimed at a
+<em>generation</em> slot's Drift Amt pauses for the length of the take &mdash; it
+would otherwise keep the held value moving and hand the recording back to the
+clock &mdash; and resumes when the take is full. Once the take is full it
+plays back like any other cache, including with a Re-Prompt stance engaged: the
+recording <em>is</em> that evolution, so it repeats instead of being re-rendered.
+</p>
 <p>
 A full cache turns Generate into a zero-latency playback control: each press
 of Generate (or <strong>Shift+Return</strong>) advances to the next cached entry

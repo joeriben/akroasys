@@ -57,6 +57,21 @@ unbroken.
 - **The in-app manual** describes the instrument instead of defending it, says
   what the player sees rather than what the code does, and the Re-Prompt section
   says that its ear hears the bare oscillator, not the speakers.
+- **A cache take records the same run on a fast and on a slow computer.** Filling
+  a cache used to sample the Drift wherever the machine happened to be ready: a
+  render in flight let the cadence point pass unused while the sweep carried on,
+  so a quick computer caught the trajectory every bar and a slow one every few —
+  and Resynth's carry and the Re-Prompt rewrite skipped the same steps with it.
+  The new **A/S** switch in the CACHE row holds the generation parameters at each
+  cache point until the render lands and then steps them on by exactly one
+  Regenerate interval, so the recording is a property of the settings and not of
+  the hardware. Everything audible the Drift reaches keeps moving throughout. A
+  finished take plays back like any other cache, now including with a Re-Prompt
+  stance engaged: the recording is that evolution, so it repeats rather than
+  being re-rendered differently every cycle. The switch has the cells the 32- and
+  64-deep caches used to hold — presets that deep ran to hundreds of megabytes —
+  and the remaining depths gained the room to be readable at any window size. A
+  preset saved at 32 or 64 still loads, with its cache kept at 16.
 
 ### Under the hood
 

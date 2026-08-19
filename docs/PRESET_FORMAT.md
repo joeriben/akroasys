@@ -198,6 +198,7 @@ then patched at `src/presets/PresetFormat.cpp:18-66`:
 | `driftEnabled`  | export        | Bool. |
 | `driftCrossfade`| export        | Float. |
 | `regenMode`     | export        | `"manual"` / `"auto"` / `"bar_1"` / `"bar_2"` / `"bar_4"` / `"bar_8"` / `"bar_16"` (iterate-every cadence in bars). Older presets' beat keys (`"max_1beat"` …) are unknown now → fall back to `"manual"`. |
+| `cacheAsync`    | export        | Bool. Offline cache take: while a cache records, the generation-side Drift is held at each cache point until the render lands and then stepped on by one `regenMode` interval. Absent in presets written before it existed → `false`. |
 | `wavetable`     | export        | `scan`, `octaveShift`, `noiseLevel`, `noiseType`, `frames`, `smooth`, `autoScan`. `scan` also acts as Granular position when `engine.mode` is `"freeze"` for preset compatibility. |
 | `freeze`        | export        | Granular texture state: `texture` (`"hold"`, `"silk"`, `"air"`, `"cloud"`) and `stereo` (0.0–1.0 width). Key name remains `freeze` for compatibility. |
 | `effects`       | export        | Delay, reverb, limiter. |
