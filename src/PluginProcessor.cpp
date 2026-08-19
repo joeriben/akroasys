@@ -6271,78 +6271,38 @@ bool T5ynthProcessor::isSamplerMode() const
     return static_cast<int>(paramCache.engineMode->load()) == EngineMode::Sampler;
 }
 
-void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBuffer, double sr)
+// The region a freshly generated buffer offers: where its audible content sits,
+// and the loop window a Sampler should prefer inside it. Buffer, rate and loop
+// mode decide it and nothing else.
+//
+// Lifted out of loadGeneratedAudio unchanged so audio that is NOT the live
+// generation can be prepared the same way. A stored position whose loop window
+// came from some other analysis would not be the sound that playing the same
+// position from the CACHE row produces, and those two must not drift apart.
+namespace
 {
-    samplerProcessorDebugLog("loadGeneratedAudio begin samples=" + juce::String(audioBuffer.getNumSamples())
-                             + " sr=" + juce::String(sr, 2)
-                             + " masterBefore={" + masterSampler.debugStateString() + "}");
+struct GeneratedRegions
+{
+    float activeStartFrac = 0.0f;
+    float activeEndFrac   = 1.0f;
+    float loopStartFrac   = 0.0f;
+    float loopEndFrac     = 1.0f;
+};
 
-    // NOTE (BJ 2026-07-22): this used to be where a bake's engine stash was
-    // spent — a fresh generation handed the user back the engine the bake had
-    // forced away. That made loading audio a paradigm switch, which is not what
-    // it is: it fired on every audio reload (HF-boost reprocess, snapshot
-    // recall, preset audio, an auto-regen landing) and could pull the engine
-    // out from under a panel still showing the LCO, while the case it was meant
-    // for — leaving the LCO — went unhandled whenever no generation followed or
-    // the session had started in a language mode with no stash to spend. The
-    // oscillator-mode toggle owns that switch now (restoreNeuralEngineMode /
-    // restoreLanguageEngineMode); loading audio only loads audio.
-
-    // Store raw audio (unmodified) for preset embedding and re-apply on toggle
-    if (&audioBuffer != &generatedAudioRaw)
-        generatedAudioRaw.makeCopyOf(audioBuffer);
-
-    // Rumble filter — always on, removes DC/sub-bass from VAE output
-    juce::AudioBuffer<float> cleanBuffer;
-    cleanBuffer.makeCopyOf(audioBuffer);
-    applyRumbleFilter(cleanBuffer, sr);
-
-    // Conditionally apply HF boost to compensate VAE decoder rolloff
-    bool hfOn = paramCache.genHfBoost->load() > 0.5f;
-    if (hfOn)
-        applyHfBoost(cleanBuffer, sr);
-
-    // Pre-trim leading silence BEFORE computing activeStartFrac/activeEndFrac.
-    // prepareBufferLoad() also trims internally; doing it here makes the trim
-    // idempotent and ensures the fractions we compute below align with the
-    // buffer the sampler ultimately plays. Without this the new sustained-RMS
-    // trim would shift the buffer after we'd already measured an audible-start
-    // fraction, landing P1 past the real attack.
-    masterSampler.trimLeadingSilencePublic(cleanBuffer);
-
-    // Symmetric trailing trim: diffusion models emit the full requested duration
-    // even when the sound is short, leaving a dead near-silent tail. The granular
-    // engine (scan 0..1 across the whole buffer, no playhead) otherwise parks in
-    // that pure-zero field, and the waveform/playhead show a flat tail. Drop it
-    // here — before the active-region fractions below are computed — so sampler,
-    // wavetable, freeze and the display all end at real content. No-op when the
-    // content already runs to the end.
-    masterSampler.trimTrailingSilencePublic(cleanBuffer);
-
-    const auto& feedBuffer = cleanBuffer;
-
-    SamplePlayer::LoopMode samplerLoopMode = SamplePlayer::LoopMode::Loop;
-    SamplePlayer::PrepareConfig samplerConfig;
-    bool autoPositionPoints = false;
-    float prevP1 = 0.0f;
-    {
-        const juce::ScopedLock sl (getCallbackLock());
-        syncSamplerSettingsFromParametersLocked();
-        samplerConfig = masterSampler.capturePrepareConfig();
-        samplerLoopMode = samplerConfig.loopMode;
-        autoPositionPoints = !masterSampler.getPointsLocked();
-        prevP1 = masterSampler.getStartPos();
-    }
-
-    // ── Auto-position P1/P2/P3 BEFORE loadBuffer so that preparePlaybackBuffer
-    //    (which runs normalization) already sees the correct region. ──────
+GeneratedRegions analyzeGeneratedRegions (const juce::AudioBuffer<float>& feedBuffer,
+                                          double sr,
+                                          SamplePlayer::LoopMode samplerLoopMode)
+{
     float loopStartFrac = 0.0f;
     float loopEndFrac   = 1.0f;
     float activeStartFrac = 0.0f;
     float activeEndFrac   = 1.0f;
 
-    if (autoPositionPoints)
+    // getReadPointer(0) below needs a channel to exist; a sample count alone
+    // never guaranteed one.
+    if (feedBuffer.getNumChannels() > 0)
     {
+
         const int numSamples = feedBuffer.getNumSamples();
 
         if (numSamples > 0)
@@ -6478,8 +6438,88 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
 
     }
 
+    return { activeStartFrac, activeEndFrac, loopStartFrac, loopEndFrac };
+}
+}  // namespace
+
+void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBuffer, double sr)
+{
+    samplerProcessorDebugLog("loadGeneratedAudio begin samples=" + juce::String(audioBuffer.getNumSamples())
+                             + " sr=" + juce::String(sr, 2)
+                             + " masterBefore={" + masterSampler.debugStateString() + "}");
+
+    // NOTE (BJ 2026-07-22): this used to be where a bake's engine stash was
+    // spent — a fresh generation handed the user back the engine the bake had
+    // forced away. That made loading audio a paradigm switch, which is not what
+    // it is: it fired on every audio reload (HF-boost reprocess, snapshot
+    // recall, preset audio, an auto-regen landing) and could pull the engine
+    // out from under a panel still showing the LCO, while the case it was meant
+    // for — leaving the LCO — went unhandled whenever no generation followed or
+    // the session had started in a language mode with no stash to spend. The
+    // oscillator-mode toggle owns that switch now (restoreNeuralEngineMode /
+    // restoreLanguageEngineMode); loading audio only loads audio.
+
+    // Store raw audio (unmodified) for preset embedding and re-apply on toggle
+    if (&audioBuffer != &generatedAudioRaw)
+        generatedAudioRaw.makeCopyOf(audioBuffer);
+
+    // Rumble filter — always on, removes DC/sub-bass from VAE output
+    juce::AudioBuffer<float> cleanBuffer;
+    cleanBuffer.makeCopyOf(audioBuffer);
+    applyRumbleFilter(cleanBuffer, sr);
+
+    // Conditionally apply HF boost to compensate VAE decoder rolloff
+    bool hfOn = paramCache.genHfBoost->load() > 0.5f;
+    if (hfOn)
+        applyHfBoost(cleanBuffer, sr);
+
+    // Pre-trim leading silence BEFORE computing activeStartFrac/activeEndFrac.
+    // prepareBufferLoad() also trims internally; doing it here makes the trim
+    // idempotent and ensures the fractions we compute below align with the
+    // buffer the sampler ultimately plays. Without this the new sustained-RMS
+    // trim would shift the buffer after we'd already measured an audible-start
+    // fraction, landing P1 past the real attack.
+    masterSampler.trimLeadingSilencePublic(cleanBuffer);
+
+    // Symmetric trailing trim: diffusion models emit the full requested duration
+    // even when the sound is short, leaving a dead near-silent tail. The granular
+    // engine (scan 0..1 across the whole buffer, no playhead) otherwise parks in
+    // that pure-zero field, and the waveform/playhead show a flat tail. Drop it
+    // here — before the active-region fractions below are computed — so sampler,
+    // wavetable, freeze and the display all end at real content. No-op when the
+    // content already runs to the end.
+    masterSampler.trimTrailingSilencePublic(cleanBuffer);
+
+    const auto& feedBuffer = cleanBuffer;
+
+    SamplePlayer::LoopMode samplerLoopMode = SamplePlayer::LoopMode::Loop;
+    SamplePlayer::PrepareConfig samplerConfig;
+    bool autoPositionPoints = false;
+    float prevP1 = 0.0f;
+    {
+        const juce::ScopedLock sl (getCallbackLock());
+        syncSamplerSettingsFromParametersLocked();
+        samplerConfig = masterSampler.capturePrepareConfig();
+        samplerLoopMode = samplerConfig.loopMode;
+        autoPositionPoints = !masterSampler.getPointsLocked();
+        prevP1 = masterSampler.getStartPos();
+    }
+
+    // ── Auto-position P1/P2/P3 BEFORE loadBuffer so that preparePlaybackBuffer
+    //    (which runs normalization) already sees the correct region. ──────
+    float loopStartFrac = 0.0f;
+    float loopEndFrac   = 1.0f;
+    float activeStartFrac = 0.0f;
+    float activeEndFrac   = 1.0f;
+
     if (autoPositionPoints)
     {
+        const auto regions = analyzeGeneratedRegions (feedBuffer, sr, samplerLoopMode);
+        activeStartFrac = regions.activeStartFrac;
+        activeEndFrac   = regions.activeEndFrac;
+        loopStartFrac   = regions.loopStartFrac;
+        loopEndFrac     = regions.loopEndFrac;
+
         samplerConfig.loopStartFrac = loopStartFrac;
         samplerConfig.loopEndFrac = loopEndFrac;
 
