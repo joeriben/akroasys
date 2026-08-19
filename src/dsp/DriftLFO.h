@@ -57,6 +57,27 @@ public:
     /** Advance all LFOs by dt seconds. */
     void tick(double dt);
 
+    /** True for the targets that do not shape the sound directly but the NEXT
+     *  inference: what the request is built from. The offline cache take freezes
+     *  exactly these and lets the audible ones (filter, pitch, scan, delay,
+     *  reverb, env amounts) keep running — a held sweep would be audible for as
+     *  long as a render takes, which is precisely the machine-dependent duration
+     *  the take exists to get rid of. */
+    static bool isGenerationTarget(int target)
+    {
+        return target >= TgtAlpha && target <= TgtResynth;
+    }
+
+    /** While held, the generation-side LFOs above stop advancing in tick(). They
+     *  then move only by stepGenerationTargets() — one defined step per captured
+     *  entry, so the recorded trajectory is the same on every machine. */
+    void setGenerationHold(bool held) { genHold = held; }
+    bool isGenerationHeld() const { return genHold; }
+
+    /** Advance ONLY the generation-side LFOs by dt seconds, hold or no hold. This
+     *  is the take's step from one cache point to the next. */
+    void stepGenerationTargets(double dt);
+
     /** Get the combined offset for a given target parameter. */
     float getOffsetForTarget(int target) const;
 
@@ -112,8 +133,15 @@ private:
 
     bool active = false;
     int regenMode = 0; // 0=Manual, 1=Auto, 2=1st Bar
+    bool genHold = false;   // generation-side LFOs frozen (offline cache take)
 
     static constexpr double TWO_PI = 6.283185307179586;
+
+    /** Move one LFO's phase on by dt seconds, wrapping and re-drawing a
+     *  sample-and-hold value on the wrap. A step that spans several cycles draws
+     *  ONE new value, like any other wrap — the take samples the waveform at its
+     *  cache points, it does not replay what happened between them. */
+    static void advancePhase(InternalLFO& lfo, double dt);
 
     /** Compute waveform value for phase 0-1, returns -1..+1. */
     static float waveformValue(const InternalLFO& lfo);

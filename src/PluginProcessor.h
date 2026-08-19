@@ -178,6 +178,35 @@ public:
     int getInferenceCacheFillCount() const { return static_cast<int>(inferenceCacheEntries.size()); }
     const std::vector<InferenceCacheEntry>& getInferenceCacheEntries() const { return inferenceCacheEntries; }
 
+    /** Offline cache take — message thread writes, audio thread reads.
+     *
+     *  While a take records, the generation-side Drift LFOs (alpha, noise,
+     *  magnitude, the three axes, resynth) stand still: the parameters wait at the
+     *  cache point until the render lands. They then move on by exactly one cadence
+     *  interval, requested through requestDriftGenerationStep(). The recorded
+     *  trajectory is therefore the same on any machine, however long the inference
+     *  takes; without it a fast box captures the drift every bar and a slow one
+     *  every few, and the Resynth/Re-Prompt chain skips steps with it.
+     *  Everything audible the Drift can reach keeps running either way. */
+    void setDriftGenerationHold(bool held) noexcept
+    {
+        driftGenHold_.store(held, std::memory_order_relaxed);
+    }
+    bool isDriftGenerationHeld() const noexcept
+    {
+        return driftGenHold_.load(std::memory_order_relaxed);
+    }
+    /** Accumulates: a step requested while the audio thread has not consumed the
+     *  previous one must not be dropped, or the take would stall in place. */
+    void requestDriftGenerationStep(float seconds) noexcept
+    {
+        if (seconds <= 0.0f) return;
+        float expected = driftGenStepSec_.load(std::memory_order_relaxed);
+        while (! driftGenStepSec_.compare_exchange_weak(expected, expected + seconds,
+                                                        std::memory_order_relaxed))
+        {}
+    }
+
     // Inference (Python subprocess)
     bool isInferenceReady() const { return pipeInference->isReady(); }
     PipeInference& getPipeInference() { return *pipeInference; }
@@ -1092,6 +1121,8 @@ private:
     int inferenceCacheCapacity = 0;
     int inferenceCachePlaybackIndex = 0;
     std::vector<InferenceCacheEntry> inferenceCacheEntries;
+    std::atomic<bool>  driftGenHold_   { false };  // message->audio: freeze generation-side Drift
+    std::atomic<float> driftGenStepSec_{ 0.0f };   // message->audio: pending take step, in seconds
 
     /** Two-band high shelf to compensate VAE decoder HF rolloff. */
     static void applyHfBoost(juce::AudioBuffer<float>& buffer, double sampleRate);

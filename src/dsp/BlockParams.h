@@ -210,6 +210,7 @@ namespace PID {
     static constexpr const char* driftEnabled     = "drift_enabled";
     static constexpr const char* driftRegen       = "drift_regen";
     static constexpr const char* driftCrossfade   = "drift_crossfade";
+    static constexpr const char* cacheAsync       = "cache_async";
     static constexpr const char* drift1Rate       = "drift1_rate";
     static constexpr const char* drift1Depth      = "drift1_depth";
     static constexpr const char* drift1Target     = "drift1_target";

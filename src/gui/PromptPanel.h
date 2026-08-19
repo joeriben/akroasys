@@ -395,6 +395,38 @@ private:
     /** Check if drift requires auto-regeneration (called from timerCallback). */
     void pollDriftRegen();
 
+    /** The offline cache take (CACHE row's rightmost switch).
+     *
+     *  A cache take records the drift as it sweeps past the auto-regen cadence
+     *  points. Which points it CATCHES depends on the machine: while a render is
+     *  in flight the poll returns early, the cadence point passes unused, and the
+     *  drift keeps sweeping meanwhile — so a fast box records the trajectory every
+     *  bar and a slow one every few, and the Resynth carry / Re-Prompt rewrite
+     *  chain skips the same steps with it.
+     *
+     *  The offline take closes that: the generation-side drift is frozen for the
+     *  whole take and moves only by one cadence interval per CAPTURED entry (see
+     *  T5ynthProcessor::setDriftGenerationHold). The parameters wait at Tc1 until
+     *  the render lands, then step to Tc2. Recording only — with the cache Off
+     *  nothing changes, and once the take is full it plays back like any other. */
+    bool isAsyncCacheMode() const;
+    bool isAsyncTakeRecording() const;
+
+    /** True when a Drift slot aims at a generation parameter AND its Amount is
+     *  non-zero — i.e. there is a trajectory for a take to record at all. */
+    bool driftCanCarryATake() const;
+
+    /** Advance the take by one cadence interval — called with the result of the
+     *  cache write, so an uncaptured point (cache Off, cache full, failed render)
+     *  never consumes a step. */
+    void stepOfflineTakeAfterCapture(bool captured);
+
+    /** The auto-regen cadence in seconds, from the REGENERATE mode + its BPM: what
+     *  one step of an offline take advances the generation-side drift by. ASAP
+     *  resolves to the same 1-beat floor cache playback already uses — without a
+     *  defined interval every entry of a take would sit on the same drift value. */
+    double cadenceIntervalSeconds() const;
+
     /** LCO twin of pollDriftRegen's stance loop: paces the LCO Re-Prompt off the
      *  SAME REGENERATE switchbox (drift_regen + its BPM). Called from
      *  timerCallback; exactly one of the two polls runs per tick (easyMode_). */
@@ -878,6 +910,12 @@ private:
     // by the 10 Hz timer and oscillate the status label between
     // "auto regen..." and the error message.
     double lastRegenFailureMs_ = 0.0;
+    // Last hold state handed to the processor. The 10 Hz poll would otherwise
+    // re-store the same atomic forever; at idle that is pure wasted work.
+    bool lastDriftGenHoldSent_ = false;
+    // Armed when a render fires while a take records; cleared the moment the
+    // freeze breaks, so only a render that was frozen end to end earns its step.
+    bool takeStepArmed_ = false;
     float alphaGhostValue_ = std::numeric_limits<float>::quiet_NaN();
     // Mode-specific ghosts: set when alpha-LFO offset is non-zero AND the
     // active mode targets the corresponding parameter. Painted via the same

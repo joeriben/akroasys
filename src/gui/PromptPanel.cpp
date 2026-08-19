@@ -3915,6 +3915,10 @@ void PromptPanel::triggerGeneration()
 
     generating = true;
     generateButton.setEnabled(false);
+    // A press while an offline take records consumes a cache point like any other
+    // entry — without the step it would record the frozen parameters a second time
+    // and put a duplicate in the middle of the trajectory.
+    takeStepArmed_ = isAsyncTakeRecording();
     if (onStatusChanged) onStatusChanged("generating...", true);
 
     auto req = buildInferenceRequest();
@@ -3941,7 +3945,8 @@ void PromptPanel::triggerGeneration()
                 self->generateButton.setEnabled(true);
                 if (result.success)
                 {
-                    processor.addInferenceCacheEntry(result.audio, result.sampleRate);
+                    self->stepOfflineTakeAfterCapture(
+                        processor.addInferenceCacheEntry(result.audio, result.sampleRate));
                     processor.loadGeneratedAudio(result.audio, result.sampleRate);
                     // The sound in the engine is now a new, unsaved one — drop the
                     // loaded/last-saved preset identity so Save stops pre-filling
@@ -4045,7 +4050,10 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
     // override it.)
     const bool stanceActiveForCache = static_cast<int>(processorRef.getValueTreeState()
         .getRawParameterValue(PID::repromptStance)->load()) != RepromptStance::Off;
-    if (processorRef.isInferenceCacheFull() && !stanceActiveForCache)
+    // ... unless the take was recorded offline: then it is a finished recording of
+    // that very evolution, in order, and replaying it is the point of having made it.
+    if (processorRef.isInferenceCacheFull()
+        && (!stanceActiveForCache || isAsyncCacheMode()))
     {
         playNextCachedInference();
         return;
@@ -4055,6 +4063,7 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
 
     generating = true;
     generateButton.setEnabled(false);
+    takeStepArmed_ = isAsyncTakeRecording();   // this render may consume a cache point
     if (onStatusChanged) onStatusChanged("auto regen...", true);
 
     auto req = buildInferenceRequest(effectiveAlpha, effectiveAxes, effectiveNoise, effectiveMagnitude,
@@ -4096,7 +4105,11 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                     int xfadeSamples = juce::roundToInt(xfadeMs * 0.001f * static_cast<float>(result.sampleRate));
                     if (xfadeSamples > 0 && oldRaw.getNumSamples() > 0)
                         applyDriftCrossfade(newAudio, oldRaw, xfadeSamples);
-                    processor.addInferenceCacheEntry(result.audio, result.sampleRate);
+                    // Offline take: this cache point is recorded, so the parameters
+                    // move on to the next one — by one cadence interval, not by
+                    // however long this render happened to take.
+                    self->stepOfflineTakeAfterCapture(
+                        processor.addInferenceCacheEntry(result.audio, result.sampleRate));
                     processor.loadGeneratedAudio(newAudio, result.sampleRate);
                     // Reveal the loop prompt that just became wirksam in this generation.
                     if (self->pendingLoopPromptA_.isNotEmpty())
@@ -4165,6 +4178,12 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
 PromptPanel::~PromptPanel()
 {
     stopTimer();
+    // The offline take's freeze is PROCESSOR state driven from here, and the
+    // processor outlives this panel: close the window mid-take and the generation-
+    // side Drift LFOs would stay frozen for the life of the instance, with the
+    // timer that could release them gone. Hand it back, like MainPanel does with
+    // every other processor-side hook.
+    processorRef.setDriftGenerationHold(false);
     if (processorRef.isReplayActive())
         processorRef.stopReplay();
 }
@@ -4342,10 +4361,98 @@ void PromptPanel::fireReplayGeneration(const GenerationEventLogEntry& logged)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Offline cache take (see the header for what it is for)
+// ──────────────────────────────────────────────────────────────────────────────
+bool PromptPanel::isAsyncCacheMode() const
+{
+    return processorRef.getValueTreeState()
+               .getRawParameterValue(PID::cacheAsync)->load() > 0.5f;
+}
+
+void PromptPanel::stepOfflineTakeAfterCapture(bool captured)
+{
+    // One step per CAPTURED entry, and only if the freeze held for that whole
+    // render. Anything that released it mid-flight (the LRO panel, a starting
+    // replay, the capacity set to Off) let the LFOs free-run meanwhile, so adding
+    // the full cadence step on top would advance them twice — machine-dependently,
+    // in the one feature that exists to be machine-independent.
+    if (! captured || ! takeStepArmed_)
+        return;
+    takeStepArmed_ = false;
+    processorRef.requestDriftGenerationStep(static_cast<float>(cadenceIntervalSeconds()));
+}
+
+bool PromptPanel::isAsyncTakeRecording() const
+{
+    // Manual is left exactly as it was: there is no cadence to step, a take fills
+    // one Generate press at a time and the drift keeps running between presses.
+    // Cache Off likewise — the switch records takes, it does not re-pace live play.
+    return isAsyncCacheMode()
+        && easyMode_
+        && ! processorRef.isReplayActive()
+        && processorRef.isInferenceCacheActive()
+        && ! processorRef.isInferenceCacheFull()
+        && driftCanCarryATake()
+        && processorRef.driftRegenMode.load(std::memory_order_relaxed) != 0;
+}
+
+bool PromptPanel::driftCanCarryATake() const
+{
+    // A take needs a Drift slot that actually MOVES a generation parameter: an armed
+    // target with its Amount still at zero moves nothing, and a take engaged on it
+    // would freeze nothing while overriding the change gate — i.e. render the SAME
+    // request into every entry of the cache, unasked. Amount defaults to 0, so the
+    // natural order (pick the target, then turn the knob up) passes straight through
+    // that state, and parking a drift by turning Amount back down returns to it.
+    //
+    // Read the USER's Amount, not the modulated one: an LFO→Drift-Amt routing crosses
+    // zero every cycle, and a precondition that follows it would make the freeze flap
+    // in the middle of a recording. A drift whose depth comes ONLY from such a routing
+    // therefore records live, exactly as it did before this switch existed.
+    auto& apvts = processorRef.getValueTreeState();
+    static constexpr struct { const char* target; const char* depth; } slots[] = {
+        { PID::drift1Target, PID::drift1Depth },
+        { PID::drift2Target, PID::drift2Depth },
+        { PID::drift3Target, PID::drift3Depth },
+    };
+    for (const auto& slot : slots)
+    {
+        const int target = static_cast<int>(apvts.getRawParameterValue(slot.target)->load());
+        if (DriftLFO::isGenerationTarget(target)
+            && std::abs(apvts.getRawParameterValue(slot.depth)->load()) > 0.0f)
+            return true;
+    }
+    return false;
+}
+
+double PromptPanel::cadenceIntervalSeconds() const
+{
+    // Same table as the cooldown below, with ASAP resolved to its 1-beat floor.
+    static constexpr int beatCounts[] = { 0, 1, 4, 8, 16, 32, 64 }; // man,asap,1/2/4/8/16 bar
+    const int mode = juce::jlimit(0, 6,
+        processorRef.driftRegenMode.load(std::memory_order_relaxed));
+    const float bpm = processorRef.driftRegenBpm.load(std::memory_order_relaxed);
+    return (beatCounts[mode] * 60.0) / static_cast<double>(juce::jmax(1.0f, bpm));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Drift regen polling (called from timerCallback at 10 Hz)
 // ──────────────────────────────────────────────────────────────────────────────
 void PromptPanel::pollDriftRegen()
 {
+    // Offline take: freeze or release the generation-side drift BEFORE any early
+    // return below. Most of them — a render in flight, a Re-Prompt step being
+    // written, the cadence cooldown, the LCO panel — are precisely the states the
+    // freeze exists to survive, so a hold applied further down would leak.
+    const bool holdGenDrift = isAsyncTakeRecording();
+    if (holdGenDrift != lastDriftGenHoldSent_)
+    {
+        processorRef.setDriftGenerationHold(holdGenDrift);
+        lastDriftGenHoldSent_ = holdGenDrift;
+        if (! holdGenDrift)
+            takeStepArmed_ = false;   // freeze broke: a render in flight no longer earns its step
+    }
+
     // A running tape owns the generation pipe: its own logged generations drive the
     // timbre, and an auto-regen firing alongside them would overwrite the sound the
     // replay just faded in.
@@ -4401,19 +4508,28 @@ void PromptPanel::pollDriftRegen()
     // generation (cache-fill path) is allowed to continue so the cache can
     // still pre-fill while the user is not playing.
     const bool fullCachePlayback = processorRef.isInferenceCacheFull();
+    // A finished offline take is played back like any other cache, stance or no
+    // stance: the take IS the recorded evolution, so it replays instead of being
+    // overridden by a live loop that would re-render it differently every cycle.
+    // The Re-Prompt exception below therefore stops applying once such a take is full.
+    const bool asyncTakePlayback = fullCachePlayback && isAsyncCacheMode();
     if (fullCachePlayback
         && processorRef.audioIdle.load(std::memory_order_relaxed)
-        && !stanceActive)   // Re-Prompt must keep rendering fresh audio to listen to
+        && (!stanceActive || asyncTakePlayback))   // Re-Prompt must keep rendering fresh audio to listen to
         return;
 
     // Bar-based cooldown: modes 2-6 = iterate every 1/2/4/8/16 bars (1 bar = 4
     // beats, expressed in beats below so the BPM→ms math is unchanged). When the
     // inference cache is full, ASAP (mode 1) is throttled to a 1-beat floor so
     // cache playback cannot run at the GUI polling rate.
-    if (regenMode >= 2 || (fullCachePlayback && regenMode == 1))
+    // The same 1-beat floor covers a RECORDING offline take: its step advances the
+    // drift by one cadence interval, and ASAP has none — every entry would sit on
+    // the same drift value and the take would record one sound N times.
+    const bool asapFloor = (regenMode == 1) && (fullCachePlayback || holdGenDrift);
+    if (regenMode >= 2 || asapFloor)
     {
         static constexpr int beatCounts[] = { 0, 0, 4, 8, 16, 32, 64 }; // man,asap,1/2/4/8/16 bar
-        int beats = fullCachePlayback && regenMode == 1
+        int beats = asapFloor
             ? 1
             : beatCounts[juce::jlimit(0, 6, regenMode)];
         float bpm = processorRef.driftRegenBpm.load(std::memory_order_relaxed);
@@ -4560,7 +4676,17 @@ void PromptPanel::pollDriftRegen()
     }
 
     bool randomRegen = processorRef.getLastRandomSeed();
-    if (!alphaChanged && !axesChanged && !noiseChanged && !magChanged && !promptChanged
+    // While an offline take records, the CADENCE is the trigger and this gate must
+    // not apply: the parameters stand still BY DESIGN, so "did anything move?" is
+    // the wrong question — and asking it deadlocks the take, because with the
+    // freeze on nothing outside this loop can ever move them again. Two ways in:
+    // a render that fails leaves the trackers holding the frozen values and no
+    // step is taken, and a step whose delta lands under DRIFT_THRESHOLD (near a
+    // waveform's turning point a half-cycle step is nearly self-cancelling) reads
+    // as "unchanged". Either one froze alpha/noise/magnitude/axes for good until
+    // the user toggled the switch. The cooldown above already paces the take.
+    if (!holdGenDrift
+        && !alphaChanged && !axesChanged && !noiseChanged && !magChanged && !promptChanged
         && !resynthLoop && !repromptLoop && !randomRegen)
         return;
 

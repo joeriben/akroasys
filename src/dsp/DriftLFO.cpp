@@ -101,15 +101,51 @@ void DriftLFO::tick(double dt)
         if (lfo.armed)   // beat-sync hold: stay at phase 0 until released
             continue;
 
-        lfo.phase += static_cast<double>(lfo.rate) * dt;
+        // Offline cache take: the generation-side LFOs stand still here and are
+        // moved by stepGenerationTargets() instead, one defined step per captured
+        // entry. Everything audible keeps running.
+        if (genHold && isGenerationTarget(lfo.target))
+            continue;
 
-        // Wrap phase to prevent precision loss
-        if (lfo.phase >= 1.0)
-        {
-            lfo.phase -= std::floor(lfo.phase);
-            if (lfo.waveform == SampleHold)
-                lfo.heldValue = nextRandom(lfo);
-        }
+        advancePhase(lfo, dt);
+    }
+}
+
+void DriftLFO::stepGenerationTargets(double dt)
+{
+    if (!active || dt <= 0.0)
+        return;
+
+    for (auto& lfo : lfos)
+    {
+        if (lfo.target == 0)   // target 0 = None
+            continue;
+
+        // An armed slot is parked at phase 0 until its downbeat and contributes
+        // nothing, so there is nothing to carry forward — it starts its cycle at 0
+        // when the sequencer releases it, which is what arming means. Arming can only
+        // begin mid-take through a clock-mode change, and that changes the slot's
+        // rate anyway: the take's exactness is over one setting, not across an edit.
+        if (lfo.armed)
+            continue;
+
+        if (! isGenerationTarget(lfo.target))
+            continue;
+
+        advancePhase(lfo, dt);
+    }
+}
+
+void DriftLFO::advancePhase(InternalLFO& lfo, double dt)
+{
+    lfo.phase += static_cast<double>(lfo.rate) * dt;
+
+    // Wrap phase to prevent precision loss
+    if (lfo.phase >= 1.0)
+    {
+        lfo.phase -= std::floor(lfo.phase);
+        if (lfo.waveform == SampleHold)
+            lfo.heldValue = nextRandom(lfo);
     }
 }
 

@@ -1724,6 +1724,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout T5ynthProcessor::createParam
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{PID::driftCrossfade, 1}, "Drift Crossfade",
         juce::NormalisableRange<float>(0.0f, 2000.0f, 1.0f), 200.0f));
+    // Offline cache take. Not automatable: it does not shape a sound, it decides
+    // how the cache RECORDS one — a take that is paced by the machine it runs on
+    // captures a different stretch of the drift on a fast box than on a slow one.
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{PID::cacheAsync, 1}, "Cache Offline Take", false,
+        juce::AudioParameterBoolAttributes().withAutomatable(false)));
     // Drift rate floor = 1/128 Hz = 128 s/cycle (≈ 64 bars @120 BPM): the slowest
     // genuinely useful drift on T5ynth's short sounds — slower than that the cycle
     // is effectively static within a note. Free mode displays the period (s/cyc);
@@ -3458,6 +3464,17 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         const int dc[3] = { static_cast<int>(paramCache.drift1ClockMode->load()),
                             static_cast<int>(paramCache.drift2ClockMode->load()),
                             static_cast<int>(paramCache.drift3ClockMode->load()) };
+        // A generation-side slot frozen for an offline cache take is not running in
+        // musical time at all — its phase is the RECORDING position and moves one
+        // cadence step per captured entry. Aligning that to a downbeat would throw
+        // the take back to the start of its trajectory (and redraw a sample-and-hold
+        // value) on a PLAY press, which is a transport action, not a Drift setting:
+        // the same take would then record differently depending on whether the
+        // sequencer happened to be running. There is nothing to align, so skip it.
+        const bool holdGen = driftGenHold_.load(std::memory_order_relaxed);
+        const int dt[3] = { static_cast<int>(paramCache.drift1Target->load()),
+                            static_cast<int>(paramCache.drift2Target->load()),
+                            static_cast<int>(paramCache.drift3Target->load()) };
         LFO* const lfoPtr[3] = { &lfo1, &lfo2, &lfo3 };
 
         for (int i = 0; i < 3; ++i)
@@ -3470,7 +3487,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 lfoPtr[i]->setArmed(false);
                 driftLfo.setLfoArmed(i, false);
                 if (lc[i] != ClockMode::Off) lfoPtr[i]->reset();
-                if (dc[i] != ClockMode::Off) driftLfo.resetLfoPhase(i);
+                if (dc[i] != ClockMode::Off && ! (holdGen && DriftLFO::isGenerationTarget(dt[i])))
+                    driftLfo.resetLfoPhase(i);
             }
             else
             {
@@ -5784,8 +5802,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // LFO → Drift depth ghosts
         {
             auto computeDriftDepthGhost = [&](const char* paramId,
-                                              int target) -> float
+                                              int target,
+                                              int driftTarget) -> float
             {
+                // While a take freezes a generation slot, its Amount modulation is
+                // suspended (see updateDriftState) — a ghost still sweeping there
+                // would show a movement the engine has stopped reading.
+                if (driftGenHold_.load(std::memory_order_relaxed)
+                    && DriftLFO::isGenerationTarget(driftTarget))
+                    return NO_GHOST;
                 bool lfo1Mod = bp.lfo1Target == target;
                 bool lfo2Mod = bp.lfo2Target == target;
                 bool lfo3Mod = bp.lfo3Target == target;
@@ -5803,13 +5828,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             };
 
             modulatedValues.drift1Depth.store(
-                computeDriftDepthGhost(PID::drift1Depth, LfoTarget::Drift1Depth),
+                computeDriftDepthGhost(PID::drift1Depth, LfoTarget::Drift1Depth,
+                                       static_cast<int>(paramCache.drift1Target->load())),
                 std::memory_order_relaxed);
             modulatedValues.drift2Depth.store(
-                computeDriftDepthGhost(PID::drift2Depth, LfoTarget::Drift2Depth),
+                computeDriftDepthGhost(PID::drift2Depth, LfoTarget::Drift2Depth,
+                                       static_cast<int>(paramCache.drift2Target->load())),
                 std::memory_order_relaxed);
             modulatedValues.drift3Depth.store(
-                computeDriftDepthGhost(PID::drift3Depth, LfoTarget::Drift3Depth),
+                computeDriftDepthGhost(PID::drift3Depth, LfoTarget::Drift3Depth,
+                                       static_cast<int>(paramCache.drift3Target->load())),
                 std::memory_order_relaxed);
         }
 
@@ -6109,9 +6137,19 @@ void T5ynthProcessor::updateDriftState(int numSamples, float syncBpm)
     const int lt1 = static_cast<int>(paramCache.lfo1Target->load());
     const int lt2 = static_cast<int>(paramCache.lfo2Target->load());
     const int lt3 = static_cast<int>(paramCache.lfo3Target->load());
-    auto modulatedDriftDepth = [&](const std::atomic<float>* depthParam, int target)
+    // Offline cache take, read here because the DEPTH has to freeze with the phase:
+    // getOffsetForTarget multiplies the two, so a main LFO routed to Drift-N Amt
+    // would keep a "held" generation value moving in real time and put machine
+    // timing straight back into the recorded trajectory. The knob alone is also what
+    // the take's precondition judges on (PromptPanel::driftCanCarryATake), so both
+    // ends speak about the same quantity. Audible slots keep their modulation.
+    const bool genHold = driftGenHold_.load(std::memory_order_relaxed);
+    auto modulatedDriftDepth = [&](const std::atomic<float>* depthParam, int target,
+                                   int driftTarget)
     {
         float depth = depthParam->load();
+        if (genHold && DriftLFO::isGenerationTarget(driftTarget))
+            return depth;
         if (lt1 == target) depth = applyNormalizedOffset(depth, lastLfo1Val_);
         if (lt2 == target) depth = applyNormalizedOffset(depth, lastLfo2Val_);
         if (lt3 == target) depth = applyNormalizedOffset(depth, lastLfo3Val_);
@@ -6119,17 +6157,28 @@ void T5ynthProcessor::updateDriftState(int numSamples, float syncBpm)
     };
 
     driftLfo.setLfoRate(0, driftRate(PID::drift1ClockMode, PID::drift1ClockDivision, PID::drift1Rate));
-    driftLfo.setLfoDepth(0, modulatedDriftDepth(paramCache.drift1Depth, LfoTarget::Drift1Depth));
+    driftLfo.setLfoDepth(0, modulatedDriftDepth(paramCache.drift1Depth, LfoTarget::Drift1Depth, d1t));
     driftLfo.setLfoTarget(0, d1t);
     driftLfo.setLfoWaveform(0, static_cast<int>(paramCache.drift1Wave->load()));
     driftLfo.setLfoRate(1, driftRate(PID::drift2ClockMode, PID::drift2ClockDivision, PID::drift2Rate));
-    driftLfo.setLfoDepth(1, modulatedDriftDepth(paramCache.drift2Depth, LfoTarget::Drift2Depth));
+    driftLfo.setLfoDepth(1, modulatedDriftDepth(paramCache.drift2Depth, LfoTarget::Drift2Depth, d2t));
     driftLfo.setLfoTarget(1, d2t);
     driftLfo.setLfoWaveform(1, static_cast<int>(paramCache.drift2Wave->load()));
     driftLfo.setLfoRate(2, driftRate(PID::drift3ClockMode, PID::drift3ClockDivision, PID::drift3Rate));
-    driftLfo.setLfoDepth(2, modulatedDriftDepth(paramCache.drift3Depth, LfoTarget::Drift3Depth));
+    driftLfo.setLfoDepth(2, modulatedDriftDepth(paramCache.drift3Depth, LfoTarget::Drift3Depth, d3t));
     driftLfo.setLfoTarget(2, d3t);
     driftLfo.setLfoWaveform(2, static_cast<int>(paramCache.drift3Wave->load()));
+
+    // Offline cache take. The hold has to be applied before the step and the step
+    // before the tick: the step is the take's move from one cache point to the
+    // next and must travel at the rates just written above, and it must land
+    // before tick() so a single block cannot both step and free-run. exchange()
+    // rather than load+store so a step requested between the two never vanishes.
+    driftLfo.setGenerationHold(genHold);
+    const float pendingDriftStep = driftGenStepSec_.exchange(0.0f, std::memory_order_relaxed);
+    if (pendingDriftStep > 0.0f)
+        driftLfo.stepGenerationTargets(static_cast<double>(pendingDriftStep));
+
     driftLfo.tick(static_cast<double>(numSamples) / getSampleRate());
 
     static constexpr float NO_GHOST = std::numeric_limits<float>::quiet_NaN();
@@ -8147,6 +8196,7 @@ juce::String T5ynthProcessor::exportJsonPreset() const
     root->setProperty("driftEnabled", get(PID::driftEnabled) > 0.5f);
     root->setProperty("driftCrossfade", get(PID::driftCrossfade));
     root->setProperty("regenMode", choiceToKey(getInt(PID::driftRegen), DriftRegen::kEntries));
+    root->setProperty("cacheAsync", get(PID::cacheAsync) > 0.5f);
 
     // Wavetable + Noise
     juce::DynamicObject::Ptr wt = new juce::DynamicObject();
@@ -8897,6 +8947,7 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
         setBoolParamFromJson(parameters, PID::driftEnabled, root, "driftEnabled");
         setParamFromJson(parameters, PID::driftCrossfade, root, "driftCrossfade");
         setChoiceParamFromJson(parameters, PID::driftRegen, root, "regenMode", DriftRegen::kEntries);
+        setBoolParamFromJson(parameters, PID::cacheAsync, root, "cacheAsync");
     }
 
     // ── Wavetable + Noise ──
