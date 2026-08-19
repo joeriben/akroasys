@@ -118,6 +118,7 @@ public:
             double sampleRate = 44100.0;
         };
         int inferenceCacheCapacity = 0;
+        bool inferenceCacheIsOfflineTake = false;
         std::vector<InferenceCacheAudio> inferenceCache;
 
         std::array<AxisState, 3> axes;

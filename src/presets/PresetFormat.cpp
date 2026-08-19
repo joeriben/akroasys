@@ -242,6 +242,9 @@ bool PresetFormat::saveToFile(const juce::File& file, T5ynthProcessor& processor
     {
         juce::DynamicObject::Ptr cacheMeta = new juce::DynamicObject();
         cacheMeta->setProperty("capacity", processor.getInferenceCacheCapacity());
+        // Whether these entries were RECORDED as an offline take travels with them:
+        // it is what decides that they replay over a running Re-Prompt stance.
+        cacheMeta->setProperty("offlineTake", processor.isInferenceCacheOfflineTake());
         juce::Array<juce::var> entries;
         for (const auto& entry : inferenceCacheEntries)
         {
@@ -596,12 +599,16 @@ PresetFormat::LoadResult PresetFormat::loadFromFile(const juce::File& file, T5yn
         if (auto* cacheMeta = root->getProperty("inferenceCache").getDynamicObject())
         {
             result.inferenceCacheCapacity = juce::jmax(0, static_cast<int>(cacheMeta->getProperty("capacity")));
+            // Absent in presets written before the offline take existed → false,
+            // which is the behaviour those files were saved under.
+            result.inferenceCacheIsOfflineTake = static_cast<bool>(cacheMeta->getProperty("offlineTake"));
             if (auto* entries = cacheMeta->getProperty("entries").getArray())
             {
                 for (auto& ev : *entries)
                 {
                     auto* em = ev.getDynamicObject();
-                    if (em == nullptr) { result.inferenceCache.clear(); result.inferenceCacheCapacity = 0; break; }
+                    if (em == nullptr) { result.inferenceCache.clear(); result.inferenceCacheCapacity = 0;
+                                     result.inferenceCacheIsOfflineTake = false; break; }
 
                     const int numChannels = static_cast<int>(em->getProperty("channels"));
                     const int numSamples = static_cast<int>(em->getProperty("numSamples"));
@@ -610,6 +617,7 @@ PresetFormat::LoadResult PresetFormat::loadFromFile(const juce::File& file, T5yn
                     {
                         result.inferenceCache.clear();
                         result.inferenceCacheCapacity = 0;
+                        result.inferenceCacheIsOfflineTake = false;
                         break;
                     }
 
@@ -620,6 +628,7 @@ PresetFormat::LoadResult PresetFormat::loadFromFile(const juce::File& file, T5yn
                     {
                         result.inferenceCache.clear();
                         result.inferenceCacheCapacity = 0;
+                        result.inferenceCacheIsOfflineTake = false;
                         break;
                     }
                     result.inferenceCache.push_back(std::move(cacheAudio));

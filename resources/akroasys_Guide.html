@@ -737,8 +737,9 @@ oscillator alone, because what it stores is rendered diffusion output.
 <p>
 The offline take applies while a cache is <em>recording</em>: it needs a cache
 size, a Regenerate setting other than Manual, and a Drift slot aimed at one of
-the generation parameters (Alpha, Noise, Magnitude, an Axis, Resynth). With the
-cache Off nothing about live play changes. While the take records, the Drift's
+the generation parameters (Alpha, Noise, Magnitude, an Axis, Resynth) with its
+Amount up. Where one of those is missing there is nothing to record, and the
+switch leaves play exactly as it is. With the cache Off nothing changes either. While the take records, the Drift's
 generation-side sweep stands still between cache points &mdash; the ghost
 markers hold their position, which is the recording waiting, not a stall.
 Everything the Drift can reach in the sound itself (filter, pitch, scan, delay,

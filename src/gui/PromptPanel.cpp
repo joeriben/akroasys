@@ -4050,10 +4050,13 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
     // override it.)
     const bool stanceActiveForCache = static_cast<int>(processorRef.getValueTreeState()
         .getRawParameterValue(PID::repromptStance)->load()) != RepromptStance::Off;
-    // ... unless the take was recorded offline: then it is a finished recording of
-    // that very evolution, in order, and replaying it is the point of having made it.
+    // ... unless the entries were recorded as an offline take: then they are a
+    // finished recording of that very evolution, in order, and replaying it is the
+    // point of having made it. Asked of the CACHE, not of the switch — with no
+    // generation-side Drift to freeze there is no recording, and the switch then
+    // leaves play exactly as it was (BJ, 19.08.2026: "async = sync, automatisch").
     if (processorRef.isInferenceCacheFull()
-        && (!stanceActiveForCache || isAsyncCacheMode()))
+        && (!stanceActiveForCache || processorRef.isInferenceCacheOfflineTake()))
     {
         playNextCachedInference();
         return;
@@ -4376,9 +4379,18 @@ void PromptPanel::stepOfflineTakeAfterCapture(bool captured)
     // replay, the capacity set to Off) let the LFOs free-run meanwhile, so adding
     // the full cadence step on top would advance them twice — machine-dependently,
     // in the one feature that exists to be machine-independent.
-    if (! captured || ! takeStepArmed_)
+    if (! captured)
+        return;                        // nothing was written: the cache is unchanged
+    if (! takeStepArmed_)
+    {
+        // This entry was recorded live — the switch was off, the mode was Manual, or
+        // the freeze broke while it rendered. The cache is then a mixture, and the
+        // playback rules that belong to a recording must not apply to it.
+        processorRef.setInferenceCacheOfflineTake(false);
         return;
+    }
     takeStepArmed_ = false;
+    processorRef.setInferenceCacheOfflineTake(true);
     processorRef.requestDriftGenerationStep(static_cast<float>(cadenceIntervalSeconds()));
 }
 
@@ -4512,7 +4524,7 @@ void PromptPanel::pollDriftRegen()
     // stance: the take IS the recorded evolution, so it replays instead of being
     // overridden by a live loop that would re-render it differently every cycle.
     // The Re-Prompt exception below therefore stops applying once such a take is full.
-    const bool asyncTakePlayback = fullCachePlayback && isAsyncCacheMode();
+    const bool asyncTakePlayback = fullCachePlayback && processorRef.isInferenceCacheOfflineTake();
     if (fullCachePlayback
         && processorRef.audioIdle.load(std::memory_order_relaxed)
         && (!stanceActive || asyncTakePlayback))   // Re-Prompt must keep rendering fresh audio to listen to

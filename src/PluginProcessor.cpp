@@ -6801,6 +6801,7 @@ void T5ynthProcessor::clearInferenceCache()
 {
     inferenceCacheEntries.clear();
     inferenceCachePlaybackIndex = 0;
+    inferenceCacheIsOfflineTake = false;   // whatever it held, it is gone with it
 }
 
 bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate)

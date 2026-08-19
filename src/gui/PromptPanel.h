@@ -94,6 +94,12 @@ public:
     // ends with the window.
     ~PromptPanel() override;
 
+    /** A preset load installs a FOREIGN cache. A render still in flight from the
+     *  previous sound lands afterwards and appends itself to it — that has always
+     *  been so — but it must not also stamp the loaded entries as an offline take
+     *  they were never part of. Called from the preset path. */
+    void disarmOfflineTakeStep() { takeStepArmed_ = false; }
+
     void paint(juce::Graphics& g) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent& e) override;

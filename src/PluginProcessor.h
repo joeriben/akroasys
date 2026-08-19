@@ -175,6 +175,17 @@ public:
     bool isInferenceCacheFull() const { return inferenceCacheCapacity > 0
                                              && static_cast<int>(inferenceCacheEntries.size()) >= inferenceCacheCapacity; }
     int getInferenceCacheCapacity() const { return inferenceCacheCapacity; }
+    /** True when the entries in the cache were recorded as an offline take, i.e.
+     *  the parameters really were frozen between them. It is this, not the switch
+     *  position, that lets a full cache replay over a running Re-Prompt stance: a
+     *  cache filled with the drift sweeping freely is not a recording of anything,
+     *  and with nothing to freeze the switch has to leave play exactly as it was. */
+    bool isInferenceCacheOfflineTake() const { return inferenceCacheIsOfflineTake; }
+    /** Set per captured entry: true while a take records them, false the moment one
+     *  is recorded live. Half a take is not a recording of anything, so a single
+     *  live entry disqualifies the whole cache — turning the switch off mid-fill,
+     *  or finishing the cache by hand, must not leave it claiming to be one. */
+    void setInferenceCacheOfflineTake(bool isTake) { inferenceCacheIsOfflineTake = isTake; }
     int getInferenceCacheFillCount() const { return static_cast<int>(inferenceCacheEntries.size()); }
     const std::vector<InferenceCacheEntry>& getInferenceCacheEntries() const { return inferenceCacheEntries; }
 
@@ -1121,6 +1132,7 @@ private:
     int inferenceCacheCapacity = 0;
     int inferenceCachePlaybackIndex = 0;
     std::vector<InferenceCacheEntry> inferenceCacheEntries;
+    bool inferenceCacheIsOfflineTake = false;
     std::atomic<bool>  driftGenHold_   { false };  // message->audio: freeze generation-side Drift
     std::atomic<float> driftGenStepSec_{ 0.0f };   // message->audio: pending take step, in seconds
 

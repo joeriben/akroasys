@@ -2272,11 +2272,15 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
     }
 
     processorRef.setInferenceCacheCapacity(0);
+    promptPanel.disarmOfflineTakeStep();   // an in-flight render must not claim this cache
     if (result.inferenceCacheCapacity > 0)
     {
         processorRef.setInferenceCacheCapacity(result.inferenceCacheCapacity);
         for (const auto& entry : result.inferenceCache)
             processorRef.addInferenceCacheEntry(entry.audio, entry.sampleRate);
+        // After the entries, not before: setInferenceCacheCapacity clears the flag
+        // along with the cache it is about.
+        processorRef.setInferenceCacheOfflineTake(result.inferenceCacheIsOfflineTake);
     }
     syncInferenceCacheUi();
 
