@@ -6778,7 +6778,10 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
 
 void T5ynthProcessor::setInferenceCacheCapacity(int capacity)
 {
-    static constexpr int kAllowed[] = { 0, 2, 4, 8, 16, 32, 64 };
+    // 32 and 64 were dropped: a preset carrying a take that deep runs to hundreds of
+    // megabytes, and the two switch cells they held now carry the offline-take mode
+    // (and, next, the MPE feature). A preset saved at either clamps to 16 below.
+    static constexpr int kAllowed[] = { 0, 2, 4, 8, 16 };
     int sanitized = 0;
     for (int allowed : kAllowed)
         if (capacity == allowed)

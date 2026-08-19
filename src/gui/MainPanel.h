@@ -61,7 +61,7 @@ private:
     bool showDimSegment_ = false;
     GenerateButton mainGenerateBtn { "GENERATE" };
     juce::Label snapLabel, cacheLabel;
-    static constexpr int kNumInfCacheButtons = 7;
+    static constexpr int kNumInfCacheButtons = 5;   // OFF / 2 / 4 / 8 / 16
     static constexpr int kNumSnapshotSlots = 4;
     static constexpr int kNumSnapshotButtons = kNumSnapshotSlots + 1;
 
@@ -137,6 +137,12 @@ private:
 
     SnapshotButton snapshotButtons[kNumSnapshotButtons];
     CacheCapButton infCacheButtons[kNumInfCacheButtons];
+    // The CACHE row's rightmost cell: a MODE, not a depth, so it sits outside the
+    // capacity radio group. 32 and 64 gave up their cells for it — a take that deep
+    // wrote presets of hundreds of megabytes. Attachment declared AFTER the button
+    // it drives (reverse destruction order).
+    CacheCapButton cacheAsyncBtn;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> cacheAsyncAttachment;
     juce::Rectangle<int> snapshotSwitchBounds;
     juce::Rectangle<int> cacheSwitchBounds;
     std::array<MainSnapshot, kNumSnapshotSlots> mainSnapshots;

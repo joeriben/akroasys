@@ -1206,10 +1206,10 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
 
     {
         static constexpr const char* labels[kNumInfCacheButtons] = {
-            "OFF", "2", "4", "8", "16", "32", "64"
+            "OFF", "2", "4", "8", "16"
         };
         static constexpr int values[kNumInfCacheButtons] = {
-            0, 2, 4, 8, 16, 32, 64
+            0, 2, 4, 8, 16
         };
         for (int i = 0; i < kNumInfCacheButtons; ++i)
         {
@@ -1229,6 +1229,26 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
             };
             addAndMakeVisible(b);
         }
+
+        // Offline take. Stands apart from the capacity cells (own switch, no
+        // radio group, no connected edges): it does not say how DEEP the cache
+        // records, it says that the parameters wait at each cache point until the
+        // render lands instead of sweeping on while the machine catches up.
+        // "A/S", not "ASYNC": at the minimum window width this row gives a cell
+        // ~17 pt, which already ellipsises OFF and 16. The take switch gets the
+        // width the two dropped depths freed (see the layout) and a label short
+        // enough to survive there; the tooltip carries the meaning.
+        cacheAsyncBtn.setButtonText("A/S");
+        styleSwitchButton(cacheAsyncBtn, kOscCol);
+        cacheAsyncBtn.setClickingTogglesState(true);
+        cacheAsyncBtn.setTooltip(
+            "Offline take: hold the generation parameters at each cache point until "
+            "the render lands, then step on by one Regenerate interval. The recorded "
+            "run is the same on a fast and a slow machine, and the Resynth/Re-Prompt "
+            "chain keeps every step. Applies while a cache is recording.");
+        addAndMakeVisible(cacheAsyncBtn);
+        cacheAsyncAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            processorRef.getValueTreeState(), PID::cacheAsync, cacheAsyncBtn);
     }
     syncSnapshotUi();
     syncInferenceCacheUi();
@@ -1694,6 +1714,9 @@ void MainPanel::setOscEasyMode(bool easy, bool persist)
         bCache.setEnabled(neural);
         bCache.setAlpha(dimA);
     }
+    cacheAsyncBtn.setVisible(true);
+    cacheAsyncBtn.setEnabled(neural);
+    cacheAsyncBtn.setAlpha(dimA);
     for (auto& bSrc : resynthSrcBtns)
         bSrc.setVisible(true);
     if (resynthRow)
@@ -3007,7 +3030,7 @@ void MainPanel::syncInferenceCacheUi()
     lastInfCacheUiFill = fill;
     lastInfCacheUiFull = full;
 
-    static constexpr int values[kNumInfCacheButtons] = { 0, 2, 4, 8, 16, 32, 64 };
+    static constexpr int values[kNumInfCacheButtons] = { 0, 2, 4, 8, 16 };
 
     // Pulse the *selected* button while the cache is filling. Once full,
     // pulsing stops and the button sits at solid kOscCol — that solid state
@@ -4233,13 +4256,27 @@ void MainPanel::resized()
             snapshotSwitchBounds = snapshotSwitchBounds.getUnion(snapshotButtons[i].getBounds());
 
         auto cacheGroup = snapCacheRow;
+        // What the two dropped depths bought: the word-shaped cells (OFF, 16, and
+        // the take switch) get the room the digits do not need, so the row reads at
+        // the minimum window width instead of ellipsising three of its six cells.
         static constexpr float cacheWeights[kNumInfCacheButtons] = {
-            1.35f, 1.00f, 1.00f, 1.00f, 1.12f, 1.12f, 1.12f
+            2.30f, 0.85f, 0.85f, 0.85f, 1.60f
         };
+        // The take switch takes the right end of the row, with a hairline gap: it is
+        // read as its own control, not as a sixth depth in the connected group.
+        {
+            constexpr float kAsyncWeight = 2.30f;
+            float capWeight = 0.0f;
+            for (float w : cacheWeights) capWeight += w;
+            const int asyncW = juce::jmax(1, juce::roundToInt(
+                static_cast<float>(cacheGroup.getWidth()) * kAsyncWeight / (capWeight + kAsyncWeight)));
+            cacheAsyncBtn.setBounds(cacheGroup.removeFromRight(asyncW).withTrimmedLeft(4));
+        }
         layoutWeightedButtons(infCacheButtons, kNumInfCacheButtons, cacheGroup, cacheWeights);
         cacheSwitchBounds = infCacheButtons[0].getBounds();
         for (int i = 1; i < kNumInfCacheButtons; ++i)
             cacheSwitchBounds = cacheSwitchBounds.getUnion(infCacheButtons[i].getBounds());
+        cacheSwitchBounds = cacheSwitchBounds.getUnion(cacheAsyncBtn.getBounds());
 
         // Resynth row beneath the snap/cache row: a "RESYNTH" left-title band + the
         // Off→Full slider to its right — the snap/cache treatment, just with a slider
