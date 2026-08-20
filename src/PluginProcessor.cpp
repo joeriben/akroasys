@@ -3266,6 +3266,29 @@ bool T5ynthProcessor::snapshotExternalCapture (juce::AudioBuffer<float>& dest,
 
 void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    // Hold the callback lock ourselves, for the whole block.
+    //
+    // Every off-thread publisher in this file takes getCallbackLock() before it
+    // touches engine state, and the whole publish discipline -- masterSampler's
+    // prepared load, masterFreeze's and masterOsc's snapshots, the traversal
+    // brackets, replayState_ -- assumes that taking it excludes the audio
+    // thread. On Standalone, VST3 and AU it does, because the JUCE wrapper holds
+    // it across this call. On CLAP it does not: clap-juce-extensions calls
+    // processBlock bare and its wrapper contains no getCallbackLock at all, so
+    // there the lock excluded nothing and every plain member a publisher writes
+    // -- originalBuffer, loop mode, the start/loop fractions, audioLoaded, the
+    // wavetable extract brackets -- was read here unsynchronised.
+    //
+    // juce::CriticalSection is recursive, so on the three formats whose wrapper
+    // already owns it this is a re-entry by the owning thread and costs an
+    // increment. On CLAP it establishes the exclusion the rest of the file was
+    // written for. This function takes no other lock anywhere in its 2600 lines,
+    // so there is no ordering to get wrong; what it does inherit on CLAP is the
+    // exposure the other three formats already have -- the audio thread can wait
+    // on a publisher, which is why publishers keep the expensive work outside
+    // the lock and only move already-prepared data inside it.
+    const juce::ScopedLock callbackLock (getCallbackLock());
+
     juce::ScopedNoDenormals noDenormals;
 
     // ── External-audio capture (Resynth init_audio source) ──────────────────
