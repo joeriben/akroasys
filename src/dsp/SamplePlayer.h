@@ -208,15 +208,23 @@ public:
      *  WavetableOscillator::morphToFramesFrom and FreezeTextureEngine::
      *  morphToBufferFrom; morphMs<=0 collapses to an instant swap.
      *
-     *  RT discipline: call ONLY on the audio thread, inside processBlock. That is
-     *  what makes this function's reads of master.playbackSnapshot_ and this
-     *  voice's own retiredSnapshot_ safe WITHOUT any atomics on the pointers
-     *  themselves: processBlock is locked by getCallbackLock() for its whole
-     *  duration on every shipped format (the JUCE wrapper takes it), and every
-     *  writer of these fields (applyPreparedPlaybackState's publish,
-     *  drainRetiredSnapshot's clear) holds that same lock explicitly off-thread.
-     *  Call this off the audio thread, or without that lock in effect, and the
-     *  swap races the publish/drain. The buffer being faded FROM is retained in
+     *  RT discipline: call ONLY on the audio thread (the thread that reads the
+     *  snapshot). master.playbackSnapshot_ and this voice's own retiredSnapshot_
+     *  are read/written here through the real atomic free-function API
+     *  (atomic_load/store/exchange_explicit), not plain access, because
+     *  getCallbackLock() does not cover every shipped format: the CLAP build
+     *  calls processBlock with NO lock held at all (the clap-juce-extensions
+     *  wrapper takes none — verified against clap-juce-wrapper.cpp: zero
+     *  getCallbackLock references, processBlock called bare at both its call
+     *  sites). The atomics are what actually excludes applyPreparedPlaybackState's
+     *  off-thread republish and drainRetiredSnapshot's off-thread exchange, on
+     *  every format including CLAP. getCallbackLock() (held by processBlock for
+     *  its whole duration on Standalone/VST3/AU only, NOT on CLAP) is a second,
+     *  redundant guard on those three formats and the real guard for this
+     *  class's other, non-atomic state — see playbackSnapshot_'s declaration
+     *  below for the full account. Call this off the audio thread and the swap
+     *  races the publish/drain regardless of the atomics. The buffer being
+     *  faded FROM is retained in
      *  morphFromSnapshot_; the snapshot it displaces is parked in a reclaim slot
      *  instead of being freed here, so the buffer free never lands on the audio
      *  thread — drainRetiredSnapshot() releases it off-thread. Pointer identity
@@ -241,13 +249,15 @@ public:
     void morphToBufferFrom(const SamplePlayer& master, float morphMs);
 
     /** Release the reclaim slot populated by morphToBufferFrom(). MUST be called
-     *  off the audio thread, under an explicit ScopedLock(getCallbackLock()),
-     *  sequenced before the master republishes its snapshot (frees the retired
-     *  snapshot's buffers). The clear here is a plain shared_ptr reset, not an
-     *  atomic one — that lock is the only thing excluding a concurrent
-     *  morphToBufferFrom park on the audio thread (itself covered by
-     *  processBlock's host-wrapper lock). Calling this without the lock held
-     *  races the audio thread. */
+     *  off the audio thread, sequenced before the master republishes its
+     *  snapshot (frees the retired snapshot's buffers). The clear here is an
+     *  atomic_exchange_explicit (acq_rel), not a plain reset — that is what
+     *  excludes a concurrent morphToBufferFrom park on the audio thread on
+     *  EVERY format, including CLAP, where processBlock runs under no lock at
+     *  all (see playbackSnapshot_'s declaration below). Also take an explicit
+     *  ScopedLock(getCallbackLock()) around the call: redundant with the atomic
+     *  on CLAP, but the only guard against another off-thread caller on
+     *  Standalone/VST3/AU, and against this object's other, non-atomic state. */
     void drainRetiredSnapshot();
 
     // ─── Modes and processing ───
@@ -323,23 +333,34 @@ private:
     // playBuffer is used for steady-state looping; firstPassBuffer preserves
     // the linear source path until the first loop boundary has been crossed.
     juce::AudioBuffer<float> playBuffer;
-    // On a MASTER instance: published by applyPreparedPlaybackState, always
-    // under an explicit ScopedLock(getCallbackLock()). On a VOICE instance:
-    // written only by this object's own shareBufferFrom/morphToBufferFrom, both
-    // reachable only on the audio thread inside processBlock or off-thread
-    // under that same lock. Plain shared_ptr, no atomics — getCallbackLock() is
-    // the ONLY synchronization; a read or write of this field outside that
-    // lock (on either the master or a voice) is a data race.
+    // On a MASTER instance: published by applyPreparedPlaybackState via
+    // atomic_store_explicit (release), always under an explicit
+    // ScopedLock(getCallbackLock()) too. On a VOICE instance: written by this
+    // object's own morphToBufferFrom (atomic_store_explicit, release) or
+    // shareBufferFrom (plain — voice-owned, see that function). Read via
+    // atomic_load_explicit (acquire) in shareBufferFrom/morphToBufferFrom.
+    // The atomics, NOT getCallbackLock(), are what makes this field safe on
+    // every shipped format: the CLAP build calls processBlock with no lock
+    // held at all (clap-juce-extensions' wrapper takes none — verified against
+    // clap-juce-wrapper.cpp), so on CLAP the lock protects nothing here.
+    // getCallbackLock() (held by processBlock for its whole duration on
+    // Standalone/VST3/AU only) is a real, second guard on those three formats
+    // — do not drop it trusting the atomics alone — but it is not sufficient
+    // by itself, so do not drop the atomics trusting the lock alone either.
     std::shared_ptr<const PlaybackSnapshot> playbackSnapshot_;
     // Reclaim slot for morphToBufferFrom(): the audio thread MOVES the snapshot it
     // displaces from the crossfade here (never dropping the last reference on the
     // audio thread) so the std::vector free is deferred. drainRetiredSnapshot() —
     // off-thread, sequenced before the master republishes — releases it. Single
     // slot: the audio thread parks at most once per regenerate (the only event
-    // that changes the master snapshot), and each regenerate drains first. Plain
-    // shared_ptr: the audio-thread park (inside processBlock, host-wrapper
-    // locked) and the off-thread drain (explicit ScopedLock(getCallbackLock()))
-    // are mutually excluded by that one lock, not by any atomicity of this field.
+    // that changes the master snapshot), and each regenerate drains first.
+    // Accessed through atomic_load/store/exchange_explicit on both sides (the
+    // audio-thread park in morphToBufferFrom, the off-thread drain in
+    // drainRetiredSnapshot) — that pairing, not getCallbackLock(), is what
+    // excludes the two from overlapping on CLAP, where processBlock holds no
+    // lock. getCallbackLock() is still taken around the off-thread drain, and
+    // still matters on Standalone/VST3/AU and against this class's other
+    // plain state, but is not this field's guard on its own.
     std::shared_ptr<const PlaybackSnapshot> retiredSnapshot_;
     // The buffer a held voice is fading FROM during a Drift-Crossfade adopt
     // (morphToBufferFrom). Audio-thread-owned: written and read per-sample on the

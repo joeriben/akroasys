@@ -223,15 +223,22 @@ namespace
                 if (noteOnFirst && b == 0)
                     midi.addEvent (juce::MidiMessage::noteOn (1, c.note, (juce::uint8) 100), 0);
                 {
-                    // Every shipped host wrapper (Standalone/VST3/AU) holds
-                    // getCallbackLock() for the whole processBlock call — see
-                    // juce_AudioProcessorPlayer.cpp, juce_audio_plugin_client_VST3.cpp,
-                    // juce_audio_plugin_client_AU_1.mm. SamplePlayer's snapshot
-                    // pointers are now plain (no atomics) and rely on that lock
-                    // alone; reproduce it here so this harness's concurrency
-                    // against samplerReprepareThread matches production instead
-                    // of silently depending on synchronization the real host
-                    // provides but this direct call did not.
+                    // Three of the four shipped host wrappers (Standalone, VST3,
+                    // AU) hold getCallbackLock() for the whole processBlock call —
+                    // see juce_AudioProcessorPlayer.cpp,
+                    // juce_audio_plugin_client_VST3.cpp,
+                    // juce_audio_plugin_client_AU_1.mm. The fourth, CLAP, does
+                    // NOT (verified against clap-juce-wrapper.cpp: zero
+                    // getCallbackLock references, processBlock called bare), so
+                    // SamplePlayer's snapshot pointers publish/read through the
+                    // real atomic free-function API — that is what this harness's
+                    // correctness actually depends on, on every format. The lock
+                    // here is not load-bearing for that; it is taken anyway so
+                    // this harness's concurrency against samplerReprepareThread
+                    // matches actual Standalone/VST3/AU production conditions
+                    // (rather than testing only the CLAP-shaped unlocked case,
+                    // which this direct processBlock() call does not otherwise
+                    // reproduce).
                     const juce::ScopedLock sl (proc.getCallbackLock());
                     proc.processBlock (buf, midi);
                 }

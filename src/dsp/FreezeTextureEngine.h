@@ -35,16 +35,20 @@ public:
     void prepare(double sampleRate, int samplesPerBlock);
     void reset();
 
-    /** Build AND publish a new snapshot in one call. Ends in a PLAIN assignment
-     *  into publishedSnapshot_ (see its declaration below, and publishSnapshot()),
-     *  so the caller MUST already hold getCallbackLock(). The one production call
-     *  site (serviceSamplerReprepare) is inside an explicit ScopedLock; the other
-     *  two production sites (loadGeneratedAudio, reloadProcessedAudio) use
-     *  prepareBufferLoad()/applyPreparedBufferLoad() below instead, specifically
-     *  to keep the expensive mixdown off the lock. A handful of offline
-     *  tools-dir *.cpp harnesses also call this directly on a freshly constructed,
-     *  single-threaded engine with no concurrent reader — safe there with no
-     *  lock at all, because nothing else touches that instance. */
+    /** Build AND publish a new snapshot in one call. Ends in an atomic_store_explicit
+     *  (release) into publishedSnapshot_ (see its declaration below, and
+     *  publishSnapshot()) — real atomics, not a lock, because getCallbackLock()
+     *  does not cover every shipped format: the CLAP build calls processBlock
+     *  with no lock held at all (verified against clap-juce-wrapper.cpp — zero
+     *  getCallbackLock references). The one production call site
+     *  (serviceSamplerReprepare) also happens to be inside an explicit
+     *  ScopedLock, for OTHER state it touches; the other two production sites
+     *  (loadGeneratedAudio, reloadProcessedAudio) use prepareBufferLoad()/
+     *  applyPreparedBufferLoad() below instead, specifically to keep the
+     *  expensive mixdown off the lock. A handful of offline tools-dir *.cpp
+     *  harnesses also call this directly on a freshly constructed,
+     *  single-threaded engine with no concurrent reader — safe there regardless
+     *  of lock or atomics, because nothing else touches that instance. */
     void loadBuffer(const juce::AudioBuffer<float>& buffer, double bufferSampleRate);
 
     /** Off-lock compute phase of loadBuffer(): mixes `buffer` down to mono into
@@ -54,17 +58,24 @@ public:
      *  loadBuffer() always mutated it (pre-existing, not a hazard introduced by
      *  this split). The allocation + per-sample mixdown is the expensive part,
      *  kept off getCallbackLock() so it never delays the audio thread's next
-     *  processBlock. Empty/invalid `buffer` returns nullptr (matches loadBuffer's
-     *  early-out). Pass the result to applyPreparedBufferLoad() to publish it. */
+     *  processBlock (where that lock is even held — see applyPreparedBufferLoad).
+     *  Empty/invalid `buffer` returns nullptr (matches loadBuffer's early-out).
+     *  Pass the result to applyPreparedBufferLoad() to publish it. */
     SnapshotPtr prepareBufferLoad(const juce::AudioBuffer<float>& buffer, double bufferSampleRate);
 
-    /** Publish phase: MUST be called under an explicit ScopedLock(getCallbackLock()).
-     *  This is a PLAIN assignment into publishedSnapshot_, not an atomic one, so
-     *  the lock is the ONLY thing preventing a torn read / UAF against the
-     *  audio-thread readers (hasAudio(), processSampleStereo()'s
-     *  loadPublishedSnapshot()) — processBlock holds the SAME lock for its whole
-     *  duration on every shipped format (Standalone/VST3/AU — the JUCE wrapper
-     *  locks it). Pass nullptr for an empty/invalid buffer. */
+    /** Publish phase. This is an atomic_store_explicit (release) into
+     *  publishedSnapshot_, paired with the atomic_load_explicit (acquire) in
+     *  loadPublishedSnapshot() — that pairing, not a lock, is what prevents a
+     *  torn read / UAF against the audio-thread readers (hasAudio(),
+     *  processSampleStereo()) on every shipped format. getCallbackLock() does
+     *  NOT cover this on its own: processBlock holds it for its whole duration
+     *  on Standalone/VST3/AU, but the CLAP build calls processBlock with no
+     *  lock at all (verified against clap-juce-wrapper.cpp — zero
+     *  getCallbackLock references, processBlock called bare). Call this under
+     *  an explicit ScopedLock(getCallbackLock()) anyway — real and necessary on
+     *  the other three formats, and for this class's non-atomic state — but do
+     *  not treat the lock as sufficient by itself. Pass nullptr for an
+     *  empty/invalid buffer. */
     void applyPreparedBufferLoad(SnapshotPtr snapshot);
 
     void shareBufferFrom(const FreezeTextureEngine& master);
@@ -133,10 +144,12 @@ private:
         float pitchCents = 2.0f;
     };
 
-    // Plain accessors for publishedSnapshot_/morphFromSnapshot_ — see the lock
-    // contract on those members' declarations below. No atomics anywhere in
-    // these four; the caller's getCallbackLock() (explicit off-thread, ambient
-    // via processBlock on the audio thread) is what makes every call site safe.
+    // Atomic accessors for publishedSnapshot_/morphFromSnapshot_ — see the lock
+    // contract on those members' declarations below. Real atomic_load/store_explicit
+    // in all four, because getCallbackLock() does not cover the CLAP build (no
+    // lock around processBlock there); the caller's getCallbackLock() (explicit
+    // off-thread, ambient via processBlock on Standalone/VST3/AU) is a second
+    // guard, real on those formats but not what makes every call site safe.
     SnapshotPtr loadPublishedSnapshot() const;
     void publishSnapshot(SnapshotPtr snapshot);
     SnapshotPtr loadMorphFromSnapshot() const;
@@ -160,20 +173,26 @@ private:
     int getGrainDurationSamples() const;
     int getNextHopSamples(const GrainCloud& cloud, int grainDurationSamples) const;
 
-    // Published buffer state. Both are PLAIN shared_ptr fields — no atomic<>
-    // wrapper, no atomic free-function access anywhere in this file — so
-    // getCallbackLock() is the ONLY synchronization. Every write goes through
-    // publishSnapshot()/publishMorphFromSnapshot() (loadBuffer,
-    // applyPreparedBufferLoad, reset, shareBufferFrom, morphToBufferFrom);
-    // every read goes through loadPublishedSnapshot()/loadMorphFromSnapshot()
-    // (hasAudio(), processSampleStereo(), morphToBufferFrom(),
-    // shareBufferFrom()). Some of those run on the audio thread, inside
-    // processBlock, which holds getCallbackLock() for its whole duration on
-    // every shipped format (Standalone/VST3/AU — the JUCE wrapper locks it);
-    // others run on the message thread or the samplerReprepareThread worker,
-    // each taking the same lock explicitly. There is never a concurrent
-    // unlocked touch. Without that lock this is an unprotected shared_ptr
-    // race — torn reads and use-after-free, not a benign data race.
+    // Published buffer state. Both go through the real atomic free-function API
+    // (atomic_load/store_explicit, acquire/release) — see publishSnapshot() /
+    // publishMorphFromSnapshot() / loadPublishedSnapshot() / loadMorphFromSnapshot()
+    // above. Every write goes through publishSnapshot()/publishMorphFromSnapshot()
+    // (loadBuffer, applyPreparedBufferLoad, reset, shareBufferFrom,
+    // morphToBufferFrom); every read goes through loadPublishedSnapshot()/
+    // loadMorphFromSnapshot() (hasAudio(), processSampleStereo(),
+    // morphToBufferFrom(), shareBufferFrom()). Some of those run on the audio
+    // thread, inside processBlock — locked by getCallbackLock() for its whole
+    // duration on Standalone/VST3/AU, but NOT on CLAP: the clap-juce-extensions
+    // wrapper calls processBlock with no lock held at all (verified against
+    // clap-juce-wrapper.cpp — zero getCallbackLock references, processBlock
+    // called bare). The atomics are what actually excludes the audio thread on
+    // every format, CLAP included; the message thread and the
+    // samplerReprepareThread worker ALSO take getCallbackLock() explicitly
+    // around their writes, which is real and matters on the other three
+    // formats and against this class's non-atomic state, but is not this
+    // field's guard on its own. Without the atomics this is an unprotected
+    // shared_ptr race on CLAP — torn reads and use-after-free, not a benign
+    // data race.
     SnapshotPtr publishedSnapshot_;
     SnapshotPtr morphFromSnapshot_;   // old buffer retained during a crossfade; same lock discipline as publishedSnapshot_ above
 
@@ -216,15 +235,19 @@ private:
     // morph setup. morphToBufferFrom (message/reprepare thread) writes morphCloud_,
     // the snapshots, morphAlpha_ and morphIncrement_ and THEN stores morphActive_
     // with release; processSampleStereo (audio thread) loads it with acquire FIRST.
-    // That happens-before edge makes the setup visible across the message→audio
-    // hand-off on weakly-ordered cores (Apple Silicon). NOTE: processBlock DOES hold
-    // getCallbackLock() on every shipped format (Standalone/VST3/AU — the JUCE wrapper
-    // locks it), and the off-thread morphToBufferFrom takes the same lock, so the two
-    // are in fact mutually excluded — this release/acquire is belt-and-suspenders, not
-    // the sole guard; do NOT drop the lock trusting it. Were that lock guarantee ever
-    // lost, the morphAlpha_/grain writes during a *re*-morph (morphActive_ already
-    // true) would race — but only as the same crash-safe, glitch-only POD race
-    // Wavetable accepts (aligned fields, clamped reads, no pointers in Grain).
+    // That happens-before edge is what makes the setup visible across the
+    // message→audio hand-off on weakly-ordered cores (Apple Silicon) — on EVERY
+    // format, not as belt-and-suspenders: processBlock holds getCallbackLock()
+    // for its whole duration on Standalone/VST3/AU, but the CLAP build calls
+    // processBlock with no lock at all (verified against clap-juce-wrapper.cpp —
+    // zero getCallbackLock references), so on CLAP this release/acquire is the
+    // ONLY guard, not a redundant one — do NOT drop it trusting the lock. Where
+    // the lock IS in effect (Standalone/VST3/AU), it excludes the same two
+    // sides again, redundantly; do not drop the atomic trusting the lock either.
+    // On CLAP, the morphAlpha_/grain writes during a *re*-morph (morphActive_
+    // already true) DO race — accepted as the same crash-safe, glitch-only POD
+    // race Wavetable accepts (aligned fields, clamped reads, no pointers in
+    // Grain), a real case on that format, not a hypothetical.
     std::atomic<bool> morphActive_ { false };
     float morphAlpha_ = 1.0f;       // 0 = all old buffer, 1 = all new buffer
     float morphIncrement_ = 0.0f;

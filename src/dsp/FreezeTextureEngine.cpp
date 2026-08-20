@@ -35,10 +35,11 @@ void FreezeTextureEngine::reset()
     // Every path into reset() starts at T5ynthProcessor::releaseResources(),
     // which takes an explicit ScopedLock(getCallbackLock()) around it: the
     // master instance directly, the per-voice ones through VoiceManager::reset()
-    // -> SynthVoice::reset(). (And per releaseResources' JUCE contract the audio
-    // thread is stopped besides.) So this plain publish/clear can never race a
-    // reader, and releasing the retained morph snapshot here is safe even if it
-    // is the last reference.
+    // -> SynthVoice::reset(). Per releaseResources' JUCE contract the audio
+    // thread is stopped besides, on every format — so this publish/clear
+    // (through publishSnapshot()/publishMorphFromSnapshot()'s real atomics)
+    // can never race a reader regardless of lock or atomics, and releasing the
+    // retained morph snapshot here is safe even if it is the last reference.
     publishSnapshot(nullptr);
     publishMorphFromSnapshot(nullptr);
     retiredPublished_.reset();
@@ -93,8 +94,11 @@ FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::prepareBufferLoad(const ju
 
 void FreezeTextureEngine::applyPreparedBufferLoad(SnapshotPtr snapshot)
 {
-    // See this function's doc comment in the header: caller MUST already hold
-    // getCallbackLock() — this is a plain publish, not an atomic one.
+    // See this function's doc comment in the header: publishSnapshot() below
+    // is a real atomic_store_explicit (release) — the atomics are what cover
+    // CLAP; call this under an explicit ScopedLock(getCallbackLock()) too,
+    // which is real and necessary on Standalone/VST3/AU and for this class's
+    // non-atomic state, but is not sufficient by itself.
     publishSnapshot(std::move(snapshot));
 }
 
@@ -344,31 +348,34 @@ void FreezeTextureEngine::processSampleStereo(float& left, float& right)
     }
 }
 
-// Plain shared_ptr access — no atomic<> wrapper, no atomic free functions. The
-// lock contract lives on publishedSnapshot_/morphFromSnapshot_'s declarations
-// in the header: getCallbackLock() (explicit off-thread, ambient via
-// processBlock on the audio thread) is the sole guard against a concurrent
-// touch. Called unprotected ONLY by the single-threaded tools-dir *.cpp harnesses
-// noted on loadBuffer()'s doc comment, where no lock is needed because nothing
+// Real atomic free-function access (atomic_load/store_explicit, acquire/
+// release) — see publishedSnapshot_/morphFromSnapshot_'s declarations in the
+// header for why: getCallbackLock() does not cover the CLAP build (no lock
+// around processBlock there), so the atomics, not the lock, are the guard
+// that holds on every format. The caller's getCallbackLock() (explicit
+// off-thread, ambient via processBlock on Standalone/VST3/AU) is a second,
+// real guard on those three formats. Called unprotected ONLY by the
+// single-threaded tools-dir *.cpp harnesses noted on loadBuffer()'s doc
+// comment, where neither the atomics nor a lock are needed because nothing
 // else touches that instance.
 FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::loadPublishedSnapshot() const
 {
-    return publishedSnapshot_;
+    return std::atomic_load_explicit(&publishedSnapshot_, std::memory_order_acquire);
 }
 
 void FreezeTextureEngine::publishSnapshot(SnapshotPtr snapshot)
 {
-    publishedSnapshot_ = std::move(snapshot);
+    std::atomic_store_explicit(&publishedSnapshot_, snapshot, std::memory_order_release);
 }
 
 FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::loadMorphFromSnapshot() const
 {
-    return morphFromSnapshot_;
+    return std::atomic_load_explicit(&morphFromSnapshot_, std::memory_order_acquire);
 }
 
 void FreezeTextureEngine::publishMorphFromSnapshot(SnapshotPtr snapshot)
 {
-    morphFromSnapshot_ = std::move(snapshot);
+    std::atomic_store_explicit(&morphFromSnapshot_, snapshot, std::memory_order_release);
 }
 
 void FreezeTextureEngine::resetCloud(GrainCloud& cloud)

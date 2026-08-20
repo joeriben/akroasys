@@ -21,22 +21,23 @@ void WavetableOscillator::reset()
         morphAlpha_ = 1.0f;
 }
 
-// Plain shared_ptr access — no atomic<> wrapper, no atomic free functions. The
-// lock contract lives on publishedMipData_'s declaration in the header:
-// getCallbackLock() (explicit off-thread, ambient via processBlock on the audio
-// thread) is the sole guard against a concurrent touch. Readers: hasFrames(),
-// getNumFrames(), snapshotLevel0Frames(), snapshotAdditiveBank(), processSample()
-// (audio thread, only while adopting a first bank — see its own comment),
-// shareFramesFrom()/morphToFramesFrom() (cross-instance, reading a MASTER's
-// published data). Writers: applyPreparedMipData() (the prepareXXXFrames()/
-// prepareMipLevels() family and setAdditiveBank()), adoptMipData(),
-// beginMorphToMipData(), shareFramesFrom(), morphToFramesFrom(). Called
-// unprotected ONLY by the single-threaded tools-dir *.cpp harnesses noted on
-// extractFramesFromBuffer()'s doc comment, where no lock is needed because
-// nothing else touches that instance.
+// Real atomic free-function access (atomic_load/store_explicit, acquire/
+// release). The full contract lives on publishedMipData_'s declaration in the
+// header: getCallbackLock() does not cover the CLAP build (no lock around
+// processBlock there), so the atomics, not the lock, are the guard that holds
+// on every format. Readers: hasFrames(), getNumFrames(), snapshotLevel0Frames(),
+// snapshotAdditiveBank(), processSample() (audio thread, only while adopting a
+// first bank — see its own comment), shareFramesFrom()/morphToFramesFrom()
+// (cross-instance, reading a MASTER's published data). Writers:
+// applyPreparedMipData() (the prepareXXXFrames()/prepareMipLevels() family and
+// setAdditiveBank()), adoptMipData(), beginMorphToMipData(), shareFramesFrom(),
+// morphToFramesFrom(). Called unprotected ONLY by the single-threaded
+// tools-dir *.cpp harnesses noted on extractFramesFromBuffer()'s doc comment,
+// where neither the atomics nor a lock are needed because nothing else
+// touches that instance.
 WavetableOscillator::MipDataPtr WavetableOscillator::loadPublishedMipData() const
 {
-    return publishedMipData_;
+    return std::atomic_load_explicit(&publishedMipData_, std::memory_order_acquire);
 }
 
 bool WavetableOscillator::hasFrames() const
@@ -118,8 +119,9 @@ void WavetableOscillator::adoptMipData(MipDataPtr mipData, bool seedAdditivePhas
     if (mipData == nullptr)
         return;
 
-    // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
-    publishedMipData_ = mipData;
+    // Atomic publish (release) — see loadPublishedMipData()'s comment for the
+    // full contract; the atomics, not getCallbackLock() alone, cover CLAP.
+    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
     activeMorphMipData_ = mipData;
     targetMorphMipData_.reset();
     morphAlpha_ = 1.0f;
@@ -140,8 +142,9 @@ void WavetableOscillator::beginMorphToMipData(const MipDataPtr& mipData)
     if (mipData == nullptr)
         return;
 
-    // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
-    publishedMipData_ = mipData;
+    // Atomic publish (release) — see loadPublishedMipData()'s comment for the
+    // full contract; the atomics, not getCallbackLock() alone, cover CLAP.
+    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
 
     if (activeMorphMipData_ == nullptr || activeMorphMipData_->numFrames == 0)
     {
@@ -213,8 +216,9 @@ void WavetableOscillator::shareFramesFrom(const WavetableOscillator& source)
         && activeMorphMipData_->generation == mipData->generation;
     if (sameActive && !morphActive_)
     {
-        // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
-        publishedMipData_ = mipData;
+        // Atomic publish (release) — see loadPublishedMipData()'s comment for
+        // the full contract; the atomics, not getCallbackLock() alone, cover CLAP.
+        std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
         return;
     }
 
@@ -230,8 +234,9 @@ void WavetableOscillator::morphToFramesFrom(const WavetableOscillator& source)
     if (mipData == nullptr)
         return;
 
-    // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
-    publishedMipData_ = mipData;
+    // Atomic publish (release) — see loadPublishedMipData()'s comment for the
+    // full contract; the atomics, not getCallbackLock() alone, cover CLAP.
+    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
 
     const bool sameActive = activeMorphMipData_ != nullptr
         && activeMorphMipData_->generation == mipData->generation;
@@ -354,21 +359,27 @@ WavetableOscillator::MipDataPtr WavetableOscillator::prepareMipLevels(const std:
 void WavetableOscillator::applyPreparedMipData(MipDataPtr mipData)
 {
     // Publish phase for prepareMipLevels() and its three prepareXXXFrames()
-    // callers: MUST be called under an explicit ScopedLock(getCallbackLock()) —
-    // this is a PLAIN assignment into publishedMipData_, not an atomic one, so
-    // the lock is the ONLY thing preventing a torn read / UAF against the
-    // audio-thread readers (hasFrames(), getNumFrames(), processSample()'s
-    // loadPublishedMipData(), and shareFramesFrom()/morphToFramesFrom() reading a
-    // MASTER's published data cross-instance) — processBlock holds the SAME lock
-    // for its whole duration on every shipped format (Standalone/VST3/AU — the
-    // JUCE wrapper locks it). A nullptr snapshot is a no-op: every prepare*()
-    // early-out returns nullptr to mean "leave the previous bank untouched", not
+    // callers (and setAdditiveBank()): an atomic_store_explicit (release) into
+    // publishedMipData_, paired with the atomic_load_explicit (acquire) in
+    // loadPublishedMipData() — that pairing, not a lock, is what prevents a
+    // torn read / UAF against the audio-thread readers (hasFrames(),
+    // getNumFrames(), processSample(), and shareFramesFrom()/
+    // morphToFramesFrom() reading a MASTER's published data cross-instance) on
+    // every shipped format. getCallbackLock() does NOT cover this on its own:
+    // processBlock holds it for its whole duration on Standalone/VST3/AU, but
+    // the CLAP build calls processBlock with no lock at all (verified against
+    // clap-juce-wrapper.cpp — zero getCallbackLock references, processBlock
+    // called bare). Call this under an explicit ScopedLock(getCallbackLock())
+    // anyway — real and necessary on the other three formats, and for this
+    // class's non-atomic state — but do not treat the lock as sufficient by
+    // itself. A nullptr snapshot is a no-op: every prepare*() early-out
+    // returns nullptr to mean "leave the previous bank untouched", not
     // "clear it" (unlike FreezeTextureEngine::applyPreparedBufferLoad, which DOES
     // publish nullptr — the two engines' pre-existing empty-input behaviour differs
     // and this preserves each one exactly).
     if (mipData == nullptr)
         return;
-    publishedMipData_ = std::move(mipData);
+    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
 }
 
 // ─── Pitch detection (simplified YIN autocorrelation) ───
@@ -888,13 +899,16 @@ void WavetableOscillator::setAdditiveBank(const std::vector<std::vector<Additive
 
     // Build the additive-bank payload. No frames, no mips: the partials are
     // synthesized per sample, so this bypasses prepareMipLevels entirely. Publishes
-    // via the same applyPreparedMipData() plain-assignment-under-lock path
-    // prepareMipLevels' callers use — voices pick it up via shareFramesFrom /
-    // morphToFramesFrom exactly like a wavetable generation. NOTE: unlike those,
-    // this function has no production caller today (only tools-dir *.cpp harnesses,
-    // single-threaded, no lock needed there) — see loadPublishedMipData()'s
-    // comment. A future production caller MUST hold getCallbackLock() around it,
-    // same as extractFramesFromBuffer()'s convenience form.
+    // via the same applyPreparedMipData() atomic-publish path prepareMipLevels'
+    // callers use — voices pick it up via shareFramesFrom / morphToFramesFrom
+    // exactly like a wavetable generation. NOTE: unlike those, this function
+    // has no production caller today (only tools-dir *.cpp harnesses,
+    // single-threaded, no lock or atomics needed there) — see
+    // loadPublishedMipData()'s comment. A future production caller MUST hold
+    // getCallbackLock() around it too, same as extractFramesFromBuffer()'s
+    // convenience form — the atomics cover the publish on every format, but
+    // the lock is still needed on Standalone/VST3/AU and for this class's
+    // other, non-atomic state.
     auto dest = std::make_shared<MipData>();
     dest->isAdditive = true;
     dest->numFrames = 1;   // sentinel: hasFrames()/processSample treat the bank as "has data"

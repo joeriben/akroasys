@@ -1163,7 +1163,13 @@ bool T5ynthProcessor::startReplay(const EventLogReader& reader)
 
     // Publish under the callback lock: processBlock reads replayState_ by
     // reference, so the vectors must not be reseated while a block is in flight.
-    // (processBlock does hold this lock on every format we ship.)
+    // The lock delivers that on Standalone/VST3/AU, where the JUCE wrapper holds
+    // it across the whole processBlock call. NOT on CLAP: clap-juce-extensions
+    // calls processBlock bare (zero getCallbackLock in its wrapper), so on that
+    // format this publish is unsynchronised against a block in flight. Same hole
+    // as every other lock-only publish here -- see
+    // [[project_processblock_holds_callbacklock]]; it is not specific to this
+    // site and is not fixed here.
     {
         const juce::ScopedLock sl(getCallbackLock());
         replayState_ = std::move(state);
@@ -2507,12 +2513,14 @@ bool T5ynthProcessor::requestCsoundOrchestra(const juce::String& orchestraText)
 
     // Message thread or background (Phase-2 spec S4) — NEVER the audio thread.
     // getCallbackLock() below blocks until any in-progress processBlock call
-    // returns, exactly like every other message-thread voice-state reader in
-    // this file (distributeSamplerBuffer et al. — see their call sites'
-    // getCallbackLock comments): that lock is the host-provided processor
-    // callback boundary, not a NEW lock introduced on the audio thread itself,
-    // so taking it here does not violate the audio-thread RT rule — it only
-    // ever blocks the CALLER (this method), never processBlock.
+    // returns ON Standalone/VST3/AU, where the JUCE wrapper holds that lock for
+    // the whole call; on CLAP it does not, because clap-juce-extensions calls
+    // processBlock bare and takes no callback lock at all, so there the read
+    // below is unsynchronised. Same limit as every other lock-only reader here
+    // (distributeSamplerBuffer et al.) -- see
+    // [[project_processblock_holds_callbacklock]]. What the lock never is, on
+    // any format, is a NEW lock introduced on the audio thread itself: taking it
+    // here only ever blocks the CALLER (this method), never processBlock.
     float epochs[CsoundEngine::kMaxVoices];
     float freqs[CsoundEngine::kMaxVoices];
     {
@@ -6579,17 +6587,21 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     // Off-lock compute: extraction + FFT mip-levels only, no publish (see
     // WavetableOscillator::prepareFramesFromBuffer's doc comment). The actual
     // publish happens inside the lock below, alongside masterSampler's/
-    // masterFreeze's — publishedMipData_ is a plain shared_ptr, so an unlocked
-    // publish here would race the audio-thread readers in hasFrames()/
-    // processSample().
+    // masterFreeze's. publishedMipData_ publishes through the real atomic
+    // free-function API (that is what covers the CLAP build, which holds no
+    // lock around processBlock at all); it is still computed off-lock here so
+    // the expensive extraction/FFT work never delays the audio thread's next
+    // processBlock on the formats where this lock IS in effect.
     auto preparedMipData = wavetableMode
         ? masterOsc.prepareFramesFromBuffer(feedBuffer, sr, extractStart, extractEnd, maxFrames)
         : masterOsc.prepareContiguousFrames(feedBuffer, sr, extractStart, extractEnd);
     // Off-lock compute: mixdown only, no publish (see FreezeTextureEngine::
     // prepareBufferLoad's doc comment). The actual publish happens inside the
-    // lock below, alongside masterSampler's — masterFreeze.publishedSnapshot_
-    // is now a plain shared_ptr, so an unlocked publish here would race the
-    // audio-thread readers in hasAudio()/processSampleStereo().
+    // lock below, alongside masterSampler's. masterFreeze.publishedSnapshot_
+    // publishes through the real atomic free-function API (see its
+    // declaration in FreezeTextureEngine.h) — computed off-lock here purely to
+    // keep the expensive mixdown from delaying the audio thread's next
+    // processBlock on the formats where this lock is in effect.
     auto preparedFreezeSnapshot = masterFreeze.prepareBufferLoad(preparedFreezeBuffer, sr);
 
     {
@@ -6608,10 +6620,12 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         voiceManager.drainRetiredSamplerSnapshots();
 
         // Publish the already-prepared sampler, freeze, and wavetable state inside
-        // the lock so the audio thread only sees a short, lock-protected plain
-        // handoff (all three snapshot pointers are plain shared_ptr fields now,
-        // not atomics). masterOsc's publish must land before
-        // distributeWavetableFrames below, which reads it.
+        // the lock. All three snapshot pointers publish through the real atomic
+        // free-function API (that is what actually excludes the audio thread on
+        // CLAP, which holds no lock around processBlock); the lock here is real
+        // and necessary on Standalone/VST3/AU and for the OTHER, non-atomic
+        // engine state this same critical section also touches. masterOsc's
+        // publish must land before distributeWavetableFrames below, which reads it.
         masterSampler.applyPreparedBufferLoad(std::move(preparedSamplerLoad), samplerConfig);
         masterFreeze.applyPreparedBufferLoad(std::move(preparedFreezeSnapshot));
         masterOsc.applyPreparedMipData(std::move(preparedMipData));
@@ -6657,8 +6671,10 @@ void T5ynthProcessor::loadDcoWavetable(const juce::AudioBuffer<float>& frameStri
     // (mono, N*2048 samples) — extractContiguousFrames re-slices it on exact
     // frame boundaries (no pitch detection, no resampling). Publish discipline
     // mirrors loadGeneratedAudio: frame-slicing off the lock (prepareExactFrames,
-    // no publish — publishedMipData_ is a plain shared_ptr, so an unlocked
-    // publish would race the audio-thread readers), traversal/morph/distribute
+    // no publish — publishedMipData_ publishes through the real atomic
+    // free-function API, which is what covers CLAP; kept off-lock here purely
+    // so the extraction work never delays the audio thread's next processBlock
+    // on the formats where this lock is in effect), traversal/morph/distribute
     // under it (applyPreparedMipData first, so distributeWavetableFrames sees it).
     if (frameStrip.getNumChannels() < 1
         || frameStrip.getNumSamples() < WavetableOscillator::FRAME_SIZE)
@@ -6799,10 +6815,12 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         int maxFrames = frameCounts[juce::jlimit(0, 3, fcIdx)];
 
         // Off-lock compute only, no publish (see WavetableOscillator::
-        // prepareFramesFromBuffer's doc comment) — publishedMipData_ is a plain
-        // shared_ptr, so an unlocked publish here would race the audio-thread
-        // readers. The publish happens inside the lock below via
-        // applyPreparedMipData(), before distributeWavetableFrames reads it.
+        // prepareFramesFromBuffer's doc comment) — publishedMipData_ publishes
+        // through the real atomic free-function API, which is what covers
+        // CLAP; kept off-lock here purely so the extraction/FFT work never
+        // delays the audio thread's next processBlock on the formats where
+        // this lock is in effect. The publish happens inside the lock below
+        // via applyPreparedMipData(), before distributeWavetableFrames reads it.
         preparedMipData = wavetableMode
             ? masterOsc.prepareFramesFromBuffer(preparedWaveformSnapshot, generatedSampleRate, start, end, maxFrames)
             : masterOsc.prepareContiguousFrames(preparedWaveformSnapshot, generatedSampleRate, start, end);
@@ -6815,9 +6833,11 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
                                                      masterSampler);
     // Off-lock compute: mixdown only, no publish (see FreezeTextureEngine::
     // prepareBufferLoad's doc comment). The actual publish happens inside the
-    // lock below, alongside masterSampler's/masterOsc's — masterFreeze.
-    // publishedSnapshot_ is a plain shared_ptr, so an unlocked publish here
-    // would race the audio-thread readers in hasAudio()/processSampleStereo().
+    // lock below, alongside masterSampler's/masterOsc's. masterFreeze.
+    // publishedSnapshot_ publishes through the real atomic free-function API
+    // (see its declaration in FreezeTextureEngine.h) — computed off-lock here
+    // purely to keep the mixdown from delaying the audio thread's next
+    // processBlock on the formats where this lock is in effect.
     auto preparedFreezeSnapshot = masterFreeze.prepareBufferLoad(preparedFreezeBuffer, generatedSampleRate);
     {
         const juce::ScopedLock sl (getCallbackLock());

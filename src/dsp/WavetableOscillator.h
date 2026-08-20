@@ -20,12 +20,17 @@
  * - Mip level selection based on playback frequency
  *
  * Thread safety:
- * - Immutable MipData snapshots are published as a PLAIN shared_ptr
- *   (publishedMipData_ — no atomic<> wrapper, no atomic free functions);
- *   getCallbackLock() is the sole synchronization. The expensive part (frame
+ * - Immutable MipData snapshots are published through the real atomic
+ *   free-function API (publishedMipData_ — atomic_load/store_explicit,
+ *   acquire/release), because getCallbackLock() does not cover every shipped
+ *   format: the CLAP build calls processBlock with no lock held at all
+ *   (verified against clap-juce-wrapper.cpp — zero getCallbackLock
+ *   references). getCallbackLock() is a second, real guard on
+ *   Standalone/VST3/AU (where processBlock holds it for its whole duration)
+ *   and on this class's other, non-atomic state. The expensive part (frame
  *   extraction + per-level FFT) runs off the lock via the prepareXXX() family
- *   below; only the final pointer publish (applyPreparedMipData()) needs it,
- *   so the realtime path is never blocked for the compute.
+ *   below; only the final atomic publish (applyPreparedMipData()) needs
+ *   synchronizing, so the realtime path is never blocked for the compute.
  * - Shared-mode voices keep their own phase/scan state and can morph from
  *   one published bank generation to the next.
  */
@@ -90,12 +95,17 @@ public:
 
     /** Extract wavetable frames from an audio buffer (pitch-synchronous or windowed).
      *  startFrac/endFrac define the extraction region as fraction of the buffer (0–1).
-     *  Combined compute+publish convenience: ends in a PLAIN assignment into
-     *  publishedMipData_ (applyPreparedMipData()), so the caller MUST already hold
-     *  getCallbackLock() UNLESS nothing else can be touching this instance
-     *  concurrently (a fresh, single-threaded tools-dir *.cpp harness — the only
-     *  callers today besides the already-locked reextractWavetable). A caller that
-     *  must NOT hold the lock across the extraction/FFT work uses
+     *  Combined compute+publish convenience: ends in applyPreparedMipData()'s
+     *  atomic_store_explicit into publishedMipData_ — real atomics, not a lock,
+     *  since getCallbackLock() does not cover every shipped format (CLAP calls
+     *  processBlock with no lock at all). Call this under an explicit
+     *  ScopedLock(getCallbackLock()) anyway UNLESS nothing else can be touching
+     *  this instance concurrently (a fresh, single-threaded tools-dir *.cpp
+     *  harness — the only callers today besides the already-locked
+     *  reextractWavetable): the lock is real and necessary on Standalone/VST3/AU
+     *  and for this class's non-atomic state, even though the atomics alone
+     *  cover the publish itself on every format. A caller that must NOT hold
+     *  the lock across the extraction/FFT work uses
      *  prepareFramesFromBuffer()/applyPreparedMipData() below instead. */
     void extractFramesFromBuffer(const juce::AudioBuffer<float>& buffer, double bufferSampleRate,
                                  float startFrac = 0.0f, float endFrac = 1.0f,
@@ -113,15 +123,22 @@ public:
                                        int maxFrames = 256);
 
     /** Publish phase shared by the whole prepareXXX() family below (and by
-     *  setAdditiveBank() internally). MUST be called under an explicit
-     *  ScopedLock(getCallbackLock()). Plain assignment into publishedMipData_, not
-     *  atomic — the lock is the ONLY thing preventing a torn read / UAF against the
-     *  audio-thread readers (hasFrames(), getNumFrames(), processSample()'s
-     *  loadPublishedMipData(), and shareFramesFrom()/morphToFramesFrom() reading a
-     *  MASTER's published data cross-instance) — processBlock holds the SAME lock
-     *  for its whole duration on every shipped format (Standalone/VST3/AU — the
-     *  JUCE wrapper locks it). A nullptr snapshot is a no-op — every prepareXXX()
-     *  early-out means "leave the previous bank untouched", not "clear it". */
+     *  setAdditiveBank() internally). An atomic_store_explicit (release) into
+     *  publishedMipData_, paired with the atomic_load_explicit (acquire) in
+     *  loadPublishedMipData() — that pairing, not a lock, is what prevents a
+     *  torn read / UAF against the audio-thread readers (hasFrames(),
+     *  getNumFrames(), processSample(), and shareFramesFrom()/
+     *  morphToFramesFrom() reading a MASTER's published data cross-instance)
+     *  on every shipped format. getCallbackLock() does NOT cover this on its
+     *  own: processBlock holds it for its whole duration on Standalone/VST3/AU,
+     *  but the CLAP build calls processBlock with no lock at all (verified
+     *  against clap-juce-wrapper.cpp — zero getCallbackLock references,
+     *  processBlock called bare at both its call sites). Call this under an
+     *  explicit ScopedLock(getCallbackLock()) anyway — real and necessary on
+     *  the other three formats, and for this class's non-atomic state — but do
+     *  not treat the lock as sufficient by itself. A nullptr snapshot is a
+     *  no-op — every prepareXXX() early-out means "leave the previous bank
+     *  untouched", not "clear it". */
     void applyPreparedMipData(MipDataPtr mipData);
 
     /** Set playback frequency in Hz. Cancels any active glide. */
@@ -245,8 +262,8 @@ public:
      *  degenerates EXACTLY to the single-set overload above. Sanitize rules mirror
      *  it: unequal lengths cap to the shortest, index i is dropped from ALL sets if
      *  ANY set's h there is non-finite or <= 0 (dropping per-set would break the
-     *  alignment). Same plain-publish/share/morph path (applyPreparedMipData(),
-     *  under getCallbackLock()) as extraction — see extractFramesFromBuffer()'s
+     *  alignment). Same atomic publish/share/morph path (applyPreparedMipData())
+     *  as extraction — see extractFramesFromBuffer()'s
      *  doc comment for the lock contract; no production caller holds it today
      *  because none calls this yet (see loadPublishedMipData()'s comment). */
     void setAdditiveBank(const std::vector<std::vector<AdditivePartial>>& sets);
@@ -293,18 +310,24 @@ private:
         float confidence = 0.0f;
     };
 
-    // Published bank state. A PLAIN shared_ptr field — no atomic<> wrapper, no
-    // atomic free-function access anywhere in this file — so getCallbackLock() is
-    // the ONLY synchronization. Every write goes through applyPreparedMipData()
-    // (the prepareXXX() family and setAdditiveBank()), adoptMipData(),
-    // beginMorphToMipData(), shareFramesFrom(), morphToFramesFrom(); every read
-    // goes through loadPublishedMipData() (hasFrames(), getNumFrames(),
-    // snapshotLevel0Frames(), snapshotAdditiveBank(), processSample(),
-    // shareFramesFrom(), morphToFramesFrom()). Some of those run on the audio
-    // thread, inside processBlock, which holds getCallbackLock() for its whole
-    // duration on every shipped format (Standalone/VST3/AU — the JUCE wrapper
-    // locks it); others run on the message thread, each taking the same lock
-    // explicitly. There is never a concurrent unlocked touch in production.
+    // Published bank state. Accessed through the real atomic free-function API
+    // (atomic_load/store_explicit, acquire/release) — see loadPublishedMipData()
+    // and applyPreparedMipData() above. Every write goes through
+    // applyPreparedMipData() (the prepareXXX() family and setAdditiveBank()),
+    // adoptMipData(), beginMorphToMipData(), shareFramesFrom(),
+    // morphToFramesFrom(); every read goes through loadPublishedMipData()
+    // (hasFrames(), getNumFrames(), snapshotLevel0Frames(),
+    // snapshotAdditiveBank(), processSample(), shareFramesFrom(),
+    // morphToFramesFrom()). Some of those run on the audio thread, inside
+    // processBlock — locked by getCallbackLock() for its whole duration on
+    // Standalone/VST3/AU, but NOT on CLAP: the clap-juce-extensions wrapper
+    // calls processBlock with no lock held at all (verified against
+    // clap-juce-wrapper.cpp — zero getCallbackLock references, processBlock
+    // called bare). The atomics are what actually excludes the audio thread on
+    // every format, CLAP included; the message-thread writers ALSO take
+    // getCallbackLock() explicitly, which is real and matters on the other
+    // three formats and against this class's other, non-atomic state, but is
+    // not this field's guard on its own.
     // `mutable` predates this conversion and is not required by it — no const
     // method writes this member; left as found.
     mutable MipDataPtr publishedMipData_;
@@ -363,10 +386,12 @@ private:
     // separate cached field since the two accessors serve different call sites.
     float  lastScanNow_ = 0.0f;
 
-    // Plain accessor for publishedMipData_ — see the lock contract on that
-    // member's declaration above. No atomics; the caller's getCallbackLock()
-    // (explicit off-thread, ambient via processBlock on the audio thread) is
-    // what makes every production call site safe.
+    // Atomic accessor for publishedMipData_ — see the lock contract on that
+    // member's declaration above. Real atomic_load_explicit (acquire), because
+    // getCallbackLock() does not cover the CLAP build (no lock around
+    // processBlock there); the caller's getCallbackLock() (explicit off-thread,
+    // ambient via processBlock on Standalone/VST3/AU) is a second, real guard
+    // on those three formats, not what makes every production call site safe.
     MipDataPtr loadPublishedMipData() const;
     void syncSharedConfigFrom(const WavetableOscillator& source);
     void adoptMipData(MipDataPtr mipData, bool seedAdditivePhase = true);  // by value: see .cpp (reset aliasing)
