@@ -1136,6 +1136,15 @@ private:
     std::atomic<bool>  driftGenHold_   { false };  // message->audio: freeze generation-side Drift
     std::atomic<float> driftGenStepSec_{ 0.0f };   // message->audio: pending take step, in seconds
 
+    /** Everything a freshly generated buffer passes through before it is measured
+     *  or played: the rumble filter, the optional HF boost, and the leading and
+     *  trailing silence trims. Shared so that audio which is not the live
+     *  generation can be brought into the same state -- a stored position
+     *  conditioned differently is a different sound. */
+    juce::AudioBuffer<float> conditionGeneratedSource (const juce::AudioBuffer<float>& source,
+                                                       double sr,
+                                                       bool hfBoost) const;
+
     /** Two-band high shelf to compensate VAE decoder HF rolloff. */
     static void applyHfBoost(juce::AudioBuffer<float>& buffer, double sampleRate);
 

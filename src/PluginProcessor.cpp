@@ -6477,6 +6477,43 @@ GeneratedRegions analyzeGeneratedRegions (const juce::AudioBuffer<float>& feedBu
 }
 }  // namespace
 
+juce::AudioBuffer<float> T5ynthProcessor::conditionGeneratedSource (const juce::AudioBuffer<float>& source,
+                                                                    double sr,
+                                                                    bool hfBoost) const
+{
+    // Everything a freshly generated buffer goes through before anything measures
+    // or plays it. Lifted out of loadGeneratedAudio unchanged, for the same reason
+    // analyzeGeneratedRegions was: audio that is NOT the live generation has to
+    // arrive in exactly this state, or it is not the same sound.
+
+    // Rumble filter — always on, removes DC/sub-bass from VAE output
+    juce::AudioBuffer<float> conditioned;
+    conditioned.makeCopyOf(source);
+    applyRumbleFilter(conditioned, sr);
+
+    // Conditionally apply HF boost to compensate VAE decoder rolloff
+    if (hfBoost)
+        applyHfBoost(conditioned, sr);
+
+    // Pre-trim leading silence BEFORE computing activeStartFrac/activeEndFrac.
+    // prepareBufferLoad() also trims internally; doing it here makes the trim
+    // idempotent and ensures the fractions we compute below align with the
+    // buffer the sampler ultimately plays. Without this the new sustained-RMS
+    // trim would shift the buffer after we'd already measured an audible-start
+    // fraction, landing P1 past the real attack.
+    masterSampler.trimLeadingSilencePublic(conditioned);
+
+    // Symmetric trailing trim: diffusion models emit the full requested duration
+    // even when the sound is short, leaving a dead near-silent tail. The granular
+    // engine (scan 0..1 across the whole buffer, no playhead) otherwise parks in
+    // that pure-zero field, and the waveform/playhead show a flat tail. Drop it
+    // here — before the active-region fractions below are computed — so sampler,
+    // wavetable, freeze and the display all end at real content. No-op when the
+    // content already runs to the end.
+    masterSampler.trimTrailingSilencePublic(conditioned);
+    return conditioned;
+}
+
 void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBuffer, double sr)
 {
     samplerProcessorDebugLog("loadGeneratedAudio begin samples=" + juce::String(audioBuffer.getNumSamples())
@@ -6498,32 +6535,8 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     if (&audioBuffer != &generatedAudioRaw)
         generatedAudioRaw.makeCopyOf(audioBuffer);
 
-    // Rumble filter — always on, removes DC/sub-bass from VAE output
-    juce::AudioBuffer<float> cleanBuffer;
-    cleanBuffer.makeCopyOf(audioBuffer);
-    applyRumbleFilter(cleanBuffer, sr);
-
-    // Conditionally apply HF boost to compensate VAE decoder rolloff
-    bool hfOn = paramCache.genHfBoost->load() > 0.5f;
-    if (hfOn)
-        applyHfBoost(cleanBuffer, sr);
-
-    // Pre-trim leading silence BEFORE computing activeStartFrac/activeEndFrac.
-    // prepareBufferLoad() also trims internally; doing it here makes the trim
-    // idempotent and ensures the fractions we compute below align with the
-    // buffer the sampler ultimately plays. Without this the new sustained-RMS
-    // trim would shift the buffer after we'd already measured an audible-start
-    // fraction, landing P1 past the real attack.
-    masterSampler.trimLeadingSilencePublic(cleanBuffer);
-
-    // Symmetric trailing trim: diffusion models emit the full requested duration
-    // even when the sound is short, leaving a dead near-silent tail. The granular
-    // engine (scan 0..1 across the whole buffer, no playhead) otherwise parks in
-    // that pure-zero field, and the waveform/playhead show a flat tail. Drop it
-    // here — before the active-region fractions below are computed — so sampler,
-    // wavetable, freeze and the display all end at real content. No-op when the
-    // content already runs to the end.
-    masterSampler.trimTrailingSilencePublic(cleanBuffer);
+    const bool hfOn = paramCache.genHfBoost->load() > 0.5f;
+    juce::AudioBuffer<float> cleanBuffer = conditionGeneratedSource (audioBuffer, sr, hfOn);
 
     const auto& feedBuffer = cleanBuffer;
 
