@@ -222,7 +222,19 @@ namespace
                 midi.clear();
                 if (noteOnFirst && b == 0)
                     midi.addEvent (juce::MidiMessage::noteOn (1, c.note, (juce::uint8) 100), 0);
-                proc.processBlock (buf, midi);
+                {
+                    // Every shipped host wrapper (Standalone/VST3/AU) holds
+                    // getCallbackLock() for the whole processBlock call — see
+                    // juce_AudioProcessorPlayer.cpp, juce_audio_plugin_client_VST3.cpp,
+                    // juce_audio_plugin_client_AU_1.mm. SamplePlayer's snapshot
+                    // pointers are now plain (no atomics) and rely on that lock
+                    // alone; reproduce it here so this harness's concurrency
+                    // against samplerReprepareThread matches production instead
+                    // of silently depending on synchronization the real host
+                    // provides but this direct call did not.
+                    const juce::ScopedLock sl (proc.getCallbackLock());
+                    proc.processBlock (buf, midi);
+                }
                 const auto* l = buf.getReadPointer (0);
                 out.insert (out.end(), l, l + gBlockSize);
                 // Real time, so the background reprepare thread runs at the pace

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #define SAMPLER_DEBUG_LOG 0
 
@@ -83,12 +84,16 @@ void SamplePlayer::reset()
 {
     originalBuffer.setSize(0, 0);
     playBuffer.setSize(0, 0);
-    // playbackSnapshot_/retiredSnapshot_ are republished/parked atomically by the
-    // sampler-reprepare worker and read lock-free by audio-thread voices. reset()
-    // also rewrites the non-atomic originalBuffer/playBuffer/audioLoaded that the
-    // worker mutates under getCallbackLock — so reset() must run under that same
-    // lock (its only caller, T5ynthProcessor::releaseResources, holds it). With the
-    // worker excluded, these plain clears are safe and the audio thread is stopped.
+    // playbackSnapshot_/retiredSnapshot_ are plain shared_ptr fields, published/
+    // parked/read only under getCallbackLock() (see their declarations below and
+    // applyPreparedPlaybackState/morphToBufferFrom/drainRetiredSnapshot). reset()
+    // also rewrites the equally non-atomic originalBuffer/playBuffer/audioLoaded
+    // that the worker mutates under that same lock — so reset() must run under
+    // it too. Every path into it starts at T5ynthProcessor::releaseResources,
+    // which holds that lock: the master instance directly, the per-voice ones
+    // through VoiceManager::reset() -> SynthVoice::reset().
+    // With the worker excluded and the audio thread stopped (releaseResources'
+    // JUCE contract), these plain clears are safe.
     playbackSnapshot_.reset();
     retiredSnapshot_.reset();
     morphFromSnapshot_.reset();
@@ -165,12 +170,14 @@ void SamplePlayer::shareBufferFrom(const SamplePlayer& master)
 {
     bool wasShared = sharedMode;
     sharedMode = true;
-    // The master republishes its snapshot off-thread; read it atomically
-    // (acquire) so this never tears the pointer or races the free of a retired
-    // master snapshot. (The voice-side store is plain — for an active voice it
-    // is audio-thread-owned.)
-    playbackSnapshot_ = std::atomic_load_explicit(&master.playbackSnapshot_,
-                                                  std::memory_order_acquire);
+    // The master republishes its snapshot under getCallbackLock() (see
+    // applyPreparedPlaybackState). This function itself runs either on the
+    // audio thread inside processBlock (locked for its whole duration by the
+    // host wrapper on every shipped format) or off-thread under an explicit
+    // ScopedLock(getCallbackLock()) — see VoiceManager::distributeSamplerBuffer's
+    // callers. That shared lock is the ONLY guard on this read; without it,
+    // reading master.playbackSnapshot_ here races its publish.
+    playbackSnapshot_ = master.playbackSnapshot_;
     if (playbackSnapshot_ == nullptr)
         playBuffer.setSize(0, 0);
     bufferOriginalSR = master.bufferOriginalSR;
@@ -204,20 +211,25 @@ void SamplePlayer::shareBufferFrom(const SamplePlayer& master)
 
 void SamplePlayer::morphToBufferFrom(const SamplePlayer& master, float morphMs)
 {
-    // Live-follow crossfade for a playing shared voice. Runs on the AUDIO THREAD —
-    // the thread that reads this voice's OWN playbackSnapshot_/morphFromSnapshot_,
-    // so the voice-side pointers are never written from two threads (plain access).
-    // The MASTER's snapshot is republished off-thread, so read it atomically
-    // (acquire); the displaced snapshot is handed to the off-thread drain
-    // atomically. Snapshot discipline mirrors FreezeTextureEngine.
-    auto masterSnap = std::atomic_load_explicit(&master.playbackSnapshot_,
-                                                std::memory_order_acquire);
+    // Live-follow crossfade for a playing shared voice. Runs ONLY on the AUDIO
+    // THREAD, inside processBlock — VoiceManager.h documents allowMorph=true as
+    // valid only at the audio-thread call site — so processBlock's host-wrapper
+    // lock (held for its whole duration on every shipped format) is in effect
+    // for this entire function. That lock is what makes the plain read below
+    // safe against the master's publish (applyPreparedPlaybackState, always
+    // under an explicit ScopedLock(getCallbackLock())); without it, this would
+    // race the master's store. The voice-side pointers below (playbackSnapshot_,
+    // retiredSnapshot_, morphFromSnapshot_) are never written from any other
+    // thread, so touching them here needs no lock of their own — only the
+    // cross-instance read of master.playbackSnapshot_ depends on the callback
+    // lock. Snapshot discipline mirrors FreezeTextureEngine.
+    auto masterSnap = master.playbackSnapshot_;
     if (masterSnap == nullptr || masterSnap == playbackSnapshot_)
         return;                              // no master audio, or already current —
                                              // pointer identity is the generation guard
                                              // (never restarts an in-flight crossfade)
 
-    if (std::atomic_load_explicit(&retiredSnapshot_, std::memory_order_acquire) != nullptr)
+    if (retiredSnapshot_ != nullptr)
         return;                              // reclaim slot still full — defer one
                                              // block (current crossfade stays valid)
 
@@ -301,7 +313,12 @@ void SamplePlayer::morphToBufferFrom(const SamplePlayer& master, float morphMs)
     // for the off-thread drain rather than released here: its last reference
     // must not drop on the audio thread. The slot was just observed empty and
     // only the audio thread parks, so the std::vector free always lands in
-    // drainRetiredSnapshot() off the audio thread.
+    // drainRetiredSnapshot() off the audio thread. The store into
+    // retiredSnapshot_ below is a plain assignment: this whole function runs
+    // only on the audio thread inside processBlock (see the function-top
+    // comment), and drainRetiredSnapshot()'s clear always runs under an
+    // explicit ScopedLock(getCallbackLock()) — that lock is what keeps the
+    // park here and the drain there from ever overlapping.
     std::shared_ptr<const PlaybackSnapshot> outgoing;
 
     if (morphActive_ && morphFromSnapshot_ != nullptr && morphAlpha_ < 0.5f)
@@ -316,7 +333,7 @@ void SamplePlayer::morphToBufferFrom(const SamplePlayer& master, float morphMs)
     }
 
     playbackSnapshot_ = masterSnap;              // adopt the new buffer
-    std::atomic_store_explicit(&retiredSnapshot_, outgoing, std::memory_order_release);
+    retiredSnapshot_ = std::move(outgoing);
 
     // Equal-power ramp over morphMs (the global Drift Crossfade). morphMs<=0 →
     // 1 sample = effectively instant. Only crossfade when there is a fade-from
@@ -356,12 +373,16 @@ void SamplePlayer::morphToBufferFrom(const SamplePlayer& master, float morphMs)
 
 void SamplePlayer::drainRetiredSnapshot()
 {
-    // Off-thread: atomically take the parked snapshot (so it never races the
-    // audio thread's atomic park) and let this local drop the last reference
-    // here — the buffer free lands off the audio thread.
-    auto dead = std::atomic_exchange_explicit(&retiredSnapshot_,
-                                              std::shared_ptr<const PlaybackSnapshot>{},
-                                              std::memory_order_acq_rel);
+    // MUST be called off the audio thread, under an explicit
+    // ScopedLock(getCallbackLock()) — every caller (VoiceManager::
+    // drainRetiredSamplerSnapshots, called from PluginProcessor.cpp's
+    // serviceSamplerReprepare/loadGeneratedAudio/reloadProcessedAudio) already
+    // holds it. That lock is what keeps this exchange from ever running
+    // concurrently with morphToBufferFrom's plain park on the audio thread
+    // (processBlock holds the same lock for its whole duration on every
+    // shipped format). Take the parked snapshot and let this local drop the
+    // last reference here — the buffer free lands off the audio thread.
+    auto dead = std::exchange(retiredSnapshot_, nullptr);
     (void) dead;
 }
 
@@ -638,18 +659,19 @@ void SamplePlayer::applyPreparedPlaybackState(PreparedPlaybackState preparedStat
     snapshot->playBuffer = std::move(preparedState.playBuffer);
     snapshot->firstPassBuffer = std::move(preparedState.firstPassBuffer);
     snapshot->bufferOriginalSR = preparedState.bufferOriginalSR;
-    // Publish atomically (release): held voices read this with acquire from the
-    // audio thread (morphToBufferFrom / shareBufferFrom) while this republish runs
-    // off-thread. That off-thread work is under getCallbackLock(), which processBlock
-    // ALSO holds on every shipped format (Standalone/VST3/AU — the JUCE wrapper locks
-    // it), so the audio thread is already excluded here. The atomic store/load is
-    // belt-and-suspenders — lock-free correct on weakly ordered cores even if that
-    // lock guarantee were ever lost — pairing with the atomic_load_explicit reads:
-    // no torn pointer, no UAF of the retired master snapshot. Do NOT drop the lock
-    // trusting these atomics alone.
-    std::atomic_store_explicit(&playbackSnapshot_,
-                               std::shared_ptr<const PlaybackSnapshot>(std::move(snapshot)),
-                               std::memory_order_release);
+    // Publish under getCallbackLock(): this is a PLAIN assignment, not an atomic
+    // one, so the lock is the ONLY thing preventing a torn read / UAF against
+    // the audio-thread readers in shareBufferFrom / morphToBufferFrom. Every
+    // live caller of this function (applyPreparedBufferLoad, from
+    // serviceSamplerReprepare / loadGeneratedAudio / reloadProcessedAudio in
+    // PluginProcessor.cpp) already holds an explicit ScopedLock(getCallbackLock())
+    // around the call, and processBlock holds the SAME lock for its whole
+    // duration on every shipped format (Standalone/VST3/AU — the JUCE wrapper
+    // locks it), so the audio thread is excluded here. preparePlaybackBuffer()
+    // also reaches this function but currently has no caller anywhere in src/;
+    // if it ever gains one, that caller MUST hold getCallbackLock() too, or
+    // this store races the audio thread.
+    playbackSnapshot_ = std::move(snapshot);
 
     playBuffer.setSize(0, 0);
     bufferOriginalSR = preparedState.bufferOriginalSR;

@@ -901,9 +901,14 @@ void VoiceManager::distributeSamplerBuffer(const SamplePlayer& master, float mor
             // Held sampler note: equal-power crossfade-follow the freshly published
             // snapshot (over morphMs = Drift Crossfade) so a held tone plays the
             // CURRENT sample during A/B-drift regenerate. Crossfade ONLY on the
-            // audio-thread pass (allowMorph) — the swap then runs on the thread that
-            // reads the snapshot, so it cannot race the lock-free reader; the retired
-            // snapshot is freed later by drainRetiredSamplerSnapshots() off-thread.
+            // audio-thread pass (allowMorph) — morphToBufferFrom's own contract
+            // confines it to the audio thread (its doc comment in SamplePlayer.h):
+            // it parks the displaced snapshot into retiredSnapshot_ with a plain
+            // (non-atomic) store, safe here because this pass runs on the audio
+            // thread while processBlock holds getCallbackLock() — the same lock
+            // every off-thread publisher/drainer takes explicitly. The retired
+            // snapshot is freed later by drainRetiredSamplerSnapshots(), off-thread,
+            // under that same lock.
             // Never shareBufferFrom a held voice — that hard-swaps mid-note and clicks.
             if (allowMorph)
                 v.getSampler().morphToBufferFrom(master, morphMs);
