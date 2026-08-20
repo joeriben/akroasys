@@ -17,12 +17,56 @@
 class FreezeTextureEngine
 {
 public:
+    /** Immutable, published buffer snapshot. Public (moved up from the private
+     *  section that used to hold it) so prepareBufferLoad's result can be held
+     *  by a caller between the compute and publish steps — mirrors
+     *  SamplePlayer::PreparedBufferLoad. */
+    struct Snapshot
+    {
+        std::vector<float> samples;
+        double sampleRate = 44100.0;
+        juce::uint64 generation = 0;
+    };
+
+    using SnapshotPtr = std::shared_ptr<const Snapshot>;
+
     FreezeTextureEngine() = default;
 
     void prepare(double sampleRate, int samplesPerBlock);
     void reset();
 
+    /** Build AND publish a new snapshot in one call. Ends in a PLAIN assignment
+     *  into publishedSnapshot_ (see its declaration below, and publishSnapshot()),
+     *  so the caller MUST already hold getCallbackLock(). The one production call
+     *  site (serviceSamplerReprepare) is inside an explicit ScopedLock; the other
+     *  two production sites (loadGeneratedAudio, reloadProcessedAudio) use
+     *  prepareBufferLoad()/applyPreparedBufferLoad() below instead, specifically
+     *  to keep the expensive mixdown off the lock. A handful of offline
+     *  tools-dir *.cpp harnesses also call this directly on a freshly constructed,
+     *  single-threaded engine with no concurrent reader — safe there with no
+     *  lock at all, because nothing else touches that instance. */
     void loadBuffer(const juce::AudioBuffer<float>& buffer, double bufferSampleRate);
+
+    /** Off-lock compute phase of loadBuffer(): mixes `buffer` down to mono into
+     *  a new Snapshot and returns it WITHOUT publishing. Safe to call from any
+     *  thread while others read the CURRENT publishedSnapshot_ — the only shared
+     *  state it touches is nextGeneration_, mutated here exactly as unguarded as
+     *  loadBuffer() always mutated it (pre-existing, not a hazard introduced by
+     *  this split). The allocation + per-sample mixdown is the expensive part,
+     *  kept off getCallbackLock() so it never delays the audio thread's next
+     *  processBlock. Empty/invalid `buffer` returns nullptr (matches loadBuffer's
+     *  early-out). Pass the result to applyPreparedBufferLoad() to publish it. */
+    SnapshotPtr prepareBufferLoad(const juce::AudioBuffer<float>& buffer, double bufferSampleRate);
+
+    /** Publish phase: MUST be called under an explicit ScopedLock(getCallbackLock()).
+     *  This is a PLAIN assignment into publishedSnapshot_, not an atomic one, so
+     *  the lock is the ONLY thing preventing a torn read / UAF against the
+     *  audio-thread readers (hasAudio(), processSampleStereo()'s
+     *  loadPublishedSnapshot()) — processBlock holds the SAME lock for its whole
+     *  duration on every shipped format (Standalone/VST3/AU — the JUCE wrapper
+     *  locks it). Pass nullptr for an empty/invalid buffer. */
+    void applyPreparedBufferLoad(SnapshotPtr snapshot);
+
     void shareBufferFrom(const FreezeTextureEngine& master);
 
     /** Live, click-free crossfade to the master's current buffer.
@@ -52,15 +96,6 @@ public:
     void processSampleStereo(float& left, float& right);
 
 private:
-    struct Snapshot
-    {
-        std::vector<float> samples;
-        double sampleRate = 44100.0;
-        juce::uint64 generation = 0;
-    };
-
-    using SnapshotPtr = std::shared_ptr<const Snapshot>;
-
     struct Grain
     {
         bool active = false;
@@ -98,6 +133,10 @@ private:
         float pitchCents = 2.0f;
     };
 
+    // Plain accessors for publishedSnapshot_/morphFromSnapshot_ — see the lock
+    // contract on those members' declarations below. No atomics anywhere in
+    // these four; the caller's getCallbackLock() (explicit off-thread, ambient
+    // via processBlock on the audio thread) is what makes every call site safe.
     SnapshotPtr loadPublishedSnapshot() const;
     void publishSnapshot(SnapshotPtr snapshot);
     SnapshotPtr loadMorphFromSnapshot() const;
@@ -121,8 +160,22 @@ private:
     int getGrainDurationSamples() const;
     int getNextHopSamples(const GrainCloud& cloud, int grainDurationSamples) const;
 
+    // Published buffer state. Both are PLAIN shared_ptr fields — no atomic<>
+    // wrapper, no atomic free-function access anywhere in this file — so
+    // getCallbackLock() is the ONLY synchronization. Every write goes through
+    // publishSnapshot()/publishMorphFromSnapshot() (loadBuffer,
+    // applyPreparedBufferLoad, reset, shareBufferFrom, morphToBufferFrom);
+    // every read goes through loadPublishedSnapshot()/loadMorphFromSnapshot()
+    // (hasAudio(), processSampleStereo(), morphToBufferFrom(),
+    // shareBufferFrom()). Some of those run on the audio thread, inside
+    // processBlock, which holds getCallbackLock() for its whole duration on
+    // every shipped format (Standalone/VST3/AU — the JUCE wrapper locks it);
+    // others run on the message thread or the samplerReprepareThread worker,
+    // each taking the same lock explicitly. There is never a concurrent
+    // unlocked touch. Without that lock this is an unprotected shared_ptr
+    // race — torn reads and use-after-free, not a benign data race.
     SnapshotPtr publishedSnapshot_;
-    SnapshotPtr morphFromSnapshot_;   // old buffer retained during a crossfade
+    SnapshotPtr morphFromSnapshot_;   // old buffer retained during a crossfade; same lock discipline as publishedSnapshot_ above
 
     // Off-audio-thread reclaim bin. morphToBufferFrom overwrites the two snapshot
     // members on a voice the audio thread is actively rendering; the audio thread

@@ -32,8 +32,13 @@ void FreezeTextureEngine::prepare(double sampleRate, int samplesPerBlock)
 
 void FreezeTextureEngine::reset()
 {
-    // reset() runs on the message thread (prepareToPlay), so releasing the
-    // retained morph snapshot here is safe even if it is the last reference.
+    // Every path into reset() starts at T5ynthProcessor::releaseResources(),
+    // which takes an explicit ScopedLock(getCallbackLock()) around it: the
+    // master instance directly, the per-voice ones through VoiceManager::reset()
+    // -> SynthVoice::reset(). (And per releaseResources' JUCE contract the audio
+    // thread is stopped besides.) So this plain publish/clear can never race a
+    // reader, and releasing the retained morph snapshot here is safe even if it
+    // is the last reference.
     publishSnapshot(nullptr);
     publishMorphFromSnapshot(nullptr);
     retiredPublished_.reset();
@@ -55,11 +60,19 @@ void FreezeTextureEngine::reset()
 
 void FreezeTextureEngine::loadBuffer(const juce::AudioBuffer<float>& buffer, double bufferSampleRate)
 {
+    // Combined compute+publish convenience — see this function's doc comment in
+    // the header for who may call it and why. Kept as a single call so its only
+    // production caller (serviceSamplerReprepare, already inside the lock) needs
+    // no change; production sites that must NOT hold the lock across the mixdown
+    // call prepareBufferLoad()/applyPreparedBufferLoad() separately instead.
+    applyPreparedBufferLoad(prepareBufferLoad(buffer, bufferSampleRate));
+}
+
+FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::prepareBufferLoad(const juce::AudioBuffer<float>& buffer,
+                                                                        double bufferSampleRate)
+{
     if (buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0)
-    {
-        publishSnapshot(nullptr);
-        return;
-    }
+        return nullptr;
 
     auto snapshot = std::make_shared<Snapshot>();
     snapshot->sampleRate = bufferSampleRate > 0.0 ? bufferSampleRate : 44100.0;
@@ -75,6 +88,13 @@ void FreezeTextureEngine::loadBuffer(const juce::AudioBuffer<float>& buffer, dou
             snapshot->samples[static_cast<size_t>(i)] += src[i] * invChannels;
     }
 
+    return snapshot;
+}
+
+void FreezeTextureEngine::applyPreparedBufferLoad(SnapshotPtr snapshot)
+{
+    // See this function's doc comment in the header: caller MUST already hold
+    // getCallbackLock() — this is a plain publish, not an atomic one.
     publishSnapshot(std::move(snapshot));
 }
 
@@ -324,24 +344,31 @@ void FreezeTextureEngine::processSampleStereo(float& left, float& right)
     }
 }
 
+// Plain shared_ptr access — no atomic<> wrapper, no atomic free functions. The
+// lock contract lives on publishedSnapshot_/morphFromSnapshot_'s declarations
+// in the header: getCallbackLock() (explicit off-thread, ambient via
+// processBlock on the audio thread) is the sole guard against a concurrent
+// touch. Called unprotected ONLY by the single-threaded tools-dir *.cpp harnesses
+// noted on loadBuffer()'s doc comment, where no lock is needed because nothing
+// else touches that instance.
 FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::loadPublishedSnapshot() const
 {
-    return std::atomic_load_explicit(&publishedSnapshot_, std::memory_order_acquire);
+    return publishedSnapshot_;
 }
 
 void FreezeTextureEngine::publishSnapshot(SnapshotPtr snapshot)
 {
-    std::atomic_store_explicit(&publishedSnapshot_, snapshot, std::memory_order_release);
+    publishedSnapshot_ = std::move(snapshot);
 }
 
 FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::loadMorphFromSnapshot() const
 {
-    return std::atomic_load_explicit(&morphFromSnapshot_, std::memory_order_acquire);
+    return morphFromSnapshot_;
 }
 
 void FreezeTextureEngine::publishMorphFromSnapshot(SnapshotPtr snapshot)
 {
-    std::atomic_store_explicit(&morphFromSnapshot_, snapshot, std::memory_order_release);
+    morphFromSnapshot_ = std::move(snapshot);
 }
 
 void FreezeTextureEngine::resetCloud(GrainCloud& cloud)

@@ -3143,8 +3143,11 @@ bool T5ynthProcessor::serviceSamplerReprepare()
         masterSampler.applyPreparedBufferLoad(std::move(prepared), config);
         masterFreeze.loadBuffer(preparedFreezeBuffer, sourceRate);
         // Held sampler voices crossfade onto the re-prepared snapshot on the next
-        // audio-thread distribute pass (morphing here would race the lock-free
-        // reader). Off-thread → allowMorph=false (sync inactive voices only).
+        // audio-thread distribute pass — morphToBufferFrom's own contract confines
+        // it to the audio thread (see its doc comment in SamplePlayer.h), so this
+        // background-thread (samplerReprepareThread) call passes allowMorph=false
+        // and leaves the crossfade to start on processBlock's own redistribute
+        // pass instead. Off-thread → allowMorph=false (sync inactive voices only).
         voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false);
         // Sampler re-prepare (config change, not a new inference) → keep held
         // granular voices on their current buffer (no live morph).
@@ -4577,9 +4580,10 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // Re-prepare runs on samplerReprepareThread; the audio thread keeps
         // using the last published snapshot and only distributes it. This is the
         // ONE pass where held sampler voices crossfade onto the new snapshot —
-        // on the audio thread, so the swap never races the lock-free reader. The
-        // crossfade runs over the Drift Crossfade time (Regen XFade); the
-        // generation guard makes this a no-op once a held voice is current.
+        // on the audio thread, matching morphToBufferFrom's own audio-thread-only
+        // contract (see its doc comment in SamplePlayer.h). The crossfade runs
+        // over the Drift Crossfade time (Regen XFade); the generation guard makes
+        // this a no-op once a held voice is current.
         if (masterSampler.hasAudio())
             voiceManager.distributeSamplerBuffer(masterSampler,
                                                  paramCache.driftCrossfade->load(),
@@ -6572,11 +6576,21 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         }
     }
 
-    if (wavetableMode)
-        masterOsc.extractFramesFromBuffer(feedBuffer, sr, extractStart, extractEnd, maxFrames);
-    else
-        masterOsc.extractContiguousFrames(feedBuffer, sr, extractStart, extractEnd);
-    masterFreeze.loadBuffer(preparedFreezeBuffer, sr);
+    // Off-lock compute: extraction + FFT mip-levels only, no publish (see
+    // WavetableOscillator::prepareFramesFromBuffer's doc comment). The actual
+    // publish happens inside the lock below, alongside masterSampler's/
+    // masterFreeze's — publishedMipData_ is a plain shared_ptr, so an unlocked
+    // publish here would race the audio-thread readers in hasFrames()/
+    // processSample().
+    auto preparedMipData = wavetableMode
+        ? masterOsc.prepareFramesFromBuffer(feedBuffer, sr, extractStart, extractEnd, maxFrames)
+        : masterOsc.prepareContiguousFrames(feedBuffer, sr, extractStart, extractEnd);
+    // Off-lock compute: mixdown only, no publish (see FreezeTextureEngine::
+    // prepareBufferLoad's doc comment). The actual publish happens inside the
+    // lock below, alongside masterSampler's — masterFreeze.publishedSnapshot_
+    // is now a plain shared_ptr, so an unlocked publish here would race the
+    // audio-thread readers in hasAudio()/processSampleStereo().
+    auto preparedFreezeSnapshot = masterFreeze.prepareBufferLoad(preparedFreezeBuffer, sr);
 
     {
         // Guard engine-state mutation against the realtime callback. The Linux
@@ -6593,9 +6607,14 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         // snapshot so it cannot overlap a fresh audio-thread adoption.
         voiceManager.drainRetiredSamplerSnapshots();
 
-        // Publish the already-prepared sampler state inside the lock so the
-        // audio thread only sees a short atomic handoff.
+        // Publish the already-prepared sampler, freeze, and wavetable state inside
+        // the lock so the audio thread only sees a short, lock-protected plain
+        // handoff (all three snapshot pointers are plain shared_ptr fields now,
+        // not atomics). masterOsc's publish must land before
+        // distributeWavetableFrames below, which reads it.
         masterSampler.applyPreparedBufferLoad(std::move(preparedSamplerLoad), samplerConfig);
+        masterFreeze.applyPreparedBufferLoad(std::move(preparedFreezeSnapshot));
+        masterOsc.applyPreparedMipData(std::move(preparedMipData));
 
         dcoTableActive_.store(false, std::memory_order_relaxed);  // neural frames own masterOsc again
         clearLcoBakeSnapshot();  // masterOsc is neural again — an LCO save block would be stale
@@ -6605,7 +6624,9 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
 
         // A HELD note plays the freshly generated sample: held sampler voices
         // crossfade onto the new snapshot on the next audio-thread distribute pass
-        // (false here — off-thread morphing would race the lock-free reader).
+        // (false here — morphToBufferFrom's contract confines it to the audio
+        // thread, see SamplePlayer.h; this message-thread call leaves the
+        // crossfade to start on processBlock's own redistribute pass instead).
         voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false);
         voiceManager.distributeWavetableFrames(masterOsc);
         // New inference → held granular voices crossfade-adopt it live (near
@@ -6635,8 +6656,10 @@ void T5ynthProcessor::loadDcoWavetable(const juce::AudioBuffer<float>& frameStri
     // Message thread. The strip is N baked single cycles laid end-to-end
     // (mono, N*2048 samples) — extractContiguousFrames re-slices it on exact
     // frame boundaries (no pitch detection, no resampling). Publish discipline
-    // mirrors loadGeneratedAudio: extraction off the lock (it ends in an
-    // atomic snapshot publish), traversal/morph/distribute under it.
+    // mirrors loadGeneratedAudio: frame-slicing off the lock (prepareExactFrames,
+    // no publish — publishedMipData_ is a plain shared_ptr, so an unlocked
+    // publish would race the audio-thread readers), traversal/morph/distribute
+    // under it (applyPreparedMipData first, so distributeWavetableFrames sees it).
     if (frameStrip.getNumChannels() < 1
         || frameStrip.getNumSamples() < WavetableOscillator::FRAME_SIZE)
         return;
@@ -6682,12 +6705,19 @@ void T5ynthProcessor::loadDcoWavetable(const juce::AudioBuffer<float>& frameStri
     // audibly corrupt exact closed-form cycles (setExactFrames doc). Also
     // marks the table content-seamless so auto-scan Loop wraps don't slew
     // back through the whole table (the "dropout every table-pass" defect).
-    masterOsc.setExactFrames(frameStrip);
+    // Off-lock compute only (prepareExactFrames) — see this function's top
+    // comment; the publish happens inside the lock below via
+    // applyPreparedMipData().
+    auto preparedMipData = masterOsc.prepareExactFrames(frameStrip);
 
     {
         // Guard engine-state mutation against the realtime callback (same
         // rule as loadGeneratedAudio).
         const juce::ScopedLock sl (getCallbackLock());
+
+        // Publish before anything below reads it (setAutoScanLoop/setAutoScan/
+        // distributeWavetableFrames all act on the newly adopted bank).
+        masterOsc.applyPreparedMipData(std::move(preparedMipData));
 
         // NOT syncWavetableTraversal(): it re-derives extract brackets and rate
         // from a neural buffer, which do not apply to a DCO table. The DCO
@@ -6751,6 +6781,10 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         preparedWaveformSnapshot.copyFrom(0, 0, processed, 0, 0, processed.getNumSamples());
     }
 
+    // Defaults to nullptr (no extraction below) — applyPreparedMipData() no-ops
+    // on nullptr, matching this function's original behaviour of leaving
+    // masterOsc's bank untouched when the outer condition below is false.
+    WavetableOscillator::MipDataPtr preparedMipData;
     if (preparedWaveformSnapshot.getNumSamples() > 0 && masterOsc.hasFrames())
     {
         const auto wtMapping = makeWtTraversalMapping(preparedWaveformSnapshot.getNumSamples(),
@@ -6764,10 +6798,14 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         int fcIdx = static_cast<int>(paramCache.wtFrames->load());
         int maxFrames = frameCounts[juce::jlimit(0, 3, fcIdx)];
 
-        if (wavetableMode)
-            masterOsc.extractFramesFromBuffer(preparedWaveformSnapshot, generatedSampleRate, start, end, maxFrames);
-        else
-            masterOsc.extractContiguousFrames(preparedWaveformSnapshot, generatedSampleRate, start, end);
+        // Off-lock compute only, no publish (see WavetableOscillator::
+        // prepareFramesFromBuffer's doc comment) — publishedMipData_ is a plain
+        // shared_ptr, so an unlocked publish here would race the audio-thread
+        // readers. The publish happens inside the lock below via
+        // applyPreparedMipData(), before distributeWavetableFrames reads it.
+        preparedMipData = wavetableMode
+            ? masterOsc.prepareFramesFromBuffer(preparedWaveformSnapshot, generatedSampleRate, start, end, maxFrames)
+            : masterOsc.prepareContiguousFrames(preparedWaveformSnapshot, generatedSampleRate, start, end);
     }
     auto preparedFreezeBuffer = makeFreezeLoadBuffer(processed,
                                                      generatedSampleRate,
@@ -6775,7 +6813,12 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
                                                      0.0f,
                                                      1.0f,
                                                      masterSampler);
-    masterFreeze.loadBuffer(preparedFreezeBuffer, generatedSampleRate);
+    // Off-lock compute: mixdown only, no publish (see FreezeTextureEngine::
+    // prepareBufferLoad's doc comment). The actual publish happens inside the
+    // lock below, alongside masterSampler's/masterOsc's — masterFreeze.
+    // publishedSnapshot_ is a plain shared_ptr, so an unlocked publish here
+    // would race the audio-thread readers in hasAudio()/processSampleStereo().
+    auto preparedFreezeSnapshot = masterFreeze.prepareBufferLoad(preparedFreezeBuffer, generatedSampleRate);
     {
         const juce::ScopedLock sl (getCallbackLock());
 
@@ -6783,6 +6826,8 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         generatedAudioFull = std::move(preparedGeneratedAudio);
         voiceManager.drainRetiredSamplerSnapshots();
         masterSampler.applyPreparedBufferLoad(std::move(preparedSamplerLoad), samplerConfig);
+        masterFreeze.applyPreparedBufferLoad(std::move(preparedFreezeSnapshot));
+        masterOsc.applyPreparedMipData(std::move(preparedMipData));
         if (preparedWaveformSnapshot.getNumSamples() > 0)
             waveformSnapshot = std::move(preparedWaveformSnapshot);
         // Held sampler notes crossfade onto the reprocessed sample on the next

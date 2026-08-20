@@ -20,8 +20,12 @@
  * - Mip level selection based on playback frequency
  *
  * Thread safety:
- * - Immutable MipData snapshots are published atomically from non-audio
- *   threads without blocking the realtime path.
+ * - Immutable MipData snapshots are published as a PLAIN shared_ptr
+ *   (publishedMipData_ — no atomic<> wrapper, no atomic free functions);
+ *   getCallbackLock() is the sole synchronization. The expensive part (frame
+ *   extraction + per-level FFT) runs off the lock via the prepareXXX() family
+ *   below; only the final pointer publish (applyPreparedMipData()) needs it,
+ *   so the realtime path is never blocked for the compute.
  * - Shared-mode voices keep their own phase/scan state and can morph from
  *   one published bank generation to the next.
  */
@@ -53,6 +57,32 @@ public:
     // partial, wrapped mod 2*pi (click-free for any h).
     struct AdditivePartial { float h = 1.0f; float a = 0.0f; float phase = 0.0f; };
 
+    /** Immutable snapshot of one published WT bank generation. Either a mip-mapped
+     *  wavetable (isAdditive=false, the frames path) OR an inharmonic additive bank
+     *  (isAdditive=true: partials synthesized in real time, frames unused). Public
+     *  (moved up from the private section that used to hold it) so the prepareXXX()
+     *  family's result can be held by a caller between the compute and publish
+     *  steps — mirrors SamplePlayer::PreparedBufferLoad /
+     *  FreezeTextureEngine::Snapshot. */
+    struct MipData {
+        std::vector<std::vector<std::vector<float>>> frames; // [level][frameIdx][sample]
+        int numFrames = 0;
+        int numLevels = 0;
+        uint64_t generation = 0;
+
+        bool isAdditive = false;                    // true: synthesize `partialSets`, ignore frames
+        // K index-aligned additive stations (isAdditive only). ALL sets are EXACTLY
+        // the same length N — index i is the SAME partial in every set (same running
+        // phase accumulator, same Nyquist gate). Movement = per-index lerp of (a,h)
+        // across the sets, blended by scanNow. K==1 degenerates to the former
+        // single-set path (byte-identical math). phase is a per-index property, read
+        // from set 0 (identical across sets by backend contract).
+        std::vector<std::vector<AdditivePartial>> partialSets;
+        float additiveGain = 1.0f;                  // 0.95 / max_over_sets(sum|a_i|), precomputed
+    };
+
+    using MipDataPtr = std::shared_ptr<const MipData>;
+
     WavetableOscillator() = default;
 
     void prepare(double sampleRate, int samplesPerBlock);
@@ -60,10 +90,39 @@ public:
 
     /** Extract wavetable frames from an audio buffer (pitch-synchronous or windowed).
      *  startFrac/endFrac define the extraction region as fraction of the buffer (0–1).
-     *  Thread-safe: builds into inactive slot, then atomically swaps. */
+     *  Combined compute+publish convenience: ends in a PLAIN assignment into
+     *  publishedMipData_ (applyPreparedMipData()), so the caller MUST already hold
+     *  getCallbackLock() UNLESS nothing else can be touching this instance
+     *  concurrently (a fresh, single-threaded tools-dir *.cpp harness — the only
+     *  callers today besides the already-locked reextractWavetable). A caller that
+     *  must NOT hold the lock across the extraction/FFT work uses
+     *  prepareFramesFromBuffer()/applyPreparedMipData() below instead. */
     void extractFramesFromBuffer(const juce::AudioBuffer<float>& buffer, double bufferSampleRate,
                                  float startFrac = 0.0f, float endFrac = 1.0f,
                                  int maxFrames = 256);
+
+    /** Off-lock compute phase of extractFramesFromBuffer(): identical extraction +
+     *  pitch-analysis + mip-level FFT work, returned WITHOUT publishing. The
+     *  expensive part is kept off getCallbackLock() so it never delays the audio
+     *  thread's next processBlock. Returns nullptr on any early-out (matches
+     *  extractFramesFromBuffer's original behaviour: leave the previous bank
+     *  untouched rather than clear it). Pass the result to applyPreparedMipData()
+     *  to publish it. */
+    MipDataPtr prepareFramesFromBuffer(const juce::AudioBuffer<float>& buffer, double bufferSampleRate,
+                                       float startFrac = 0.0f, float endFrac = 1.0f,
+                                       int maxFrames = 256);
+
+    /** Publish phase shared by the whole prepareXXX() family below (and by
+     *  setAdditiveBank() internally). MUST be called under an explicit
+     *  ScopedLock(getCallbackLock()). Plain assignment into publishedMipData_, not
+     *  atomic — the lock is the ONLY thing preventing a torn read / UAF against the
+     *  audio-thread readers (hasFrames(), getNumFrames(), processSample()'s
+     *  loadPublishedMipData(), and shareFramesFrom()/morphToFramesFrom() reading a
+     *  MASTER's published data cross-instance) — processBlock holds the SAME lock
+     *  for its whole duration on every shipped format (Standalone/VST3/AU — the
+     *  JUCE wrapper locks it). A nullptr snapshot is a no-op — every prepareXXX()
+     *  early-out means "leave the previous bank untouched", not "clear it". */
+    void applyPreparedMipData(MipDataPtr mipData);
 
     /** Set playback frequency in Hz. Cancels any active glide. */
     void setFrequency(float hz)
@@ -137,9 +196,17 @@ public:
     void retriggerAutoScan();
 
     /** Extract contiguous (non-pitch-synchronous) frames from audio buffer.
-     *  For sampler-style playback where frames represent temporal chunks. */
+     *  For sampler-style playback where frames represent temporal chunks.
+     *  Combined compute+publish convenience — same lock contract as
+     *  extractFramesFromBuffer() above. */
     void extractContiguousFrames(const juce::AudioBuffer<float>& buffer, double bufferSR,
                                  float startFrac = 0.0f, float endFrac = 1.0f);
+
+    /** Off-lock compute phase of extractContiguousFrames() — see
+     *  prepareFramesFromBuffer()'s doc comment for the shared nullptr/publish
+     *  contract. */
+    MipDataPtr prepareContiguousFrames(const juce::AudioBuffer<float>& buffer, double bufferSR,
+                                       float startFrac = 0.0f, float endFrac = 1.0f);
 
     /** Adopt a strip of pre-sliced single-cycle frames BIT-EXACTLY (DCO bakes:
      *  mono, N*FRAME_SIZE samples on exact frame boundaries). Unlike
@@ -147,8 +214,14 @@ public:
      *  the baker's closed-form cycles are already loop-exact per cycle, and
      *  both "corrections" audibly corrupt them (measured 0.43 max sample
      *  error on a pwm bake: the renorm re-levels every width step of the
-     *  authored sweep). Same mip/publish path as extraction. */
+     *  authored sweep). Same mip/publish path as extraction — combined
+     *  compute+publish convenience, same lock contract as
+     *  extractFramesFromBuffer() above. */
     void setExactFrames(const juce::AudioBuffer<float>& strip);
+
+    /** Off-lock compute phase of setExactFrames() — see prepareFramesFromBuffer()'s
+     *  doc comment for the shared nullptr/publish contract. */
+    MipDataPtr prepareExactFrames(const juce::AudioBuffer<float>& strip);
 
     /** Publish an INHARMONIC additive spectrum as the bank: the voice synthesizes
      *  sum_i a_i * sin(2*pi * f0 * h_i * t + phase_i) in real time instead of reading
@@ -172,7 +245,10 @@ public:
      *  degenerates EXACTLY to the single-set overload above. Sanitize rules mirror
      *  it: unequal lengths cap to the shortest, index i is dropped from ALL sets if
      *  ANY set's h there is non-finite or <= 0 (dropping per-set would break the
-     *  alignment). Same atomic-publish/share/morph path. */
+     *  alignment). Same plain-publish/share/morph path (applyPreparedMipData(),
+     *  under getCallbackLock()) as extraction — see extractFramesFromBuffer()'s
+     *  doc comment for the lock contract; no production caller holds it today
+     *  because none calls this yet (see loadPublishedMipData()'s comment). */
     void setAdditiveBank(const std::vector<std::vector<AdditivePartial>>& sets);
 
     /** Process a single sample. */
@@ -217,27 +293,20 @@ private:
         float confidence = 0.0f;
     };
 
-    /** Immutable snapshot of one published WT bank generation. Either a mip-mapped
-     *  wavetable (isAdditive=false, the frames path) OR an inharmonic additive bank
-     *  (isAdditive=true: partials synthesized in real time, frames unused). */
-    struct MipData {
-        std::vector<std::vector<std::vector<float>>> frames; // [level][frameIdx][sample]
-        int numFrames = 0;
-        int numLevels = 0;
-        uint64_t generation = 0;
-
-        bool isAdditive = false;                    // true: synthesize `partialSets`, ignore frames
-        // K index-aligned additive stations (isAdditive only). ALL sets are EXACTLY
-        // the same length N — index i is the SAME partial in every set (same running
-        // phase accumulator, same Nyquist gate). Movement = per-index lerp of (a,h)
-        // across the sets, blended by scanNow. K==1 degenerates to the former
-        // single-set path (byte-identical math). phase is a per-index property, read
-        // from set 0 (identical across sets by backend contract).
-        std::vector<std::vector<AdditivePartial>> partialSets;
-        float additiveGain = 1.0f;                  // 0.95 / max_over_sets(sum|a_i|), precomputed
-    };
-
-    using MipDataPtr = std::shared_ptr<const MipData>;
+    // Published bank state. A PLAIN shared_ptr field — no atomic<> wrapper, no
+    // atomic free-function access anywhere in this file — so getCallbackLock() is
+    // the ONLY synchronization. Every write goes through applyPreparedMipData()
+    // (the prepareXXX() family and setAdditiveBank()), adoptMipData(),
+    // beginMorphToMipData(), shareFramesFrom(), morphToFramesFrom(); every read
+    // goes through loadPublishedMipData() (hasFrames(), getNumFrames(),
+    // snapshotLevel0Frames(), snapshotAdditiveBank(), processSample(),
+    // shareFramesFrom(), morphToFramesFrom()). Some of those run on the audio
+    // thread, inside processBlock, which holds getCallbackLock() for its whole
+    // duration on every shipped format (Standalone/VST3/AU — the JUCE wrapper
+    // locks it); others run on the message thread, each taking the same lock
+    // explicitly. There is never a concurrent unlocked touch in production.
+    // `mutable` predates this conversion and is not required by it — no const
+    // method writes this member; left as found.
     mutable MipDataPtr publishedMipData_;
     uint64_t nextPublishedGeneration_ = 0;
 
@@ -294,6 +363,10 @@ private:
     // separate cached field since the two accessors serve different call sites.
     float  lastScanNow_ = 0.0f;
 
+    // Plain accessor for publishedMipData_ — see the lock contract on that
+    // member's declaration above. No atomics; the caller's getCallbackLock()
+    // (explicit off-thread, ambient via processBlock on the audio thread) is
+    // what makes every production call site safe.
     MipDataPtr loadPublishedMipData() const;
     void syncSharedConfigFrom(const WavetableOscillator& source);
     void adoptMipData(MipDataPtr mipData, bool seedAdditivePhase = true);  // by value: see .cpp (reset aliasing)
@@ -326,7 +399,10 @@ private:
     // FFT helpers for mip-level generation
     static void fft(std::vector<double>& re, std::vector<double>& im);
     static void ifft(std::vector<double>& re, std::vector<double>& im);
-    void generateMipLevels(const std::vector<std::vector<float>>& srcFrames);
+    // Private: called only by prepareFramesFromBuffer/prepareContiguousFrames/
+    // prepareExactFrames above (their shared FFT compute engine). See its .cpp
+    // doc comment for the off-lock/publish contract.
+    MipDataPtr prepareMipLevels(const std::vector<std::vector<float>>& srcFrames);
 
     // Pitch detection (simplified YIN)
     static PitchEstimate analyzePitchWindow(const float* data, int length, double sr);

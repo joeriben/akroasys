@@ -21,9 +21,22 @@ void WavetableOscillator::reset()
         morphAlpha_ = 1.0f;
 }
 
+// Plain shared_ptr access — no atomic<> wrapper, no atomic free functions. The
+// lock contract lives on publishedMipData_'s declaration in the header:
+// getCallbackLock() (explicit off-thread, ambient via processBlock on the audio
+// thread) is the sole guard against a concurrent touch. Readers: hasFrames(),
+// getNumFrames(), snapshotLevel0Frames(), snapshotAdditiveBank(), processSample()
+// (audio thread, only while adopting a first bank — see its own comment),
+// shareFramesFrom()/morphToFramesFrom() (cross-instance, reading a MASTER's
+// published data). Writers: applyPreparedMipData() (the prepareXXXFrames()/
+// prepareMipLevels() family and setAdditiveBank()), adoptMipData(),
+// beginMorphToMipData(), shareFramesFrom(), morphToFramesFrom(). Called
+// unprotected ONLY by the single-threaded tools-dir *.cpp harnesses noted on
+// extractFramesFromBuffer()'s doc comment, where no lock is needed because
+// nothing else touches that instance.
 WavetableOscillator::MipDataPtr WavetableOscillator::loadPublishedMipData() const
 {
-    return std::atomic_load_explicit(&publishedMipData_, std::memory_order_acquire);
+    return publishedMipData_;
 }
 
 bool WavetableOscillator::hasFrames() const
@@ -105,7 +118,8 @@ void WavetableOscillator::adoptMipData(MipDataPtr mipData, bool seedAdditivePhas
     if (mipData == nullptr)
         return;
 
-    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
+    // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
+    publishedMipData_ = mipData;
     activeMorphMipData_ = mipData;
     targetMorphMipData_.reset();
     morphAlpha_ = 1.0f;
@@ -126,7 +140,8 @@ void WavetableOscillator::beginMorphToMipData(const MipDataPtr& mipData)
     if (mipData == nullptr)
         return;
 
-    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
+    // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
+    publishedMipData_ = mipData;
 
     if (activeMorphMipData_ == nullptr || activeMorphMipData_->numFrames == 0)
     {
@@ -198,7 +213,8 @@ void WavetableOscillator::shareFramesFrom(const WavetableOscillator& source)
         && activeMorphMipData_->generation == mipData->generation;
     if (sameActive && !morphActive_)
     {
-        std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
+        // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
+        publishedMipData_ = mipData;
         return;
     }
 
@@ -214,7 +230,8 @@ void WavetableOscillator::morphToFramesFrom(const WavetableOscillator& source)
     if (mipData == nullptr)
         return;
 
-    std::atomic_store_explicit(&publishedMipData_, mipData, std::memory_order_release);
+    // Plain publish — see loadPublishedMipData()'s comment for the lock contract.
+    publishedMipData_ = mipData;
 
     const bool sameActive = activeMorphMipData_ != nullptr
         && activeMorphMipData_->generation == mipData->generation;
@@ -279,8 +296,16 @@ void WavetableOscillator::ifft(std::vector<double>& re, std::vector<double>& im)
 
 // ─── Mip-level generation ───
 
-void WavetableOscillator::generateMipLevels(const std::vector<std::vector<float>>& srcFrames)
+WavetableOscillator::MipDataPtr WavetableOscillator::prepareMipLevels(const std::vector<std::vector<float>>& srcFrames)
 {
+    // Off-lock compute phase shared by prepareFramesFromBuffer/prepareContiguousFrames/
+    // prepareExactFrames: the FFT mip-level work (NUM_MIP_LEVELS passes over every
+    // frame) is the expensive part of all three, kept off getCallbackLock() so it
+    // never delays the audio thread's next processBlock. Returns the new snapshot
+    // WITHOUT publishing — pass it to applyPreparedMipData() to publish. Mutates
+    // nextPublishedGeneration_ exactly as unguarded as this always mutated it
+    // (pre-existing, not a hazard introduced by this split — mirrors
+    // FreezeTextureEngine::prepareBufferLoad's nextGeneration_).
     const int nFrames = static_cast<int>(srcFrames.size());
     auto dest = std::make_shared<MipData>();
     dest->frames.resize(NUM_MIP_LEVELS);
@@ -323,8 +348,27 @@ void WavetableOscillator::generateMipLevels(const std::vector<std::vector<float>
     dest->numFrames = nFrames;
     dest->numLevels = NUM_MIP_LEVELS;
     dest->generation = ++nextPublishedGeneration_;
-    MipDataPtr published = dest;
-    std::atomic_store_explicit(&publishedMipData_, published, std::memory_order_release);
+    return dest;
+}
+
+void WavetableOscillator::applyPreparedMipData(MipDataPtr mipData)
+{
+    // Publish phase for prepareMipLevels() and its three prepareXXXFrames()
+    // callers: MUST be called under an explicit ScopedLock(getCallbackLock()) —
+    // this is a PLAIN assignment into publishedMipData_, not an atomic one, so
+    // the lock is the ONLY thing preventing a torn read / UAF against the
+    // audio-thread readers (hasFrames(), getNumFrames(), processSample()'s
+    // loadPublishedMipData(), and shareFramesFrom()/morphToFramesFrom() reading a
+    // MASTER's published data cross-instance) — processBlock holds the SAME lock
+    // for its whole duration on every shipped format (Standalone/VST3/AU — the
+    // JUCE wrapper locks it). A nullptr snapshot is a no-op: every prepare*()
+    // early-out returns nullptr to mean "leave the previous bank untouched", not
+    // "clear it" (unlike FreezeTextureEngine::applyPreparedBufferLoad, which DOES
+    // publish nullptr — the two engines' pre-existing empty-input behaviour differs
+    // and this preserves each one exactly).
+    if (mipData == nullptr)
+        return;
+    publishedMipData_ = std::move(mipData);
 }
 
 // ─── Pitch detection (simplified YIN autocorrelation) ───
@@ -475,8 +519,26 @@ double WavetableOscillator::computeLoopBoundaryError(const std::vector<float>& f
 void WavetableOscillator::extractFramesFromBuffer(const juce::AudioBuffer<float>& buffer, double bufferSr,
                                                    float startFrac, float endFrac, int maxFrames)
 {
+    // Combined compute+publish convenience — see this function's doc comment in the
+    // header for who may call it and why. The already-locked production caller
+    // (reextractWavetable) and the single-threaded tools-dir *.cpp harnesses use this
+    // directly; a caller that must NOT hold the lock across the extraction/FFT work
+    // below uses prepareFramesFromBuffer()/applyPreparedMipData() instead.
+    applyPreparedMipData(prepareFramesFromBuffer(buffer, bufferSr, startFrac, endFrac, maxFrames));
+}
+
+WavetableOscillator::MipDataPtr WavetableOscillator::prepareFramesFromBuffer(
+    const juce::AudioBuffer<float>& buffer, double bufferSr,
+    float startFrac, float endFrac, int maxFrames)
+{
+    // Off-lock compute phase of extractFramesFromBuffer(): identical extraction +
+    // pitch-analysis work, returned WITHOUT publishing (see prepareMipLevels()'s
+    // doc comment for the shared publish contract). A nullptr return (every early
+    // return in this function) means "leave the previous bank untouched" — matches
+    // extractFramesFromBuffer's original behaviour of silently no-op'ing on bad
+    // input rather than clearing the bank.
     maxFrames = juce::jlimit(8, 256, maxFrames);
-    if (sharedSource_ != nullptr) return; // shared-mode oscillators don't own frame data
+    if (sharedSource_ != nullptr) return nullptr; // shared-mode oscillators don't own frame data
     const int bufferLen = buffer.getNumSamples();
 
     // Apply extraction region (brackets)
@@ -489,7 +551,7 @@ void WavetableOscillator::extractFramesFromBuffer(const juce::AudioBuffer<float>
     const float* data = buffer.getReadPointer(0) + regionStart;
     const int totalSamples = regionEnd - regionStart;
 
-    if (totalSamples < FRAME_SIZE) return;
+    if (totalSamples < FRAME_SIZE) return nullptr;
 
     std::vector<std::vector<float>> frames;
     constexpr int analysisWindow = 4096;
@@ -652,8 +714,7 @@ void WavetableOscillator::extractFramesFromBuffer(const juce::AudioBuffer<float>
         frames.push_back(frames.back());
     }
 
-    if (!frames.empty())
-        generateMipLevels(frames);
+    return frames.empty() ? nullptr : prepareMipLevels(frames);
 }
 
 // ─── Auto-scan (sampler-style temporal progression) ───
@@ -714,7 +775,21 @@ void WavetableOscillator::retriggerAutoScan()
 void WavetableOscillator::extractContiguousFrames(const juce::AudioBuffer<float>& buffer, double bufferSR,
                                                     float startFrac, float endFrac)
 {
-    if (sharedSource_ != nullptr) return;
+    // Combined compute+publish convenience — see extractFramesFromBuffer's doc
+    // comment in the header (same contract). A caller that must NOT hold the lock
+    // across the extraction work below uses prepareContiguousFrames()/
+    // applyPreparedMipData() instead.
+    applyPreparedMipData(prepareContiguousFrames(buffer, bufferSR, startFrac, endFrac));
+}
+
+WavetableOscillator::MipDataPtr WavetableOscillator::prepareContiguousFrames(
+    const juce::AudioBuffer<float>& buffer, double bufferSR,
+    float startFrac, float endFrac)
+{
+    // Off-lock compute phase of extractContiguousFrames() — see
+    // prepareFramesFromBuffer()'s doc comment for the shared nullptr/publish
+    // contract.
+    if (sharedSource_ != nullptr) return nullptr;
 
     const int bufferLen = buffer.getNumSamples();
     startFrac = juce::jlimit(0.0f, 1.0f, startFrac);
@@ -726,7 +801,7 @@ void WavetableOscillator::extractContiguousFrames(const juce::AudioBuffer<float>
     const float* data = buffer.getReadPointer(0) + regionStart;
     const int totalSamples = regionEnd - regionStart;
 
-    if (totalSamples < FRAME_SIZE) return;
+    if (totalSamples < FRAME_SIZE) return nullptr;
 
     std::vector<std::vector<float>> frames;
 
@@ -763,17 +838,27 @@ void WavetableOscillator::extractContiguousFrames(const juce::AudioBuffer<float>
         while (static_cast<int>(frames.size()) < MIN_FRAMES)
             frames.push_back(frames.back());
 
-    if (!frames.empty())
-        generateMipLevels(frames);
+    return frames.empty() ? nullptr : prepareMipLevels(frames);
 }
 
 void WavetableOscillator::setExactFrames(const juce::AudioBuffer<float>& strip)
 {
-    if (sharedSource_ != nullptr) return;
+    // Combined compute+publish convenience — see extractFramesFromBuffer's doc
+    // comment in the header (same contract). A caller that must NOT hold the lock
+    // across the frame-slicing/FFT work below uses prepareExactFrames()/
+    // applyPreparedMipData() instead.
+    applyPreparedMipData(prepareExactFrames(strip));
+}
+
+WavetableOscillator::MipDataPtr WavetableOscillator::prepareExactFrames(const juce::AudioBuffer<float>& strip)
+{
+    // Off-lock compute phase of setExactFrames() — see prepareFramesFromBuffer()'s
+    // doc comment for the shared nullptr/publish contract.
+    if (sharedSource_ != nullptr) return nullptr;
 
     const int totalSamples = strip.getNumSamples();
     if (strip.getNumChannels() < 1 || totalSamples < FRAME_SIZE)
-        return;
+        return nullptr;
 
     const float* data = strip.getReadPointer(0);
     const int numFrames = totalSamples / FRAME_SIZE;   // exact boundaries, tail ignored
@@ -787,8 +872,7 @@ void WavetableOscillator::setExactFrames(const juce::AudioBuffer<float>& strip)
         while (static_cast<int>(frames.size()) < MIN_FRAMES)
             frames.push_back(frames.back());
 
-    if (!frames.empty())
-        generateMipLevels(frames);
+    return frames.empty() ? nullptr : prepareMipLevels(frames);
 }
 
 void WavetableOscillator::setAdditiveBank(const std::vector<AdditivePartial>& partials)
@@ -803,9 +887,14 @@ void WavetableOscillator::setAdditiveBank(const std::vector<std::vector<Additive
     if (sharedSource_ != nullptr) return;   // shared-mode voices adopt from the master
 
     // Build the additive-bank payload. No frames, no mips: the partials are
-    // synthesized per sample, so this bypasses generateMipLevels entirely. Same
-    // atomic publish tail as generateMipLevels — voices pick it up via
-    // shareFramesFrom / morphToFramesFrom exactly like a wavetable generation.
+    // synthesized per sample, so this bypasses prepareMipLevels entirely. Publishes
+    // via the same applyPreparedMipData() plain-assignment-under-lock path
+    // prepareMipLevels' callers use — voices pick it up via shareFramesFrom /
+    // morphToFramesFrom exactly like a wavetable generation. NOTE: unlike those,
+    // this function has no production caller today (only tools-dir *.cpp harnesses,
+    // single-threaded, no lock needed there) — see loadPublishedMipData()'s
+    // comment. A future production caller MUST hold getCallbackLock() around it,
+    // same as extractFramesFromBuffer()'s convenience form.
     auto dest = std::make_shared<MipData>();
     dest->isAdditive = true;
     dest->numFrames = 1;   // sentinel: hasFrames()/processSample treat the bank as "has data"
@@ -887,8 +976,7 @@ void WavetableOscillator::setAdditiveBank(const std::vector<std::vector<Additive
     dest->additiveGain = (maxSumAbs > 1.0e-9) ? static_cast<float>(0.95 / maxSumAbs) : 0.0f;
     dest->generation = ++nextPublishedGeneration_;
 
-    MipDataPtr published = dest;
-    std::atomic_store_explicit(&publishedMipData_, published, std::memory_order_release);
+    applyPreparedMipData(std::move(dest));
 }
 
 // ─── Per-sample processing ───
