@@ -180,6 +180,13 @@ public:
      *  snapshot for exactly this reason. */
     int getInferenceCacheTraversableZones() const
     { return inferenceCacheTraversableZones_.load(std::memory_order_acquire); }
+    /** Bumped by every mutation of this cache. The zone COUNT cannot stand in
+     *  for this: a preset that replaces a full 4-deep cache with another full
+     *  4-deep one leaves the count where it was, and an aftertouch bar watching
+     *  the count would go on believing the position under the finger is loaded
+     *  when it holds something else entirely. */
+    unsigned getInferenceCacheGeneration() const
+    { return inferenceCacheGeneration_.load(std::memory_order_acquire); }
     void clearInferenceCache();
     bool addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate);
     bool playNextInferenceCacheEntry();
@@ -276,6 +283,9 @@ public:
     int  getCsoundCachePlaybackIndex() const { return csoundCachePlaybackIndex; }
     int  getCsoundCacheTraversableZones() const
     { return csoundCacheTraversableZones_.load(std::memory_order_acquire); }
+    /** See getInferenceCacheGeneration(). */
+    unsigned getCsoundCacheGeneration() const
+    { return csoundCacheGeneration_.load(std::memory_order_acquire); }
 
     // ── Whichever cache belongs to the oscillator in force ──────────────────
     // The CACHE row and the take switch speak to THIS, not to one of the two
@@ -1256,12 +1266,14 @@ private:
     // getInferenceCacheTraversableZones(). Written by
     // publishInferenceCacheTraversableZones() from every mutation above.
     std::atomic<int> inferenceCacheTraversableZones_ { 0 };
+    std::atomic<unsigned> inferenceCacheGeneration_ { 0 };
 
     std::vector<CsoundCacheEntry> csoundCacheEntries;
     int  csoundCacheCapacity = 0;
     int  csoundCachePlaybackIndex = 0;
     bool csoundCacheIsOfflineTake = false;
     std::atomic<int> csoundCacheTraversableZones_ { 0 };
+    std::atomic<unsigned> csoundCacheGeneration_ { 0 };
     // Which panel the player is on - written by the editor's oscillator toggle,
     // read by the active-cache router above. Atomic only because a plugin can be
     // asked for its state off the message thread; it is never read from audio.
@@ -1724,11 +1736,13 @@ public:
      *  Re-Prompt chain's own memory and the compile window the cadence gates
      *  read. Both go through the EDITOR for that reason, and both do nothing
      *  with no editor open - which is when there is nobody to tell either. */
-    // Returning FALSE means nothing was installed - an empty cache, a clamp that
-    // found nothing, a panel that refused. The bar must not then record that
-    // position as loaded, or it can never travel to it again.
-    std::function<bool(int)> onCachePositionRequested;
-    std::function<bool(int)> onLroCachePositionRequested;
+    // Nothing comes back. A refused landing - an empty cache, a clamp that found
+    // nothing, a panel that says no - simply does not sound, and the bar asks
+    // again the next time the hand reaches this position. Reporting the refusal
+    // so the bar could retry under a finger that never moved is what the retry
+    // would cost: an install per audio block.
+    std::function<void(int)> onCachePositionRequested;
+    std::function<void(int)> onLroCachePositionRequested;
 
     void startMidiLearn(const juce::String& paramId);
     void cancelMidiLearn();
@@ -1856,51 +1870,110 @@ private:
      *  block. Never touches the cache itself - it posts a position and lets the
      *  message thread do the loading, like every other audio→message request. */
     void updateAftertouchTraversal(const BlockParams& bp);
-    /** Release both aftertouch bars' memory of what they last loaded - something
-     *  other than the bar has just changed it. */
-    void releaseAftertouchTraversalMemory();
+    /** Drop a Cache-bar position parked behind a Csound swap. NOT one already in
+     *  a mailbox - see the definition. Audio thread; called where the bar
+     *  re-arms. */
+    void cancelParkedCachePosition();
+    /** The same for the Snap bar. */
+    void cancelParkedSnapSlot();
+public:
+    /** A snapshot slot was written over. The Snap bar's claim on it is stale -
+     *  the slot under the finger holds something else now. Message thread. */
+    void forgetSnapTraversalClaim() { atSnapForgetActed_.store(true, std::memory_order_release); }
+private:
     /** Recompute the atomic above. Message thread; called from every cache mutation. */
     void publishInferenceCacheTraversableZones();
     void publishCsoundCacheTraversableZones();
 
-    std::atomic<int>            atCachePosReq_      { -1 };     // audio→message: play NEURAL cache entry N (AT traversal); -1 = none
-    std::atomic<int>            atLroCachePosReq_   { -1 };     // audio→message: install LRO cache entry N (AT traversal); -1 = none
+    std::atomic<juce::uint64>   atCachePosReq_      { 0 };      // audio→message: play NEURAL cache entry N (AT traversal); 0 = none
+    // audio→message: install LRO cache entry N (AT traversal). Index AND the
+    // serial of the press that asked for it, in one atomic so the pair cannot
+    // tear. 0 = empty. See makeTraversalReq() for why the serial is needed.
+    std::atomic<juce::uint64>   atLroCachePosReq_   { 0 };
     // Message thread. An LRO position that arrived while a compile or its fade
     // was still running, waiting for the swap to free up. -1 = none.
     int                         pendingLroCachePos_ { -1 };
+    unsigned                    pendingLroCacheSeq_ { 0 };
+    // audio→message: the serial of the last press each bar made BEFORE it was
+    // disarmed (amount to zero, hands off the keyboard, idle, or the oscillator
+    // changed under the held note). Everything up to and including that serial
+    // belonged to a gesture that has ended.
+    //
+    // A serial rather than a flag, because the two threads cannot be ordered
+    // usefully here: a bare flag says "something was cancelled" without saying
+    // WHAT, so a press still in its mailbox when the flag went up is parked
+    // afterwards and survives the cancel that was meant for it - and in the
+    // language oscillator that lands a recompile a second later over an empty
+    // keyboard. Comparing serials is order-free and gives the same answer
+    // whenever the message thread happens to run.
+    std::atomic<unsigned>       atCacheCancelSeq_   { 0 };
+    std::atomic<unsigned>       atSnapCancelSeq_    { 0 };
+    // The harder kind. A gesture that merely ENDED still lets a press that can
+    // land immediately land - it is a millisecond behind the finger. A press
+    // resolved against the cache the player has just switched AWAY from must
+    // never land at all: the index means something else now, and installing it
+    // drags the engine back with it. Cancelled up to this serial means gone,
+    // whatever the drain finds and whenever it runs.
+    std::atomic<unsigned>       atCacheHardCancelSeq_ { 0 };
+    // message→audio: a press was dropped, so the bar no longer holds what it
+    // last asked for. Without this the dropped position stays claimed and the
+    // finger cannot reach it again without visiting another one first.
+    std::atomic<bool>           atCacheForgetActed_ { false };
+    std::atomic<bool>           atSnapForgetActed_  { false };
+    // Audio thread. Serial of the last press either bar made; only ever grows.
+    unsigned                    atPostSeq_          { 0 };
+    // The Snap bar's counterpart to pendingLroCachePos_ and its cancel. A
+    // snapshot recalled in the language oscillator restores an ORCHESTRA, which
+    // takes the same lifecycle mutex the compile thread holds for over a second
+    // - so it waits for the swap exactly as a cache position does rather than
+    // freezing the window on a control the player is holding down.
+    int                         pendingAtSnapSlot_  { -1 };
+    unsigned                    pendingAtSnapSeq_   { 0 };
     // Its OWN mailbox, not xlSnapshotReq_. Both are written from processBlock -
     // the controller from the MIDI loop, this one from the traversal - and a
     // single slot means whichever writes last silently eats the other. The
     // controller press is the one that would lose, and it is a one-shot with no
     // second chance, while a bar the player can simply move again is not.
-    std::atomic<int>            atSnapReq_          { -1 };     // audio→message: recall snapshot slot 1-4 (AT traversal); -1 = none
+    std::atomic<juce::uint64>   atSnapReq_          { 0 };      // audio→message: recall snapshot slot 1-4 (AT traversal); 0 = none
     // Audio thread only. The zone each traversal target last resolved to, so a
     // pressure that has not left its zone requests nothing, and lifting the
     // amount to zero re-arms both from scratch.
     int                         atCacheZone_        { -1 };
     bool                        atCacheLro_         { false };  // which cache the claim belongs to
+    unsigned                    atCacheGenSeen_     { 0 };      // its generation when this bar last resolved
+    bool                        atCacheGenValid_    { false };
     int                         atSnapZone_         { -1 };
-    // The position each one last ASKED for. The zone alone is not enough to
-    // decide whether anything changed: flipping a bar's sign turns the same zone
-    // into the opposite end of the cache, and watching only the zone would let
-    // that reversal pass unnoticed under a steady finger.
-    // What is LOADED, as far as each aftertouch bar is concerned - NOT "what the
-    // bar last sent". Cleared at the two roots every load passes through
-    // (loadGeneratedAudio, requestCsoundOrchestra) and by the cache clears, so a
-    // GENERATE replay, a snapshot recall, a preset, a tape or a depth change all
-    // release the bar: a finger already resting on that position can travel to
-    // it again instead of being swallowed by a memory of something no longer
-    // loaded.
+    // The position each bar last ASKED for - what the BAR sent, not what is
+    // loaded. The zone alone is not enough to decide whether anything changed:
+    // flipping a bar's sign turns the same zone into the opposite end of the
+    // cache, and watching only the zone would let that reversal pass unnoticed
+    // under a steady finger.
     //
-    // ...and what is OUTSTANDING: the index posted into the mailbox whose
-    // install has not finished. Without it the bar re-posts through the whole
-    // install window - the roots above clear the claim at the START of a load,
-    // and an LRO install is a Csound compile - and each re-post installs again,
-    // which does not terminate while the finger stays in the zone.
-    std::atomic<int>            atCacheInstalledIdx_ { -1 };
-    std::atomic<int>            atCachePostedIdx_    { -1 };
-    std::atomic<int>            atSnapInstalledSlot_ { -1 };
-    std::atomic<int>            atSnapPostedSlot_    { -1 };
+    // Deliberately NOT "what is loaded". Both bars are driven by the same
+    // pressure, and a memory of the loaded thing makes them fight: a landing is
+    // a load, a load releases the other bar, the other bar re-posts under a
+    // finger that has not moved, and its landing releases the first - one
+    // sample re-extract or one Csound recompile per audio block, for as long as
+    // the key is down. A bar acts when the HAND moves it. Anything else that
+    // loads - GENERATE, a snapshot, a preset - keeps what it loaded, and the
+    // finger travels away and back to overrule it.
+    //
+    // Audio thread only. Reset to -1 wherever the zone is (amount to zero,
+    // oscillator change), which is what re-arms a bar from scratch.
+    int                         atCacheActedIdx_    { -1 };
+    int                         atSnapActedSlot_    { -1 };
+    // Whether the pressure has been pushed past rest at all since the last time
+    // every key came up. Rest is where a note STARTS, not somewhere the player
+    // steered to, and a bar that acts there claims a position on the first note
+    // of the session and again on every note-on after it.
+    bool                        atCacheEngaged_     { false };
+    bool                        atSnapEngaged_      { false };
+    // The step each bar stood on when it was last re-armed. -1 = not looked yet.
+    // Engagement is "the resolved zone is no longer this one", which is the same
+    // measure the zone decision already makes, hysteresis and all.
+    int                         atCacheBaseZone_    { -1 };
+    int                         atSnapBaseZone_     { -1 };
+    bool                        atAnyKeyHeld_       { false };
     std::atomic<bool>           xlCacheToggleReq_   { false };  // audio→message: toggle inference cache 4↔Off (CC 49)
     std::atomic<bool>           xlGenTimingToggleReq_ { false };// audio→message: toggle drift_regen a.s.a.p.↔4 bars (CC 50)
     std::atomic<bool>           xlAutoApplyReq_     { false };  // any→message: (re)apply XL bindings (port select / preset load)

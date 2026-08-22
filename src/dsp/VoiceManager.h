@@ -181,11 +181,28 @@ public:
     /** Keys actually DOWN. Unlike hasActiveVoices(), which stays true for the
      *  whole release tail, this goes to zero the moment the player lets go. */
     int getHeldVoiceCount() const;
-    /** The hardest-pressed sounding voice, 0 when nothing sounds. What a target
+    /** Voices held by an external KEY that is still down - the damper pedal,
+     *  sostenuto, the drone and everything the sequencers and the arpeggiator
+     *  play excluded. getHeldVoiceCount() counts those too, which is right for
+     *  voice allocation and wrong for anything asking whether a hand is on the
+     *  keyboard. Computer-keyboard notes count: they carry no MIDI channel and
+     *  are recognised by their source id instead. */
+    int getKeyHeldVoiceCount() const;
+    /** The hardest-pressed key that is still DOWN, 0 when none is. What a target
      *  reads when it acts on the whole instrument instead of on one voice: MPE
      *  gives every note its own pressure, and the instrument can only be in one
-     *  place, so the note leaning hardest is the one that moves it. */
-    float maxSoundingPressure() const;
+     *  place, so the note leaning hardest is the one that moves it. Over the
+     *  same voices as getKeyHeldVoiceCount(). */
+    float maxHeldPressure() const;
+    /** Voice source id the computer keyboard plays under. Above every sequencer
+     *  strand on purpose, so such a voice can be told apart from an internal one. */
+    static constexpr int kComputerKeyboardSourceId = 15;
+    /** The pressure reaching one note number, whether or not it currently has a
+     *  voice - channel pressure, mod wheel, breath, or its own poly pressure.
+     *  For sources that hold keys without holding voices, the arpeggiator above
+     *  all: between its steps nothing is sounding, and a hand pressing into the
+     *  chord it is playing has to be readable all the same. */
+    float pressureForHeldNote(int note) const { return pressureForNote(note); }
 
     /** Set voice limit at runtime (1=mono, 4/6/8/12/16). */
     void setVoiceLimit(int limit) { voiceLimit = juce::jlimit(1, MAX_VOICES, limit); }
@@ -263,6 +280,7 @@ private:
     void releaseSostenutoVoices();
     void refreshPerformancePressure();
     float pressureForNote(int note) const;
+    bool  isKeyHeldVoice(int voiceIdx) const;
     // Effective Z for a voice = max(its note's aggregate pressure, its own MPE
     // member-channel pressure). Keeps per-note Z independent of zone-wide pressure.
     float pressureForVoice(int voiceIdx) const;

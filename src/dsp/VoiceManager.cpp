@@ -1134,11 +1134,46 @@ float VoiceManager::pressureForVoice(int voiceIdx) const
                       voiceMpePressure_[static_cast<size_t>(voiceIdx)]);
 }
 
-float VoiceManager::maxSoundingPressure() const
+bool VoiceManager::isKeyHeldVoice(int i) const
+{
+    // A key that is DOWN, and nothing else.
+    //   - releasing: its pressure is frozen at what it had when it was let go,
+    //     and stays readable through the whole amp tail;
+    //   - the damper and sostenuto: the voice sings on with the key up, and its
+    //     stored pressure with it;
+    //   - the drone: the step sequencer's, held with nobody at the keyboard;
+    //   - anything the sequencers or the arpeggiator play: those are internal
+    //     notes (MIDI channel 0), not hands.
+    // Every one of them reads as a held key to a naive test, and each would let
+    // a control that is meant to follow a finger follow something else instead.
+    if (i == droneVoiceIndex) return false;
+    const auto& v = voices[static_cast<size_t>(i)];
+    return v.isActive()
+        && ! v.isReleasing()
+        && ! sustainedVoice[static_cast<size_t>(i)]
+        && ! sostenutoReleasedVoice[static_cast<size_t>(i)]
+        // An external key carries its MIDI channel; the computer keyboard plays
+        // on none and is told apart by its source id. Both are hands. The
+        // arpeggiator's held-key list covers them as well, but it is keyed by
+        // note NUMBER - hold C4 on the computer keyboard, then play and release
+        // C4 on the MIDI keyboard, and that list drops a key still held.
+        && (voiceMidiChannel_[static_cast<size_t>(i)] > 0
+            || voiceSourceId[static_cast<size_t>(i)] == kComputerKeyboardSourceId);
+}
+
+int VoiceManager::getKeyHeldVoiceCount() const
+{
+    int count = 0;
+    for (int i = 0; i < MAX_VOICES; ++i)
+        if (isKeyHeldVoice(i)) ++count;
+    return count;
+}
+
+float VoiceManager::maxHeldPressure() const
 {
     float highest = 0.0f;
     for (int i = 0; i < MAX_VOICES; ++i)
-        if (voices[static_cast<size_t>(i)].isActive())
+        if (isKeyHeldVoice(i))
             highest = juce::jmax(highest, pressureForVoice(i));
     return highest;
 }

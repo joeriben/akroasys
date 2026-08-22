@@ -693,7 +693,7 @@ void T5ynthProcessor::endStepHoldPreview()
 
 // Voice source id for notes played on the computer keyboard. Distinct from
 // external MIDI (-1) so the two can be released independently.
-static constexpr int kComputerKeyboardSourceId = 15;
+static constexpr int kComputerKeyboardSourceId = VoiceManager::kComputerKeyboardSourceId;
 
 void T5ynthProcessor::beginComputerKeyboardNote(int midiNote, float velocity, bool isKeystroke)
 {
@@ -2499,11 +2499,6 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 bool T5ynthProcessor::requestCsoundOrchestra(const juce::String& orchestraText)
 {
-    // Something is replacing the sounding instrument. Whatever position the
-    // aftertouch bars believed was loaded is no longer it - the drain writes the
-    // position back afterwards when the change WAS a bar's own landing.
-    releaseAftertouchTraversalMemory();
-
     // Tail migration (2026-07-25, kvel removal): presets, DAW sessions and SNAP
     // slots saved before that date carry the old host output line — with the
     // kvel factor that made the LRO scale as vel^2 — inside their stored
@@ -3641,6 +3636,33 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // next key press fires the off-edge and sounds that key a SECOND time on
         // top of the voice the key press already started.
         arpWasEnabled = arpEnabled;
+        // Same reason, for the aftertouch bars. updateAftertouchTraversal also
+        // sits below this return, and it is the only writer of atAnyKeyHeld_ -
+        // so a key released while the instrument is idle (a computer-keyboard
+        // key makes no MIDI and wakes nothing) would never be seen as released.
+        // The bars would still be engaged at the next key press, and the first
+        // block of that note would land the position pressure 0 resolves to,
+        // for a press with no aftertouch in it at all.
+        //
+        // Not quite "idle means hands off" - a chord with no sustain can decay
+        // into idle with the keys still down. Ten seconds of silence ends a
+        // gesture either way, and the bar re-arms from wherever the hand is.
+        // Once on the way into idle, not on every idle block - the cancels below
+        // would otherwise sit permanently raised (see cancelParkedCachePosition).
+        if (atAnyKeyHeld_ || atCacheEngaged_ || atSnapEngaged_
+            || atCacheZone_ >= 0 || atSnapZone_ >= 0
+            || atCacheBaseZone_ >= 0 || atSnapBaseZone_ >= 0)
+        {
+            atAnyKeyHeld_    = false;
+            atCacheZone_     = -1;
+            atCacheBaseZone_ = -1;
+            atCacheEngaged_  = false;
+            atSnapZone_      = -1;
+            atSnapBaseZone_  = -1;
+            atSnapEngaged_   = false;
+            cancelParkedCachePosition();
+            cancelParkedSnapSlot();
+        }
         // Keep free-running modulators phase-accurate. lastLfoXVal_ must be
         // refreshed here too, not just advanced — updateDriftState() (called
         // every block, including this deep-idle one, since it runs above this
@@ -6531,8 +6553,6 @@ juce::AudioBuffer<float> T5ynthProcessor::conditionGeneratedSource (const juce::
 
 void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBuffer, double sr)
 {
-    releaseAftertouchTraversalMemory();   // see requestCsoundOrchestra
-
     samplerProcessorDebugLog("loadGeneratedAudio begin samples=" + juce::String(audioBuffer.getNumSamples())
                              + " sr=" + juce::String(sr, 2)
                              + " masterBefore={" + masterSampler.debugStateString() + "}");
@@ -6998,9 +7018,9 @@ void T5ynthProcessor::setInferenceCacheCapacity(int capacity)
 
 void T5ynthProcessor::clearInferenceCache()
 {
-    releaseAftertouchTraversalMemory();   // see clearCsoundCache
-    atCachePostedIdx_.store(-1, std::memory_order_release);
-    atCachePosReq_.store(-1, std::memory_order_release);
+    // Anything still on its way: a position posted into a cache that is being
+    // emptied must not install into whatever fills it next.
+    atCachePosReq_.store(0, std::memory_order_release);
     inferenceCacheEntries.clear();
     inferenceCachePlaybackIndex = 0;
     inferenceCacheIsOfflineTake = false;   // whatever it held, it is gone with it
@@ -7014,6 +7034,7 @@ void T5ynthProcessor::publishInferenceCacheTraversableZones()
     inferenceCacheTraversableZones_.store(
         isInferenceCacheFull() ? static_cast<int>(inferenceCacheEntries.size()) : 0,
         std::memory_order_release);
+    inferenceCacheGeneration_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate)
@@ -7060,6 +7081,25 @@ bool T5ynthProcessor::playNextInferenceCacheEntry()
 
 namespace
 {
+/** One aftertouch press, as it travels from the audio thread to the message
+ *  thread: the position asked for and the serial of the press that asked, in a
+ *  single word so the two cannot be read apart. 0 means the mailbox is empty. */
+inline juce::uint64 makeTraversalReq(unsigned seq, int idx)
+{
+    return (static_cast<juce::uint64>(seq) << 32)
+         | static_cast<juce::uint32>(idx + 1);
+}
+inline unsigned traversalReqSeq(juce::uint64 v) { return static_cast<unsigned>(v >> 32); }
+inline int      traversalReqIdx(juce::uint64 v)
+{
+    return static_cast<int>(static_cast<juce::uint32>(v & 0xffffffffu)) - 1;
+}
+/** Serial `a` is at or before serial `b`, wrap included. */
+inline bool traversalSeqReached(unsigned a, unsigned b)
+{
+    return static_cast<juce::int32>(a - b) <= 0;
+}
+
 /** Which of `zones` equal steps the pressure has reached, with a dead band so a
  *  finger resting on a boundary does not walk back and forth over it. Returns
  *  -1 when there is nothing to travel through.
@@ -7086,8 +7126,16 @@ int traversalZone(float pressure, float amount, int zones, int currentZone)
     // step is now 1/N of the travel, and pressed fully in (or fully released)
     // the traveller is at an end of what this bar spans, where no hysteresis may
     // hold it back.
+    //
+    // The floor carries the SAME epsilon the test above does. The bar's amount
+    // comes off a snapped slider grid, and the snap is a multiply-add that the
+    // compiler contracts to an FMA - so the value drawn as 0.50 arrives as
+    // 0.49999997. On a two-deep cache that is floor(0.99999994) = 0: the top of
+    // the bar's travel resolves to the step it started in, and a bar that
+    // engages on travel would then never engage at all. Inert over its whole
+    // length, for every amount that lands exactly on 1/zones.
     if (drive >= std::abs(amount) - 1.0e-4f || drive <= 1.0e-4f)
-        return juce::jlimit(0, zones - 1, static_cast<int>(std::floor(scaled)));
+        return juce::jlimit(0, zones - 1, static_cast<int>(std::floor(scaled + 1.0e-4f)));
 
     // A quarter of a step of overshoot before a boundary is crossed. Wide,
     // because a step here is not a value moving but a whole sample being
@@ -7095,16 +7143,31 @@ int traversalZone(float pressure, float amount, int zones, int currentZone)
     if (currentZone >= 0
         && scaled > static_cast<float>(currentZone) - 0.25f
         && scaled < static_cast<float>(currentZone) + 1.25f)
-        return currentZone;
+        return juce::jlimit(0, zones - 1, currentZone);   // a shrunken cache must not leak an old zone
 
-    return juce::jlimit(0, zones - 1, static_cast<int>(std::floor(scaled)));
+    return juce::jlimit(0, zones - 1, static_cast<int>(std::floor(scaled + 1.0e-4f)));
 }
 } // namespace
 
-void T5ynthProcessor::releaseAftertouchTraversalMemory()
+void T5ynthProcessor::cancelParkedCachePosition()
 {
-    atCacheInstalledIdx_.store(-1, std::memory_order_release);
-    atSnapInstalledSlot_.store(-1, std::memory_order_release);
+    // What is PARKED, and only that. A position already in a mailbox was asked
+    // for by a hand that had moved, and it is one turn of the message loop from
+    // landing - a millisecond or two. Taking it back would make the same gesture
+    // load or not load depending on whether that turn happened to come first,
+    // and it would bite hardest at the bottom of the travel: on most keyboards
+    // the pressure reaches zero a few milliseconds BEFORE the note-off, so the
+    // last step of every phrase would be a coin toss.
+    //
+    // What waits behind a Csound swap is a different matter. That one arrives a
+    // second or more later, long after the gesture, and it lives in the drain's
+    // own state where dropping it is exact rather than a race.
+    atCacheCancelSeq_.store(atPostSeq_, std::memory_order_release);
+}
+
+void T5ynthProcessor::cancelParkedSnapSlot()
+{
+    atSnapCancelSeq_.store(atPostSeq_, std::memory_order_release);   // parked only - see above
 }
 
 void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
@@ -7112,16 +7175,51 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
     const float cacheAmt = bp.aftertouchTargetAmt[AftertouchTarget::Cache];
     const float snapAmt  = bp.aftertouchTargetAmt[AftertouchTarget::Snap];
 
+    // A press this bar made was dropped, or the slot it holds was written over.
+    // Either way it no longer holds what it last asked for, and going on
+    // believing it does would leave that position unreachable until the finger
+    // had visited another one and come back.
+    //
+    // A full RE-ARM, not just the claim. Letting go of the claim alone would
+    // leave the bar engaged, and an engaged bar with nothing claimed posts on
+    // the very next block - firing a landing under a motionless finger, for a
+    // snapshot the player was storing or a press that was just discarded. The
+    // same rule as every other re-arm in this function: it permits the next
+    // landing, it does not make one.
+    if (atCacheForgetActed_.exchange(false, std::memory_order_acq_rel))
+    {
+        atCacheZone_ = -1; atCacheActedIdx_ = -1;
+        atCacheEngaged_ = false; atCacheBaseZone_ = -1;
+    }
+    if (atSnapForgetActed_.exchange(false, std::memory_order_acq_rel))
+    {
+        atSnapZone_ = -1; atSnapActedSlot_ = -1;
+        atSnapEngaged_ = false; atSnapBaseZone_ = -1;
+    }
+
     // Each bar re-arms on ITS OWN. Zeroing one while the other stays live has to
     // forget that one's zone, or turning it back up with the finger already
     // resting where it left off would post nothing and the instrument would sit
     // on whatever is loaded instead of going where the hand is.
-    if (cacheAmt == 0.0f) { atCacheZone_ = -1;
-                            atCacheInstalledIdx_.store(-1, std::memory_order_release);
-                            atCachePostedIdx_.store(-1, std::memory_order_release); }
-    if (snapAmt  == 0.0f) { atSnapZone_  = -1;
-                            atSnapInstalledSlot_.store(-1, std::memory_order_release);
-                            atSnapPostedSlot_.store(-1, std::memory_order_release); }
+    // Once, when the bar goes down - not on every block it spends at zero. Most
+    // patches leave both of these at zero forever, and a cancel raised on every
+    // block would sit permanently true: harmless today, because nothing else
+    // fills the two parking slots, and a trap for whoever adds something that
+    // does.
+    if (cacheAmt == 0.0f && (atCacheZone_ >= 0 || atCacheActedIdx_ >= 0
+                             || atCacheEngaged_ || atCacheBaseZone_ >= 0))
+    {
+        atCacheZone_ = -1; atCacheActedIdx_ = -1;
+        atCacheEngaged_ = false; atCacheBaseZone_ = -1;
+        cancelParkedCachePosition();
+    }
+    if (snapAmt == 0.0f && (atSnapZone_ >= 0 || atSnapActedSlot_ >= 0
+                            || atSnapEngaged_ || atSnapBaseZone_ >= 0))
+    {
+        atSnapZone_ = -1; atSnapActedSlot_ = -1;
+        atSnapEngaged_ = false; atSnapBaseZone_ = -1;
+        cancelParkedSnapSlot();
+    }
     if (cacheAmt == 0.0f && snapAmt == 0.0f)
         return;
 
@@ -7130,9 +7228,87 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
     // until it goes silent - so letting go of everything would read as a slow
     // slide back to the first position, a move nobody asked for at the one
     // moment nobody is playing.
-    if (voiceManager.getHeldVoiceCount() <= 0)
+    //
+    // Hands off ends the gesture, and everything it had outstanding with it: a
+    // position swept past and parked behind a Csound compile must not arrive a
+    // second later over an empty keyboard, and the next note must be pressed
+    // into before a bar claims anything again.
+    //
+    // The ARPEGGIATOR counts as hands on the keyboard. It plays its chord as a
+    // run of short internal notes, and between two of them no voice is held at
+    // all - so asking the voices alone would read every gap in the pattern as
+    // the player letting go, forget where the traveller was, and then take the
+    // next step as a fresh gesture: one whole sound loaded per arpeggiator step,
+    // which in the language oscillator is one Csound recompile per step.
+    //
+    // And a PEDAL is not a hand. A voice held by the damper, by sostenuto or as
+    // the step sequencer's drone is active and not releasing, so counting those
+    // would mean the gesture never ends: with every key lifted the bar stays
+    // engaged and keeps travelling on whatever the mod wheel or the breath
+    // controller is parked at - one landing per step, nobody at the keyboard,
+    // and the drone latches that state until it is cleared.
+    const bool anyHeld = voiceManager.getKeyHeldVoiceCount() > 0
+                      || arpeggiator.hasHeldKeys();
+    if (anyHeld != atAnyKeyHeld_)
+    {
+        atAnyKeyHeld_ = anyHeld;
+        if (! anyHeld)
+        {
+            // The gesture is over: each bar must be pressed into again before it
+            // claims anything, and nothing it had outstanding may still arrive.
+            //
+            // What does NOT go is where the traveller stood. Forgetting that
+            // would make every repeated note re-ask for the position already
+            // loaded, and the pressure does not have to fall between two notes
+            // for that to fire: the mod wheel and the breath controller feed the
+            // same reading and stay where they were parked, and under the
+            // arpeggiator the finger holding the chord makes no voice at all. In
+            // the language oscillator each of those re-asks is a recompile of
+            // the orchestra already sounding, one per note, back to back.
+            atCacheZone_ = -1; atCacheEngaged_ = false; atCacheBaseZone_ = -1;
+            atSnapZone_  = -1; atSnapEngaged_  = false; atSnapBaseZone_  = -1;
+            cancelParkedCachePosition();
+            cancelParkedSnapSlot();
+        }
+    }
+    if (! anyHeld)
         return;
-    const float pressure = voiceManager.maxSoundingPressure();
+    // Same reason, for the reading itself: in an arpeggiator gap there is no
+    // voice to read the pressure off, and taking 0 there would walk the
+    // traveller back to the first position on every gap.
+    float pressure = voiceManager.maxHeldPressure();
+    for (const auto& k : arpeggiator.getHeldKeys())
+        pressure = juce::jmax(pressure, voiceManager.pressureForHeldNote(k.note));
+
+    // REST IS NOT A DESTINATION - see where each bar engages, below.
+
+    if (snapAmt != 0.0f)
+    {
+        constexpr int kSnapSlots = 4;
+        const int zone = traversalZone(pressure, snapAmt, kSnapSlots, atSnapZone_);
+        if (zone >= 0)
+        {
+            atSnapZone_ = zone;
+            if (! atSnapEngaged_)        // the hand has to move - see the cache bar below
+            {
+                if (atSnapBaseZone_ < 0)          atSnapBaseZone_ = zone;
+                else if (zone != atSnapBaseZone_) atSnapEngaged_ = true;
+            }
+            if (atSnapEngaged_)
+            {
+                const int slot = (snapAmt > 0.0f ? zone
+                                                 : (kSnapSlots - 1 - zone)) + 1;  // slots are 1-4
+                // Same question as the cache bar below, for the same reason.
+                if (slot != atSnapActedSlot_)
+                {
+                    atSnapActedSlot_ = slot;
+                    atSnapReq_.store(makeTraversalReq(++atPostSeq_, slot),
+                                     std::memory_order_release);
+                    triggerAsyncUpdate();
+                }
+            }
+        }
+    }
 
     if (cacheAmt != 0.0f)
     {
@@ -7153,61 +7329,137 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         if (lro != atCacheLro_)
         {
             atCacheLro_ = lro;
-            atCacheInstalledIdx_.store(-1, std::memory_order_release);
-            atCachePostedIdx_.store(-1, std::memory_order_release);
+            atCacheZone_ = -1;
+            atCacheActedIdx_ = -1;
+            // Engagement goes too. A re-arm PERMITS the next landing, it does
+            // not fire one: nothing here was the hand moving. Leaving the bar
+            // engaged would post under a motionless finger the moment something
+            // else changed the cache - and something else did, or we would not
+            // be re-arming. The player travels one step and the bar is back.
+            atCacheEngaged_ = false;
+            atCacheBaseZone_ = -1;
+            // The MAILBOXES go too, which the cancel deliberately leaves alone
+            // everywhere else. Elsewhere a posted position is a millisecond from
+            // landing and taking it back would be a race; here it is simply
+            // wrong - it was resolved against the cache being left, and an LRO
+            // landing forces the engine back to Csound on its way in. The flip
+            // cannot post in this same block: it has just cleared engagement, so
+            // the most this block does below is take a bearing.
+            //
+            // Emptying them is not enough on its own: a drain can already have
+            // taken the press out of the mailbox before this block runs, and no
+            // store order reaches backwards into a load that has happened. So
+            // the serial is what actually discards it - anything posted up to
+            // now is cancelled HARD, and the drain refuses it wherever it has
+            // got to.
+            atCachePosReq_.store(0, std::memory_order_release);
+            atLroCachePosReq_.store(0, std::memory_order_release);
+            atCacheHardCancelSeq_.store(atPostSeq_, std::memory_order_release);
+            cancelParkedCachePosition();
         }
+        // The size and the generation are two atomics, written in the opposite
+        // order to the one they are read in. Release/acquire rules out the pair
+        // that would be dangerous - a new generation over the old depth - and
+        // leaves the harmless one, a fresh depth still carrying the generation
+        // before the bump. Harmless only because of this sandwich: read the
+        // generation on both sides and sit the block out if it moved, so the
+        // bar can never record that generation as SEEN while it was steering by
+        // a depth that did not belong to it. That mistake would not correct
+        // itself; sitting out costs one block, 1-10 ms.
+        // Do not "fix" this by swapping the two stores in the publishers - that
+        // turns the self-correcting case into the permanent one.
+        const unsigned genBefore = lro ? getCsoundCacheGeneration()
+                                       : getInferenceCacheGeneration();
         const int zones = lro ? getCsoundCacheTraversableZones()
                               : getInferenceCacheTraversableZones();
+        const unsigned gen = lro ? getCsoundCacheGeneration()
+                                 : getInferenceCacheGeneration();
+        if (gen != genBefore)
+            return;   // the Snap bar above has already had its block
+        // A cache that has been touched at all is a different cache, and the
+        // position this bar last asked for says nothing about the new one - so
+        // the bar re-arms and a finger already somewhere in it can travel there
+        // again. A COUNTER, not the size: the size is only ever sampled on
+        // blocks where this bar is armed and a key is down, so every value it
+        // passes through in between is invisible. A preset load empties the
+        // cache and refills it to the same depth inside one message-thread call;
+        // watching the size, the bar would see 4 before and 4 after and go on
+        // believing the position under the finger is loaded. A counter cannot be
+        // stepped over.
+        if (! atCacheGenValid_ || gen != atCacheGenSeen_)
+        {
+            atCacheGenValid_ = true;
+            atCacheGenSeen_  = gen;
+            atCacheZone_     = -1;
+            atCacheActedIdx_ = -1;
+            atCacheEngaged_  = false;   // permits, does not fire - see below
+            atCacheBaseZone_ = -1;
+        }
         const int zone = traversalZone(pressure, cacheAmt, zones, atCacheZone_);
         if (zone >= 0)
         {
             atCacheZone_ = zone;
-            // The sign of the bar is the direction of travel through the cache:
-            // right for the order the samples were generated in, left for the
-            // way back. That is the one thing this feature adds to the stepping
-            // the Re-Prompt path already does.
-            const int idx = cacheAmt > 0.0f ? zone : (zones - 1 - zone);
-            // Neither already loaded nor already on its way. The second half is
-            // what keeps this from looping: the install CLEARS the claim (a load
-            // is a load, whoever asked for it), and an LRO install is a Csound
-            // compile, so without it every block inside that window would post
-            // again and each post would install again.
-            if (idx != atCacheInstalledIdx_.load(std::memory_order_acquire)
-                && idx != atCachePostedIdx_.load(std::memory_order_acquire))
+            // THE HAND HAS TO MOVE. Where a bar stands when it is re-armed is
+            // its starting point, not a destination it was steered to, and until
+            // the hand carries it off that step it claims nothing.
+            //
+            // Without this the first note of the session crossfades away the
+            // sound the preset opened with - a key taken and not pressed into
+            // sits at the first step, and in the language oscillator claiming it
+            // is a recompile over a second long. And a re-arm would FIRE a
+            // landing rather than permit one: the cache changing under a
+            // motionless finger would install the position that finger happens
+            // to rest on, for a movement nobody made.
+            //
+            // A threshold on the pressure cannot do this. One step is 1/N of the
+            // bar's travel, so a level that reads as "pressed in" on a two-deep
+            // cache is a quarter of the way through a sixteen-deep one, and a
+            // keyboard whose aftertouch idles a few counts above zero engages on
+            // contact. The step boundary is the only measure that scales with
+            // both the bar's depth and the cache's - and it is the one the zone
+            // decision above already computes, hysteresis included.
+            //
+            // Once engaged the bar follows the finger for the rest of the
+            // phrase, rest included: by then rest is somewhere it was steered
+            // back to.
+            if (! atCacheEngaged_)
             {
-                atCachePostedIdx_.store(idx, std::memory_order_release);
-                // Into the mailbox of the cache this index was RESOLVED against.
-                // One shared mailbox would leave the message thread to guess, and
-                // it would guess with whatever the mode is by the time it drains
-                // - which a snapshot recall in the same drain pass can already
-                // have moved. An index means nothing without its cache.
-                (lro ? atLroCachePosReq_ : atCachePosReq_)
-                    .store(idx, std::memory_order_release);
-                triggerAsyncUpdate();
+                if (atCacheBaseZone_ < 0)          atCacheBaseZone_ = zone;
+                else if (zone != atCacheBaseZone_) atCacheEngaged_ = true;
+            }
+            if (atCacheEngaged_)
+            {
+                // The sign of the bar is the direction of travel through the
+                // cache: right for the order the samples were generated in, left
+                // for the way back. That is the one thing this feature adds to
+                // the stepping the Re-Prompt path already does.
+                const int idx = cacheAmt > 0.0f ? zone : (zones - 1 - zone);
+                // Asked for once per position the HAND reaches. Not "once per
+                // position that is not currently loaded": both bars hang off the
+                // same pressure, and every landing is a load, so a bar that
+                // chases what is loaded is re-armed by the other bar's landing
+                // under a finger that never moved - and each re-post lands again.
+                if (idx != atCacheActedIdx_)
+                {
+                    atCacheActedIdx_ = idx;
+                    // Into the mailbox of the cache this index was RESOLVED
+                    // against. One shared mailbox would leave the message thread
+                    // to guess, and it would guess with whatever the mode is by
+                    // the time it drains - which a snapshot recall in the same
+                    // drain pass can already have moved. An index means nothing
+                    // without its cache.
+                    if (lro)
+                        atLroCachePosReq_.store(makeTraversalReq(++atPostSeq_, idx),
+                                                std::memory_order_release);
+                    else
+                        atCachePosReq_.store(makeTraversalReq(++atPostSeq_, idx),
+                                             std::memory_order_release);
+                    triggerAsyncUpdate();
+                }
             }
         }
     }
 
-    if (snapAmt != 0.0f)
-    {
-        constexpr int kSnapSlots = 4;
-        const int zone = traversalZone(pressure, snapAmt, kSnapSlots, atSnapZone_);
-        if (zone >= 0)
-        {
-            atSnapZone_ = zone;
-            const int slot = (snapAmt > 0.0f ? zone : (kSnapSlots - 1 - zone)) + 1;  // slots are 1-4
-            // Same two questions as the cache bar above, for the same reasons:
-            // a slot recalled by hand, by CC 47 or by a re-store must release the
-            // bar, and an outstanding recall must not be sent twice.
-            if (slot != atSnapInstalledSlot_.load(std::memory_order_acquire)
-                && slot != atSnapPostedSlot_.load(std::memory_order_acquire))
-            {
-                atSnapPostedSlot_.store(slot, std::memory_order_release);
-                atSnapReq_.store(slot, std::memory_order_release);
-                triggerAsyncUpdate();
-            }
-        }
-    }
 }
 
 // ── The LRO's cache ─────────────────────────────────────────────────────────
@@ -7225,11 +7477,9 @@ void T5ynthProcessor::setCsoundCacheCapacity(int capacity)
 
 void T5ynthProcessor::clearCsoundCache()
 {
-    // The bars' memory AND anything still on its way: a position posted into a
-    // cache that is being emptied must not install into whatever fills it next.
-    releaseAftertouchTraversalMemory();
-    atCachePostedIdx_.store(-1, std::memory_order_release);
-    atLroCachePosReq_.store(-1, std::memory_order_release);
+    // Anything still on its way: a position posted into a cache that is being
+    // emptied must not install into whatever fills it next.
+    atLroCachePosReq_.store(0, std::memory_order_release);
     pendingLroCachePos_ = -1;
     csoundCacheEntries.clear();
     csoundCachePlaybackIndex = 0;
@@ -7242,6 +7492,7 @@ void T5ynthProcessor::publishCsoundCacheTraversableZones()
     csoundCacheTraversableZones_.store(
         isCsoundCacheFull() ? static_cast<int>(csoundCacheEntries.size()) : 0,
         std::memory_order_release);
+    csoundCacheGeneration_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 bool T5ynthProcessor::addCsoundCacheEntry(const CsoundCacheEntry& entry)
@@ -10038,40 +10289,78 @@ void T5ynthProcessor::handleAsyncUpdate()
     if (snapReq >= 0 && onSnapshotRequested)
         onSnapshotRequested(snapReq);
 
-    // Aftertouch → Snap: recall the slot the pressure has reached. Own mailbox,
-    // drained before the controller's so a press in the same cycle wins the last
-    // word - it is the deliberate act, and it cannot repeat itself.
-    const int atSnapSlot = atSnapReq_.exchange(-1, std::memory_order_acq_rel);
-    if (atSnapSlot >= 0)
+    // Aftertouch → Snap: recall the slot the pressure has reached. Its own
+    // mailbox, not the controller's - a single slot would let whichever wrote
+    // last silently eat the other, and the controller press is a one-shot with
+    // no second chance while a bar can simply be moved again. The controller is
+    // drained just above, so in a cycle carrying both, the bar has the last
+    // word; the press is not lost, it is overruled by the finger.
+    //
+    // And it waits for the Csound swap for the same reason the cache landing
+    // below does: in the language oscillator a slot carries an orchestra, and
+    // installing it takes csoundLifecycleMutex_, which the compile thread holds
+    // across a full prepare and warmup. Called straight from a held control that
+    // is the whole window frozen for over a second, once per step.
     {
-        if (onSnapshotRequested)
-            onSnapshotRequested(atSnapSlot);
-        // The recall clears both bars' memory on its way through (it loads audio
-        // or an orchestra), so THIS slot is written back afterwards. Released
-        // even with no editor listening, or the bar would wait forever for an
-        // install that nobody is going to make.
-        atSnapInstalledSlot_.store(atSnapSlot, std::memory_order_release);
-        int expected = atSnapSlot;
-        atSnapPostedSlot_.compare_exchange_strong(expected, -1,
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_relaxed);
+        const juce::uint64 req = atSnapReq_.exchange(0, std::memory_order_acq_rel);
+        const bool arrivedNow = traversalReqIdx(req) >= 0;
+        if (arrivedNow)
+        {
+            pendingAtSnapSlot_ = traversalReqIdx(req);
+            pendingAtSnapSeq_  = traversalReqSeq(req);   // latest wins
+        }
+
+        const bool waitForSwap = isLanguageOscillatorSounding()
+                              && (csoundCompileInFlight_.load(std::memory_order_acquire)
+                               || csoundSwapPending_.load(std::memory_order_acquire)
+                               || csoundSwapFading_.load(std::memory_order_acquire));
+        // Belonging to a gesture that has ended.
+        const bool stale = pendingAtSnapSlot_ >= 0
+                        && traversalSeqReached(pendingAtSnapSeq_,
+                               atSnapCancelSeq_.load(std::memory_order_acquire));
+
+        // A press that can land NOW lands, cancelled or not: it is a millisecond
+        // behind the finger, which is no distance at all, and the alternative is
+        // a last step that arrives or does not depending on when the message
+        // thread happened to run. Pressure reaches zero a few milliseconds
+        // before the note-off on most keyboards, so that last step is the end of
+        // very nearly every phrase.
+        //
+        // A press that would have to WAIT is another matter. It arrives when the
+        // Csound swap frees up, a second or more later, and by then the gesture
+        // it belonged to is over - so once overtaken by a cancel it goes, and it
+        // goes on the same terms whenever this happens to run.
+        if (pendingAtSnapSlot_ >= 0 && stale && (waitForSwap || ! arrivedNow))
+        {
+            pendingAtSnapSlot_ = -1;
+            atSnapForgetActed_.store(true, std::memory_order_release);
+        }
+
+        if (pendingAtSnapSlot_ >= 0 && ! waitForSwap)
+        {
+            const int slot = pendingAtSnapSlot_;
+            pendingAtSnapSlot_ = -1;
+            if (onSnapshotRequested)
+                onSnapshotRequested(slot);
+        }
     }
 
-    // Aftertouch → Cache: play the entry the pressure has reached. Same editor path
-    // the Re-Prompt stepping uses, so the held note crossfades to it. -1 = none.
-    const int cachePosReq = atCachePosReq_.exchange(-1, std::memory_order_acq_rel);
-    if (cachePosReq >= 0)
+    // Aftertouch → Cache: play the entry the pressure has reached. Same editor
+    // path the Re-Prompt stepping uses, so the held note crossfades to it.
+    // Nothing waits here - a neural entry installs at once - so the only cancel
+    // that can reach this one is the hard one, and it applies wherever the press
+    // has got to.
     {
-        // The install cleared the bar's claim on its way through (every load
-        // does); write it back only if the entry actually landed. A refused
-        // install that claimed the position anyway would make that position
-        // unreachable for the rest of the gesture.
-        const bool installed = onCachePositionRequested && onCachePositionRequested(cachePosReq);
-        atCacheInstalledIdx_.store(installed ? cachePosReq : -1, std::memory_order_release);
-        int expected = cachePosReq;
-        atCachePostedIdx_.compare_exchange_strong(expected, -1,
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_relaxed);
+        const juce::uint64 req = atCachePosReq_.exchange(0, std::memory_order_acq_rel);
+        const int idx = traversalReqIdx(req);
+        if (idx >= 0)
+        {
+            if (traversalSeqReached(traversalReqSeq(req),
+                                    atCacheHardCancelSeq_.load(std::memory_order_acquire)))
+                atCacheForgetActed_.store(true, std::memory_order_release);
+            else if (onCachePositionRequested)
+                onCachePositionRequested(idx);
+        }
     }
 
     // Aftertouch → Cache, LRO side. Out through the editor like the neural one:
@@ -10085,13 +10374,38 @@ void T5ynthProcessor::handleAsyncUpdate()
     // free; the swap's own completion comes back through here (it re-triggers to
     // let a request that arrived during the fade start), so nothing is stranded.
     {
-        const int lroReq = atLroCachePosReq_.exchange(-1, std::memory_order_acq_rel);
-        if (lroReq >= 0)
-            pendingLroCachePos_ = lroReq;   // latest wins, as everywhere on this path
+        // No ordering between the mailbox and the cancel is needed, and none is
+        // attempted: the press carries the serial it was made under, the cancel
+        // carries the serial it cancels up to, and comparing the two gives the
+        // same answer however the two threads interleave. See the Snap bar above
+        // for which presses a cancel is allowed to take back.
+        const juce::uint64 lroReq = atLroCachePosReq_.exchange(0, std::memory_order_acq_rel);
+        const bool arrivedNow = traversalReqIdx(lroReq) >= 0;
+        if (arrivedNow)
+        {
+            pendingLroCachePos_ = traversalReqIdx(lroReq);
+            pendingLroCacheSeq_ = traversalReqSeq(lroReq);   // latest wins
+        }
 
         const bool swapBusy = csoundCompileInFlight_.load(std::memory_order_acquire)
                            || csoundSwapPending_.load(std::memory_order_acquire)
                            || csoundSwapFading_.load(std::memory_order_acquire);
+        const bool stale = pendingLroCachePos_ >= 0
+                        && traversalSeqReached(pendingLroCacheSeq_,
+                               atCacheCancelSeq_.load(std::memory_order_acquire));
+        // The hard one takes no exemption: a press resolved against the cache
+        // the player has switched away from is wrong however fresh it is.
+        const bool hardStale = pendingLroCachePos_ >= 0
+                        && traversalSeqReached(pendingLroCacheSeq_,
+                               atCacheHardCancelSeq_.load(std::memory_order_acquire));
+
+        if (pendingLroCachePos_ >= 0
+            && (hardStale || (stale && (swapBusy || ! arrivedNow))))
+        {
+            pendingLroCachePos_ = -1;
+            atCacheForgetActed_.store(true, std::memory_order_release);
+        }
+
         if (pendingLroCachePos_ >= 0 && ! swapBusy)
         {
             const int idx = pendingLroCachePos_;
@@ -10104,13 +10418,8 @@ void T5ynthProcessor::handleAsyncUpdate()
             // Without it a bar press leaves the loop rewriting the orchestra it
             // just travelled away from, and the KNOBS card announcing that a
             // different patch has been loaded over the one that just landed.
-            const bool installed = onLroCachePositionRequested
-                                && onLroCachePositionRequested(idx);
-            atCacheInstalledIdx_.store(installed ? idx : -1, std::memory_order_release);
-            int expected = idx;
-            atCachePostedIdx_.compare_exchange_strong(expected, -1,
-                                                      std::memory_order_acq_rel,
-                                                      std::memory_order_relaxed);
+            if (onLroCachePositionRequested)
+                onLroCachePositionRequested(idx);
         }
     }
 

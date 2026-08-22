@@ -612,7 +612,7 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     // installs that one itself.
     processorRef.onCachePositionRequested = [this](int index)
     {
-        return promptPanel.playCachedInferenceAt(index);
+        promptPanel.playCachedInferenceAt(index);
     };
 
     // The LRO's landing. Its own callback, not a branch inside the one above:
@@ -621,13 +621,19 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     // decided by the time it arrives here.
     processorRef.onLroCachePositionRequested = [this](int index)
     {
-        return promptPanel.playCachedCsoundAt(index);
+        promptPanel.playCachedCsoundAt(index);
     };
 
     // XL cache button (CC 49) → toggle the inference cache between 4 and Off, mirroring
     // the on-screen radio buttons (read current, flip, then refresh the radio UI).
     processorRef.onCacheToggleRequested = [this]
     {
+        // Both branches below empty the cache, exactly as a depth press does -
+        // and so, on the LRO side, an armed step has to go with it. Same gate:
+        // this button addresses whichever panel is in front.
+        if (processorRef.isSurfaceParadigmLanguage())
+            promptPanel.disarmLroTakeStep();
+
         // ON/OFF, not "4 or 0". Testing the read-back against the literal 4
         // breaks as soon as the Duration's ceiling clamps the 4 down: at 60s the
         // capacity comes back as 2, never equals 4, so every press would ask for
@@ -1297,6 +1303,19 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
                 // carries deliberately outruns the ceiling.
                 if (value == processorRef.getActiveCacheCapacity())
                     return;
+                // The depth press empties the cache, so a step armed for the
+                // cache that is going away must not stamp the first entry of
+                // the one that replaces it - that entry is hand-played, and the
+                // arm would file it as a recorded one.
+                //
+                // Only when the row is addressing the LRO's cache. This row
+                // serves whichever panel is in front (selectActiveCacheCapacity
+                // dispatches the same way), and an LRO step keeps running while
+                // the player works in the neural one - disarming it from there
+                // would mark the entry it eventually lands as hand-played and
+                // clear the take flag for the whole run.
+                if (processorRef.isSurfaceParadigmLanguage())
+                    promptPanel.disarmLroTakeStep();
                 processorRef.selectActiveCacheCapacity(value);
                 syncInferenceCacheUi();
             };
@@ -3549,6 +3568,13 @@ std::vector<PresetFormat::SnapshotState> MainPanel::buildSnapshotsForSave() cons
 void MainPanel::applySnapshotsFromLoad(const std::vector<PresetFormat::SnapshotState>& snapshots,
                                        int calibEpoch)
 {
+    // Every slot is about to hold something else, and the Snap bar has no other
+    // way of hearing about it - a snapshot slot carries no generation counter
+    // the way a cache does. Without this a finger resting in a slot's zone
+    // could not travel back to it after a load: the bar would still be holding
+    // a claim on what that slot used to be.
+    processorRef.forgetSnapTraversalClaim();
+
     // Clear all session snapshots first; only the slots present in the
     // preset are populated. Slot index from JSON is authoritative; values
     // outside [0, kNumSnapshotSlots) are ignored defensively.
@@ -3653,6 +3679,10 @@ void MainPanel::storeSnapshotFromPress(int slot)
         const bool hasSound = pendingLco.orchestra.isNotEmpty();
         lcoSnapshots[static_cast<size_t>(slot - 1)] = std::move(pendingLco);
         pendingLco = {};
+        // The slot holds something else now, so the Snap bar's claim on it is
+        // stale - without this a finger resting on the slot it just re-stored
+        // could not travel back to it, the bar believing it is already there.
+        processorRef.forgetSnapTraversalClaim();
         activeSnapshotIndex = slot;
         syncSnapshotUi();
         snapshotButtons[slot].flashStored();
@@ -3671,6 +3701,7 @@ void MainPanel::storeSnapshotFromPress(int slot)
 
     mainSnapshots[static_cast<size_t>(slot - 1)] = std::move(pending);
     pending = {};
+    processorRef.forgetSnapTraversalClaim();   // see the LRO branch above
     activeSnapshotIndex = slot;
     syncSnapshotUi();
     snapshotButtons[slot].flashStored();

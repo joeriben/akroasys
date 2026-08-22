@@ -3284,6 +3284,10 @@ void PromptPanel::triggerDcoReprompt()
     auto pipePtr = processorRef.getPipeInferencePtr();
     if (pipePtr == nullptr)
     {
+        // Ends the step with nothing in flight, so the arm has to go with it -
+        // the twin gate in triggerDcoBake does the same. Left standing it would
+        // survive the outage and stamp whatever the player writes by hand next.
+        disarmLroTakeStep();
         setLcoStatus("The synthesis helper is not running");
         return;
     }

@@ -1,4 +1,5 @@
 #include "EventLogReader.h"
+#include "../dsp/VoiceManager.h"
 
 namespace
 {
@@ -141,7 +142,15 @@ bool EventLogReader::parseNoteEvent(const juce::var& obj)
     e.note        = static_cast<int>(obj.getProperty("note", 60));
     e.velocity    = static_cast<float>(static_cast<double>(obj.getProperty("velocity", 0.8)));
     e.artic       = articFromKey(obj.getProperty("artic", "normal").toString());
-    e.strandId    = static_cast<int>(obj.getProperty("strandId", -1));
+    // A tape is a file, and a file can say anything. The strand id becomes a
+    // voice SOURCE id, and VoiceManager clamps those to 0..15 - so an id above
+    // the range saturates onto the one the computer keyboard plays under, and a
+    // replayed note would read as a key physically held. Anything out of range
+    // is not a strand; -1 (external) is what it is.
+    {
+        const int sid = static_cast<int>(obj.getProperty("strandId", -1));
+        e.strandId = (sid >= 0 && sid < VoiceManager::kComputerKeyboardSourceId) ? sid : -1;
+    }
     e.pan         = static_cast<float>(static_cast<double>(obj.getProperty("pan", 0.0)));
     e.midiChannel = static_cast<int>(obj.getProperty("channel", 0));
 
