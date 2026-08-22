@@ -1134,6 +1134,15 @@ float VoiceManager::pressureForVoice(int voiceIdx) const
                       voiceMpePressure_[static_cast<size_t>(voiceIdx)]);
 }
 
+float VoiceManager::maxSoundingPressure() const
+{
+    float highest = 0.0f;
+    for (int i = 0; i < MAX_VOICES; ++i)
+        if (voices[static_cast<size_t>(i)].isActive())
+            highest = juce::jmax(highest, pressureForVoice(i));
+    return highest;
+}
+
 float VoiceManager::performanceOutputGain() const
 {
     const float softGain = softPedalDown ? 0.65f : 1.0f;

@@ -167,14 +167,55 @@ public:
         juce::AudioBuffer<float> audio;
         double sampleRate = 44100.0;
     };
+    /** The five depths both cache rows offer: 0, 2, 4, 8, 16. Anything between
+     *  two of them rounds UP to the next - a depth that holds everything - and
+     *  only 0 means off. */
+    static int sanitizeCacheCapacity(int capacity);
     void setInferenceCacheCapacity(int capacity);
+    /** How many entries a traversal may travel through: the fill count when the
+     *  cache is full, 0 otherwise. An ATOMIC, because the audio thread asks and
+     *  inferenceCacheEntries is a plain vector the message thread reallocates -
+     *  reading its size() across that is a race, and every other audio-side read
+     *  of message-thread state in this instrument goes through an atomic
+     *  snapshot for exactly this reason. */
+    int getInferenceCacheTraversableZones() const
+    { return inferenceCacheTraversableZones_.load(std::memory_order_acquire); }
     void clearInferenceCache();
     bool addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate);
     bool playNextInferenceCacheEntry();
+    /** Play cache entry `index` (clamped) and leave the sequential cursor one
+     *  past it. This is the same call the Re-Prompt stepping makes - the
+     *  oscillator's crossfade carries the change exactly as it carries a fresh
+     *  inference - the only thing added is that the index is free, so movement
+     *  through the cache runs in both time directions. */
+    bool playInferenceCacheEntry(int index);
     bool isInferenceCacheActive() const { return inferenceCacheCapacity > 0; }
     bool isInferenceCacheFull() const { return inferenceCacheCapacity > 0
                                              && static_cast<int>(inferenceCacheEntries.size()) >= inferenceCacheCapacity; }
     int getInferenceCacheCapacity() const { return inferenceCacheCapacity; }
+    /** Highest cache depth the current Duration allows; 0 when none fits.
+     *
+     *  The cache travels inside the preset, so depth x length IS a file size:
+     *  16 slots of 120 s is half a gigabyte of 24-bit audio before FLAC starts.
+     *  The budget is one number, 192 SLOT-SECONDS, which is exactly the ladder
+     *  BJ set: 16 up to 12 s, 8 to 24 s, 4 to 48 s, 2 to 96 s, nothing beyond
+     *  (16x12 = 8x24 = 4x48 = 2x96 = 192). All four thresholds sit on whole
+     *  seconds, which is where snapGenerationDuration's detents are, so the
+     *  player can land on each one deliberately. Landing there is not the same
+     *  as the number ARRIVING here exact - see the tolerance in the .cpp.
+     *
+     *  Counted in slot-seconds and NOT in bytes on purpose: channel count and
+     *  sample rate are unknown until audio exists, and the ceiling has to hold
+     *  BEFORE the first render. Mono, or a lower rate, lands under the estimate,
+     *  never over it. */
+    int maxInferenceCacheCapacityForDuration() const;
+    /** Set the capacity from a PLAYER SELECTION - clamped to the ceiling above.
+     *
+     *  Preset load must NOT come through here. What a file carries wins: its
+     *  entries were recorded under whatever Duration was in force, and clamping
+     *  on load would let addInferenceCacheEntry's own capacity check drop them
+     *  silently - which is exactly what a 32- or 64-deep preset already suffers:
+     *  it sanitises to 16 and loses the rest. One such truncation is enough. */
     /** True when the entries in the cache were recorded as an offline take, i.e.
      *  the parameters really were frozen between them. It is this, not the switch
      *  position, that lets a full cache replay over a running Re-Prompt stance: a
@@ -188,6 +229,84 @@ public:
     void setInferenceCacheOfflineTake(bool isTake) { inferenceCacheIsOfflineTake = isTake; }
     int getInferenceCacheFillCount() const { return static_cast<int>(inferenceCacheEntries.size()); }
     const std::vector<InferenceCacheEntry>& getInferenceCacheEntries() const { return inferenceCacheEntries; }
+
+    // ── The LRO's own cache ──────────────────────────────────────────────────
+    // Same cache, different substance. A neural slot holds raw audio; an LRO
+    // slot holds what an authoring pass INSTALLS - the orchestra and the five
+    // things that belong to it. Playing a slot is that installation run again,
+    // and the compile crossfade the LRO already does after a bake carries it,
+    // exactly as the sampler's crossfade carries a neural slot.
+    //
+    // No Duration ceiling here. That budget counts slot-seconds of audio; this
+    // is text, and sixteen of them are kilobytes. All five depths stay open in
+    // the LRO whatever the Duration says.
+    struct CsoundCacheEntry
+    {
+        juce::String orchestra, prompt, reading, paramsText;
+        // Who wrote this orchestra. Carried for the same reason a SNAP slot
+        // carries it: the model tab names an author, and a name left standing
+        // over an instrument somebody else wrote is a false claim. Empty means
+        // "not known", which CLEARS the previous claim rather than keeping it.
+        juce::String authorModel;
+        juce::var controls;    // the twelve knobs the authored body offers
+        juce::var settings;    // what the author asked of the synth itself
+    };
+    void setCsoundCacheCapacity(int capacity);
+    int  getCsoundCacheCapacity() const { return csoundCacheCapacity; }
+    void clearCsoundCache();
+    /** Message thread. False when the cache is off or already full. */
+    bool addCsoundCacheEntry(const CsoundCacheEntry& entry);
+    bool isCsoundCacheFull() const
+    { return csoundCacheCapacity > 0
+          && static_cast<int>(csoundCacheEntries.size()) >= csoundCacheCapacity; }
+    int  getCsoundCacheFillCount() const { return static_cast<int>(csoundCacheEntries.size()); }
+    bool isCsoundCacheOfflineTake() const { return csoundCacheIsOfflineTake; }
+    void setCsoundCacheOfflineTake(bool isTake) { csoundCacheIsOfflineTake = isTake; }
+    const std::vector<CsoundCacheEntry>& getCsoundCacheEntries() const { return csoundCacheEntries; }
+    /** Install entry `index` whole - engine mode, orchestra, prompt, reading,
+     *  params, knobs, author settings. Everything an authoring pass installs on
+     *  the PROCESSOR; the panel-side half of a recall (trace card, author name,
+     *  the Re-Prompt chain's own memory, the compile watch) belongs to the
+     *  editor and is done by PromptPanel::playNextCachedCsound, which is why
+     *  the index that was played is readable below. */
+    bool playCsoundCacheEntry(int index);
+    bool playNextCsoundCacheEntry();
+    /** The slot the next replay will install - and, right after a replay, one
+     *  past the slot that was just installed (it advances on play). */
+    int  getCsoundCachePlaybackIndex() const { return csoundCachePlaybackIndex; }
+    int  getCsoundCacheTraversableZones() const
+    { return csoundCacheTraversableZones_.load(std::memory_order_acquire); }
+
+    // ── Whichever cache belongs to the oscillator in force ──────────────────
+    // The CACHE row and the take switch speak to THIS, not to one of the two
+    // above. One row, and the oscillator in force decides what it reaches -
+    // rather than a second row beside the first.
+    //
+    // TWO different questions, deliberately not one predicate:
+    //
+    //  - which cache does the PANEL address? The panel the player is looking at.
+    //    That is what the row is, and it is set from the oscillator toggle
+    //    (setSurfaceParadigmIsLanguage). It must NOT be asked of the engine
+    //    mode: applyOscModeToEngine leaves the engine alone until something has
+    //    been authored, so the LRO panel can sit in front of a neural engine for
+    //    a whole session - and a depth press there would then have cleared the
+    //    NEURAL cache, from a panel that does not own it.
+    //
+    //  - which cache does the aftertouch bar TRAVEL? The one that is sounding,
+    //    which is the engine mode (isLanguageOscillatorSounding) and only
+    //    EngineMode::Csound: an LRO slot is a Csound orchestra and does not
+    //    sound under any other engine, Lco included.
+    bool isLanguageOscillatorSounding() const;
+    void setSurfaceParadigmIsLanguage(bool isLanguage);
+    bool isSurfaceParadigmLanguage() const
+    { return surfaceParadigmIsLanguage_.load(std::memory_order_acquire); }
+    int  getActiveCacheCapacity() const;
+    void setActiveCacheCapacity(int capacity);
+    void selectActiveCacheCapacity(int capacity);
+    int  getActiveCacheFillCount() const;
+    bool isActiveCacheFull() const;
+    /** The deepest depth the active cache allows. The LRO has no ceiling. */
+    int  maxActiveCacheCapacityForDuration() const;
 
     /** Offline cache take — message thread writes, audio thread reads.
      *
@@ -1133,6 +1252,20 @@ private:
     int inferenceCachePlaybackIndex = 0;
     std::vector<InferenceCacheEntry> inferenceCacheEntries;
     bool inferenceCacheIsOfflineTake = false;
+    // The audio thread's only window onto the cache; see
+    // getInferenceCacheTraversableZones(). Written by
+    // publishInferenceCacheTraversableZones() from every mutation above.
+    std::atomic<int> inferenceCacheTraversableZones_ { 0 };
+
+    std::vector<CsoundCacheEntry> csoundCacheEntries;
+    int  csoundCacheCapacity = 0;
+    int  csoundCachePlaybackIndex = 0;
+    bool csoundCacheIsOfflineTake = false;
+    std::atomic<int> csoundCacheTraversableZones_ { 0 };
+    // Which panel the player is on - written by the editor's oscillator toggle,
+    // read by the active-cache router above. Atomic only because a plugin can be
+    // asked for its state off the message thread; it is never read from audio.
+    std::atomic<bool> surfaceParadigmIsLanguage_ { false };
     std::atomic<bool>  driftGenHold_   { false };  // message->audio: freeze generation-side Drift
     std::atomic<float> driftGenStepSec_{ 0.0f };   // message->audio: pending take step, in seconds
 
@@ -1583,6 +1716,20 @@ public:
         float                       maxNorm = 1.0f;
     };
 
+    /** Play the cache entry the aftertouch traversal has moved to. Set by the
+     *  editor beside onSnapshotRequested; called on the message thread.
+     *
+     *  One per cache, because installing a slot is only half done in the
+     *  processor: the panel half writes the trace card, the author name, the
+     *  Re-Prompt chain's own memory and the compile window the cadence gates
+     *  read. Both go through the EDITOR for that reason, and both do nothing
+     *  with no editor open - which is when there is nobody to tell either. */
+    // Returning FALSE means nothing was installed - an empty cache, a clamp that
+    // found nothing, a panel that refused. The bar must not then record that
+    // position as loaded, or it can never travel to it again.
+    std::function<bool(int)> onCachePositionRequested;
+    std::function<bool(int)> onLroCachePositionRequested;
+
     void startMidiLearn(const juce::String& paramId);
     void cancelMidiLearn();
     void clearCcMapping(int cc);
@@ -1705,6 +1852,55 @@ private:
     std::atomic<bool>           xlGenerateReq_      { false };  // audio→message: trigger generation (CC 37)
     std::atomic<int>            xlRepromptStanceReq_ { -1 };    // audio→message: set reprompt_stance to index 0-6 (CC 38-44); -1 = none
     std::atomic<int>            xlSnapshotReq_      { -1 };     // audio→message: recall snapshot slot 1-4 (CC 45-48); -1 = none
+    /** Resolve the Cache and Snap aftertouch targets. Audio thread, once per
+     *  block. Never touches the cache itself - it posts a position and lets the
+     *  message thread do the loading, like every other audio→message request. */
+    void updateAftertouchTraversal(const BlockParams& bp);
+    /** Release both aftertouch bars' memory of what they last loaded - something
+     *  other than the bar has just changed it. */
+    void releaseAftertouchTraversalMemory();
+    /** Recompute the atomic above. Message thread; called from every cache mutation. */
+    void publishInferenceCacheTraversableZones();
+    void publishCsoundCacheTraversableZones();
+
+    std::atomic<int>            atCachePosReq_      { -1 };     // audio→message: play NEURAL cache entry N (AT traversal); -1 = none
+    std::atomic<int>            atLroCachePosReq_   { -1 };     // audio→message: install LRO cache entry N (AT traversal); -1 = none
+    // Message thread. An LRO position that arrived while a compile or its fade
+    // was still running, waiting for the swap to free up. -1 = none.
+    int                         pendingLroCachePos_ { -1 };
+    // Its OWN mailbox, not xlSnapshotReq_. Both are written from processBlock -
+    // the controller from the MIDI loop, this one from the traversal - and a
+    // single slot means whichever writes last silently eats the other. The
+    // controller press is the one that would lose, and it is a one-shot with no
+    // second chance, while a bar the player can simply move again is not.
+    std::atomic<int>            atSnapReq_          { -1 };     // audio→message: recall snapshot slot 1-4 (AT traversal); -1 = none
+    // Audio thread only. The zone each traversal target last resolved to, so a
+    // pressure that has not left its zone requests nothing, and lifting the
+    // amount to zero re-arms both from scratch.
+    int                         atCacheZone_        { -1 };
+    bool                        atCacheLro_         { false };  // which cache the claim belongs to
+    int                         atSnapZone_         { -1 };
+    // The position each one last ASKED for. The zone alone is not enough to
+    // decide whether anything changed: flipping a bar's sign turns the same zone
+    // into the opposite end of the cache, and watching only the zone would let
+    // that reversal pass unnoticed under a steady finger.
+    // What is LOADED, as far as each aftertouch bar is concerned - NOT "what the
+    // bar last sent". Cleared at the two roots every load passes through
+    // (loadGeneratedAudio, requestCsoundOrchestra) and by the cache clears, so a
+    // GENERATE replay, a snapshot recall, a preset, a tape or a depth change all
+    // release the bar: a finger already resting on that position can travel to
+    // it again instead of being swallowed by a memory of something no longer
+    // loaded.
+    //
+    // ...and what is OUTSTANDING: the index posted into the mailbox whose
+    // install has not finished. Without it the bar re-posts through the whole
+    // install window - the roots above clear the claim at the START of a load,
+    // and an LRO install is a Csound compile - and each re-post installs again,
+    // which does not terminate while the finger stays in the zone.
+    std::atomic<int>            atCacheInstalledIdx_ { -1 };
+    std::atomic<int>            atCachePostedIdx_    { -1 };
+    std::atomic<int>            atSnapInstalledSlot_ { -1 };
+    std::atomic<int>            atSnapPostedSlot_    { -1 };
     std::atomic<bool>           xlCacheToggleReq_   { false };  // audio→message: toggle inference cache 4↔Off (CC 49)
     std::atomic<bool>           xlGenTimingToggleReq_ { false };// audio→message: toggle drift_regen a.s.a.p.↔4 bars (CC 50)
     std::atomic<bool>           xlAutoApplyReq_     { false };  // any→message: (re)apply XL bindings (port select / preset load)

@@ -121,6 +121,18 @@ public:
         bool inferenceCacheIsOfflineTake = false;
         std::vector<InferenceCacheAudio> inferenceCache;
 
+        // The LRO's cache. No audio blob and no FLAC: a slot is what an
+        // authoring pass installs, which is text and two var trees, so it goes
+        // into the JSON whole and costs kilobytes.
+        struct CsoundCacheAuthored
+        {
+            juce::String orchestra, prompt, reading, paramsText, authorModel;
+            juce::var controls, settings;
+        };
+        int csoundCacheCapacity = 0;
+        bool csoundCacheIsOfflineTake = false;
+        std::vector<CsoundCacheAuthored> csoundCache;
+
         std::array<AxisState, 3> axes;
         bool hasAxes = false;
 

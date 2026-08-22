@@ -201,6 +201,8 @@ namespace PID {
     static constexpr const char* aftertouchAmtEnv3Sustain = "aftertouch_amt_env3_sustain";
     static constexpr const char* aftertouchAmtEnv4Sustain = "aftertouch_amt_env4_sustain";
     static constexpr const char* aftertouchAmtEnv5Sustain = "aftertouch_amt_env5_sustain";
+    static constexpr const char* aftertouchAmtCache       = "aftertouch_amt_cache";
+    static constexpr const char* aftertouchAmtSnap        = "aftertouch_amt_snap";
     static constexpr const char* aftertouchAmtCutoff      = "aftertouch_amt_cutoff";
     static constexpr const char* aftertouchAmtResonance   = "aftertouch_amt_resonance";
     static constexpr const char* aftertouchAmtScan        = "aftertouch_amt_scan";
@@ -734,7 +736,17 @@ namespace AftertouchTarget {
         // session stores the choice INDEX, so inserting these beside ENV1-3
         // would re-point every saved Cutoff/Resonance/Scan/DCA/Pitch setting.
         Env4Sustain = 13,
-        Env5Sustain = 14
+        Env5Sustain = 14,
+        // The two that do not modulate a voice: they MOVE THE INSTRUMENT, to
+        // another cached sample or another snapshot. Everything above is a
+        // continuous depth SynthVoice reads per block; these two resolve to a
+        // position and hand it to the message thread, the same way the hardware
+        // controller's snapshot buttons already do. From the player's side that
+        // difference does not exist - it is a bar in this module like the others,
+        // and pressure moves it. Appended, never inserted: a DAW session stores
+        // the choice INDEX.
+        Cache = 15,
+        Snap = 16
     };
     static constexpr ChoiceEntry kEntries[] = {
         { "none",         "---"          },
@@ -751,11 +763,21 @@ namespace AftertouchTarget {
         { "pitch",        "Pitch"        },
         { "noise_level",  "Noise"        },
         { "env4_sustain", "ENV4 Sustain" },
-        { "env5_sustain", "ENV5 Sustain" }
+        { "env5_sustain", "ENV5 Sustain" },
+        { "cache",        "Cache"        },
+        { "snap",         "Snap"         }
     };
     static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
-    static_assert(Env5Sustain + 1 == kCount,
+    static_assert(Snap + 1 == kCount,
                   "AftertouchTarget enum and kEntries are out of sync.");
+
+    /** True for the targets that move the instrument instead of modulating a
+     *  voice. SynthVoice must never read these: there is no per-voice depth
+     *  behind them, and aftertouchDrive would hand it one. */
+    constexpr bool movesTheInstrument(int target)
+    {
+        return target == Cache || target == Snap;
+    }
 
     /** The target that holds mod envelope `i`'s sustain — ENV (i+2), because ENV1
         is the amp envelope. A table for the same reason as LfoTarget::modEnvAmt:

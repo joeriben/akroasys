@@ -236,7 +236,13 @@ bool PresetFormat::saveToFile(const juce::File& file, T5ynthProcessor& processor
         root->setProperty("embeddingB", arrB);
     }
 
-    const bool writeInferenceCache = includeInferenceCache && processor.getInferenceCacheCapacity() > 0;
+    // FILL, not depth. An armed-but-empty cache has nothing to write, and a file
+    // carrying a bare depth arms a cache on a machine that asked for nothing -
+    // and, with the take flag beside it, brings that machine up locked in
+    // replay. The two caches are asked separately although one switch governs
+    // both: the switch says "include what there is", not "include the other
+    // one's depth as well".
+    const bool writeInferenceCache = includeInferenceCache && processor.getInferenceCacheFillCount() > 0;
     const auto& inferenceCacheEntries = processor.getInferenceCacheEntries();
     if (writeInferenceCache)
     {
@@ -261,6 +267,32 @@ bool PresetFormat::saveToFile(const juce::File& file, T5ynthProcessor& processor
         }
         cacheMeta->setProperty("entries", entries);
         root->setProperty("inferenceCache", cacheMeta.get());
+    }
+
+    // The LRO's cache, under the same switch as the neural one: "include the
+    // cache" is one decision about the file, not one per oscillator.
+    if (includeInferenceCache && processor.getCsoundCacheFillCount() > 0)
+    {
+        juce::DynamicObject::Ptr lroMeta = new juce::DynamicObject();
+        lroMeta->setProperty("capacity", processor.getCsoundCacheCapacity());
+        lroMeta->setProperty("offlineTake", processor.isCsoundCacheOfflineTake());
+        juce::Array<juce::var> entries;
+        for (const auto& e : processor.getCsoundCacheEntries())
+        {
+            if (e.orchestra.isEmpty())
+                continue;   // an entry with no orchestra has nothing to install
+            juce::DynamicObject::Ptr o = new juce::DynamicObject();
+            o->setProperty("orchestra",  e.orchestra);
+            o->setProperty("prompt",     e.prompt);
+            o->setProperty("reading",    e.reading);
+            o->setProperty("paramsText", e.paramsText);
+            o->setProperty("authorModel", e.authorModel);
+            o->setProperty("controls",   e.controls);
+            o->setProperty("settings",   e.settings);
+            entries.add(o.get());
+        }
+        lroMeta->setProperty("entries", entries);
+        root->setProperty("csoundCache", lroMeta.get());
     }
 
     const auto sequencerOneShots = processor.exportSequencerOneShotSamples();
@@ -596,6 +628,35 @@ PresetFormat::LoadResult PresetFormat::loadFromFile(const juce::File& file, T5yn
 
         // Optional inference-cache tail. Each entry is one length-prefixed
         // FLAC blob in v4 (or one raw-PCM run in v3).
+        if (auto* lroMeta = root->getProperty("csoundCache").getDynamicObject())
+        {
+            result.csoundCacheCapacity = juce::jmax(0, static_cast<int>(lroMeta->getProperty("capacity")));
+            result.csoundCacheIsOfflineTake = static_cast<bool>(lroMeta->getProperty("offlineTake"));
+            if (const auto* entries = lroMeta->getProperty("entries").getArray())
+                for (const auto& v : *entries)
+                    if (auto* o = v.getDynamicObject())
+                    {
+                        LoadResult::CsoundCacheAuthored e;
+                        e.orchestra  = o->getProperty("orchestra").toString();
+                        if (e.orchestra.isEmpty())
+                            continue;
+                        e.prompt     = o->getProperty("prompt").toString();
+                        e.reading    = o->getProperty("reading").toString();
+                        e.paramsText = o->getProperty("paramsText").toString();
+                        // Absent in files written before the slot carried it -
+                        // which reads as "author not known", the honest answer.
+                        e.authorModel = o->getProperty("authorModel").toString();
+                        e.controls   = o->getProperty("controls");
+                        e.settings   = o->getProperty("settings");
+                        result.csoundCache.push_back(std::move(e));
+                    }
+            // What the file CARRIES wins, exactly as on the neural side: the
+            // depth is widened to hold every entry rather than the entries being
+            // dropped to fit a stored depth.
+            result.csoundCacheCapacity = juce::jmax(result.csoundCacheCapacity,
+                                                    static_cast<int>(result.csoundCache.size()));
+        }
+
         if (auto* cacheMeta = root->getProperty("inferenceCache").getDynamicObject())
         {
             result.inferenceCacheCapacity = juce::jmax(0, static_cast<int>(cacheMeta->getProperty("capacity")));

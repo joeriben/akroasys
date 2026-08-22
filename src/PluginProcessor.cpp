@@ -75,6 +75,8 @@ const char* const kAftertouchAmtPid[AftertouchTarget::kCount] = {
     PID::aftertouchAmtNoiseLevel,         // NoiseLevel
     PID::aftertouchAmtEnv4Sustain,        // Env4Sustain
     PID::aftertouchAmtEnv5Sustain,        // Env5Sustain
+    PID::aftertouchAmtCache,              // Cache
+    PID::aftertouchAmtSnap,               // Snap
 };
 
 /** The authored instrument's twelve knob positions, and its three layer levels.
@@ -1709,6 +1711,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout T5ynthProcessor::createParam
             { PID::aftertouchAmtNoiseLevel,  "AT Noise"        },
             { PID::aftertouchAmtEnv4Sustain, "AT ENV4 Sustain" },
             { PID::aftertouchAmtEnv5Sustain, "AT ENV5 Sustain" },
+            { PID::aftertouchAmtCache,       "AT Cache"        },
+            { PID::aftertouchAmtSnap,        "AT Snap"         },
         };
         // Honest linear bipolar amount, 0.01 step (two decimals). The DSP
         // full-scales are musical, so the control needs no skew or 1/1000-scale
@@ -2495,6 +2499,11 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 bool T5ynthProcessor::requestCsoundOrchestra(const juce::String& orchestraText)
 {
+    // Something is replacing the sounding instrument. Whatever position the
+    // aftertouch bars believed was loaded is no longer it - the drain writes the
+    // position back afterwards when the change WAS a bar's own landing.
+    releaseAftertouchTraversalMemory();
+
     // Tail migration (2026-07-25, kvel removal): presets, DAW sessions and SNAP
     // slots saved before that date carry the old host output line — with the
     // kvel factor that made the LRO scale as vel^2 — inside their stored
@@ -3842,7 +3851,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         setAmt(paramCache.aftertouchAmtNoiseLevel,  AftertouchTarget::NoiseLevel);
         setAmt(paramCache.aftertouchAmtEnv4Sustain, AftertouchTarget::Env4Sustain);
         setAmt(paramCache.aftertouchAmtEnv5Sustain, AftertouchTarget::Env5Sustain);
+        setAmt(paramCache.aftertouchAmtCache,        AftertouchTarget::Cache);
+        setAmt(paramCache.aftertouchAmtSnap,         AftertouchTarget::Snap);
     }
+
+    // The two targets that move the instrument rather than a voice. Resolved
+    // here, once per block, from the same pressure the voices are reading.
+    updateAftertouchTraversal(bp);
 
     // Filter
     // filter_type: 0=Off, 1=LP, 2=HP, 3=BP → filterEnabled from type, DSP type is 0-based
@@ -6516,6 +6531,8 @@ juce::AudioBuffer<float> T5ynthProcessor::conditionGeneratedSource (const juce::
 
 void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBuffer, double sr)
 {
+    releaseAftertouchTraversalMemory();   // see requestCsoundOrchestra
+
     samplerProcessorDebugLog("loadGeneratedAudio begin samples=" + juce::String(audioBuffer.getNumSamples())
                              + " sr=" + juce::String(sr, 2)
                              + " masterBefore={" + masterSampler.debugStateString() + "}");
@@ -6917,32 +6934,86 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         publishWtDisplayFromOscFrames();
 }
 
+int T5ynthProcessor::maxInferenceCacheCapacityForDuration() const
+{
+    // 192 slot-seconds; the header carries why the budget is slot-seconds and
+    // not bytes. Descending, so the first fit is the deepest one that fits.
+    constexpr float kSlotSecondBudget = 192.0f;
+
+    // Half a display detent. The Duration slider steps in 0.01s, so this is the
+    // widest tolerance that still separates two values the user can tell apart -
+    // and it has to be here, because the number in the parameter is NOT the
+    // number snapGenerationDuration produced. AudioParameterFloat::setValue
+    // applies convertFrom0to1 without snapToLegalValue, and the atomic behind
+    // getRawParameterValue is written as convertFrom0to1(convertTo0to1(v)) - two
+    // trips through a 0.3 skew, whose 1/0.3 exponent multiplies the float error.
+    // A slider reading exactly "96.00s" arrives here as 96.0000076, and a bare
+    // <= 192 then denies the 2-slot rung that this Duration is supposed to grant.
+    // Measured: without this tolerance all ten detents that display 96.00s give
+    // 0, and 12s/24s only pass because this platform's libm happens to round
+    // down - correctly-rounded arithmetic drops them a rung too.
+    constexpr float kDetentTolerance = 0.005f;
+
+    const float duration = juce::jmax(0.001f, paramCache.genDuration->load());
+    for (int depth : { 16, 8, 4, 2 })
+        if (duration <= kSlotSecondBudget / static_cast<float>(depth) + kDetentTolerance)
+            return depth;
+    return 0;
+}
+
+
+int T5ynthProcessor::sanitizeCacheCapacity(int capacity)
+{
+    // The five depths both rows offer. Anything else is ROUNDED UP to the next
+    // one, never down, and only a request for 0 switches a cache off.
+    //
+    // It used to fall to 0 - the row can only ask for one of the five, so an
+    // in-between value only ever arrives from a FILE, where it means "this many
+    // entries are in here". Reading that as "off" threw every one of them away
+    // and left a preset's recorded run unloadable, which is the opposite of what
+    // widening the stored depth to the entry count was for.
+    static constexpr int kAllowed[] = { 0, 2, 4, 8, 16 };
+    constexpr int maxAllowed = kAllowed[sizeof(kAllowed) / sizeof(kAllowed[0]) - 1];
+    if (capacity >= maxAllowed)
+        return maxAllowed;
+    for (int allowed : kAllowed)
+        if (capacity <= allowed)
+            return allowed;
+    return maxAllowed;
+}
+
 void T5ynthProcessor::setInferenceCacheCapacity(int capacity)
 {
     // 32 and 64 were dropped: a preset carrying a take that deep runs to hundreds of
     // megabytes, and the two switch cells they held now carry the offline-take mode
     // (and, next, the MPE feature). A preset saved at either clamps to 16 below.
-    static constexpr int kAllowed[] = { 0, 2, 4, 8, 16 };
-    int sanitized = 0;
-    for (int allowed : kAllowed)
-        if (capacity == allowed)
-            sanitized = allowed;
-    constexpr int maxAllowed = kAllowed[sizeof(kAllowed) / sizeof(kAllowed[0]) - 1];
-    if (capacity > maxAllowed)
-        sanitized = maxAllowed;
+    const int sanitized = sanitizeCacheCapacity(capacity);
 
     if (sanitized == inferenceCacheCapacity)
         return;
 
     inferenceCacheCapacity = sanitized;
-    clearInferenceCache();
+    clearInferenceCache();   // publishes the zone count for us
 }
 
 void T5ynthProcessor::clearInferenceCache()
 {
+    releaseAftertouchTraversalMemory();   // see clearCsoundCache
+    atCachePostedIdx_.store(-1, std::memory_order_release);
+    atCachePosReq_.store(-1, std::memory_order_release);
     inferenceCacheEntries.clear();
     inferenceCachePlaybackIndex = 0;
     inferenceCacheIsOfflineTake = false;   // whatever it held, it is gone with it
+    publishInferenceCacheTraversableZones();
+}
+
+void T5ynthProcessor::publishInferenceCacheTraversableZones()
+{
+    // Every mutation of the cache ends here. Only a FULL cache is traversable:
+    // while it is filling, the reachable positions would move under the hand.
+    inferenceCacheTraversableZones_.store(
+        isInferenceCacheFull() ? static_cast<int>(inferenceCacheEntries.size()) : 0,
+        std::memory_order_release);
 }
 
 bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate)
@@ -6959,6 +7030,24 @@ bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buf
     inferenceCacheEntries.push_back(std::move(entry));
     if (isInferenceCacheFull())
         inferenceCachePlaybackIndex = 0;
+    publishInferenceCacheTraversableZones();
+    return true;
+}
+
+bool T5ynthProcessor::playInferenceCacheEntry(int index)
+{
+    if (!isInferenceCacheFull())
+        return false;
+
+
+    const int count = static_cast<int>(inferenceCacheEntries.size());
+    index = juce::jlimit(0, count - 1, index);
+    const auto& entry = inferenceCacheEntries[static_cast<size_t>(index)];
+    // The sequential cursor lands one past whatever was played, by hand or in
+    // sequence, so a Re-Prompt step after a hand-driven jump carries on from
+    // where the hand left off instead of from where the sweep had got to.
+    inferenceCachePlaybackIndex = (index + 1) % count;
+    loadGeneratedAudio(entry.audio, entry.sampleRate);
     return true;
 }
 
@@ -6966,13 +7055,310 @@ bool T5ynthProcessor::playNextInferenceCacheEntry()
 {
     if (!isInferenceCacheFull())
         return false;
+    return playInferenceCacheEntry(inferenceCachePlaybackIndex);
+}
 
-    const int index = juce::jlimit(0, static_cast<int>(inferenceCacheEntries.size()) - 1,
-                                   inferenceCachePlaybackIndex);
-    const auto& entry = inferenceCacheEntries[static_cast<size_t>(index)];
-    inferenceCachePlaybackIndex = (index + 1) % static_cast<int>(inferenceCacheEntries.size());
-    loadGeneratedAudio(entry.audio, entry.sampleRate);
+namespace
+{
+/** Which of `zones` equal steps the pressure has reached, with a dead band so a
+ *  finger resting on a boundary does not walk back and forth over it. Returns
+ *  -1 when there is nothing to travel through.
+ *
+ *  The band is deliberately wide - three quarters of a step - because a step
+ *  here is not a value change but a whole sample being crossfaded in. Getting
+ *  one too late costs nothing; getting one twice is audible. */
+int traversalZone(float pressure, float amount, int zones, int currentZone)
+{
+    if (zones <= 0)  return -1;
+    if (zones == 1)  return 0;
+
+    // The bar's amount is a DEPTH here as it is everywhere else in this module:
+    // it says how far through the cache full pressure carries. Half a bar spans
+    // half the entries, and its sign is read by the caller as the direction.
+    const float drive  = juce::jlimit(0.0f, 1.0f, pressure) * std::abs(amount);
+    const float scaled = drive * static_cast<float>(zones);
+
+    // EQUAL-WIDTH STEPS, and both ends always land. Rounding to the nearest
+    // position instead would make the first and last steps half as wide as the
+    // rest - measured on a 16-deep cache, the last entry then lived in the top
+    // three aftertouch values alone, and a two-deep cache with the bar at half
+    // could not be moved at all: armed, and inert over its whole travel. Each
+    // step is now 1/N of the travel, and pressed fully in (or fully released)
+    // the traveller is at an end of what this bar spans, where no hysteresis may
+    // hold it back.
+    if (drive >= std::abs(amount) - 1.0e-4f || drive <= 1.0e-4f)
+        return juce::jlimit(0, zones - 1, static_cast<int>(std::floor(scaled)));
+
+    // A quarter of a step of overshoot before a boundary is crossed. Wide,
+    // because a step here is not a value moving but a whole sample being
+    // crossfaded in: taking one late costs nothing, taking one twice is audible.
+    if (currentZone >= 0
+        && scaled > static_cast<float>(currentZone) - 0.25f
+        && scaled < static_cast<float>(currentZone) + 1.25f)
+        return currentZone;
+
+    return juce::jlimit(0, zones - 1, static_cast<int>(std::floor(scaled)));
+}
+} // namespace
+
+void T5ynthProcessor::releaseAftertouchTraversalMemory()
+{
+    atCacheInstalledIdx_.store(-1, std::memory_order_release);
+    atSnapInstalledSlot_.store(-1, std::memory_order_release);
+}
+
+void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
+{
+    const float cacheAmt = bp.aftertouchTargetAmt[AftertouchTarget::Cache];
+    const float snapAmt  = bp.aftertouchTargetAmt[AftertouchTarget::Snap];
+
+    // Each bar re-arms on ITS OWN. Zeroing one while the other stays live has to
+    // forget that one's zone, or turning it back up with the finger already
+    // resting where it left off would post nothing and the instrument would sit
+    // on whatever is loaded instead of going where the hand is.
+    if (cacheAmt == 0.0f) { atCacheZone_ = -1;
+                            atCacheInstalledIdx_.store(-1, std::memory_order_release);
+                            atCachePostedIdx_.store(-1, std::memory_order_release); }
+    if (snapAmt  == 0.0f) { atSnapZone_  = -1;
+                            atSnapInstalledSlot_.store(-1, std::memory_order_release);
+                            atSnapPostedSlot_.store(-1, std::memory_order_release); }
+    if (cacheAmt == 0.0f && snapAmt == 0.0f)
+        return;
+
+    // Only while a key is actually HELD. Not "a voice is active": a voice stays
+    // active through its whole release tail, and its pressure is not cleared
+    // until it goes silent - so letting go of everything would read as a slow
+    // slide back to the first position, a move nobody asked for at the one
+    // moment nobody is playing.
+    if (voiceManager.getHeldVoiceCount() <= 0)
+        return;
+    const float pressure = voiceManager.maxSoundingPressure();
+
+    if (cacheAmt != 0.0f)
+    {
+        // Whichever oscillator is sounding owns the cache this bar travels.
+        //
+        // Asked of the PARAMETER, not of bp: this runs early in processBlock,
+        // before bp.engineMode is filled in, so reading it from there would have
+        // handed back the struct's default on every single block - the bar would
+        // have sized itself against the neural cache forever, and in the LRO,
+        // where that cache is usually empty, it would never have moved at all.
+        // The atomic is lock-free and costs the same.
+        const bool lro = isLanguageOscillatorSounding();
+        // The claim is one number and the two caches take turns owning it, so
+        // the oscillator changing under a held note has to release it: index 7
+        // of the LRO's cache says nothing about index 7 of the neural one, and
+        // leaving it standing would make the first travel to that position in
+        // the new cache do nothing at all.
+        if (lro != atCacheLro_)
+        {
+            atCacheLro_ = lro;
+            atCacheInstalledIdx_.store(-1, std::memory_order_release);
+            atCachePostedIdx_.store(-1, std::memory_order_release);
+        }
+        const int zones = lro ? getCsoundCacheTraversableZones()
+                              : getInferenceCacheTraversableZones();
+        const int zone = traversalZone(pressure, cacheAmt, zones, atCacheZone_);
+        if (zone >= 0)
+        {
+            atCacheZone_ = zone;
+            // The sign of the bar is the direction of travel through the cache:
+            // right for the order the samples were generated in, left for the
+            // way back. That is the one thing this feature adds to the stepping
+            // the Re-Prompt path already does.
+            const int idx = cacheAmt > 0.0f ? zone : (zones - 1 - zone);
+            // Neither already loaded nor already on its way. The second half is
+            // what keeps this from looping: the install CLEARS the claim (a load
+            // is a load, whoever asked for it), and an LRO install is a Csound
+            // compile, so without it every block inside that window would post
+            // again and each post would install again.
+            if (idx != atCacheInstalledIdx_.load(std::memory_order_acquire)
+                && idx != atCachePostedIdx_.load(std::memory_order_acquire))
+            {
+                atCachePostedIdx_.store(idx, std::memory_order_release);
+                // Into the mailbox of the cache this index was RESOLVED against.
+                // One shared mailbox would leave the message thread to guess, and
+                // it would guess with whatever the mode is by the time it drains
+                // - which a snapshot recall in the same drain pass can already
+                // have moved. An index means nothing without its cache.
+                (lro ? atLroCachePosReq_ : atCachePosReq_)
+                    .store(idx, std::memory_order_release);
+                triggerAsyncUpdate();
+            }
+        }
+    }
+
+    if (snapAmt != 0.0f)
+    {
+        constexpr int kSnapSlots = 4;
+        const int zone = traversalZone(pressure, snapAmt, kSnapSlots, atSnapZone_);
+        if (zone >= 0)
+        {
+            atSnapZone_ = zone;
+            const int slot = (snapAmt > 0.0f ? zone : (kSnapSlots - 1 - zone)) + 1;  // slots are 1-4
+            // Same two questions as the cache bar above, for the same reasons:
+            // a slot recalled by hand, by CC 47 or by a re-store must release the
+            // bar, and an outstanding recall must not be sent twice.
+            if (slot != atSnapInstalledSlot_.load(std::memory_order_acquire)
+                && slot != atSnapPostedSlot_.load(std::memory_order_acquire))
+            {
+                atSnapPostedSlot_.store(slot, std::memory_order_release);
+                atSnapReq_.store(slot, std::memory_order_release);
+                triggerAsyncUpdate();
+            }
+        }
+    }
+}
+
+// ── The LRO's cache ─────────────────────────────────────────────────────────
+void T5ynthProcessor::setCsoundCacheCapacity(int capacity)
+{
+    // The same five depths the neural row offers, and the same sanitizer.
+    const int sanitized = sanitizeCacheCapacity(capacity);
+
+    if (sanitized == csoundCacheCapacity)
+        return;
+
+    csoundCacheCapacity = sanitized;
+    clearCsoundCache();
+}
+
+void T5ynthProcessor::clearCsoundCache()
+{
+    // The bars' memory AND anything still on its way: a position posted into a
+    // cache that is being emptied must not install into whatever fills it next.
+    releaseAftertouchTraversalMemory();
+    atCachePostedIdx_.store(-1, std::memory_order_release);
+    atLroCachePosReq_.store(-1, std::memory_order_release);
+    pendingLroCachePos_ = -1;
+    csoundCacheEntries.clear();
+    csoundCachePlaybackIndex = 0;
+    csoundCacheIsOfflineTake = false;
+    publishCsoundCacheTraversableZones();
+}
+
+void T5ynthProcessor::publishCsoundCacheTraversableZones()
+{
+    csoundCacheTraversableZones_.store(
+        isCsoundCacheFull() ? static_cast<int>(csoundCacheEntries.size()) : 0,
+        std::memory_order_release);
+}
+
+bool T5ynthProcessor::addCsoundCacheEntry(const CsoundCacheEntry& entry)
+{
+    if (csoundCacheCapacity <= 0
+        || static_cast<int>(csoundCacheEntries.size()) >= csoundCacheCapacity
+        || entry.orchestra.isEmpty())
+        return false;
+
+    csoundCacheEntries.push_back(entry);
+    if (isCsoundCacheFull())
+        csoundCachePlaybackIndex = 0;
+    publishCsoundCacheTraversableZones();
     return true;
+}
+
+bool T5ynthProcessor::playCsoundCacheEntry(int index)
+{
+    if (!isCsoundCacheFull())
+        return false;
+
+    const int count = static_cast<int>(csoundCacheEntries.size());
+    index = juce::jlimit(0, count - 1, index);
+    const auto& e = csoundCacheEntries[static_cast<size_t>(index)];
+    csoundCachePlaybackIndex = (index + 1) % count;
+
+    // What an authoring pass installs on the processor, in its order. Nothing is
+    // left out: a slot that installed less than the pass did would sound like the
+    // authored instrument with somebody else's knobs on it.
+    //
+    // The engine mode FIRST. A replay is a recall, and MainPanel's SNAP recall
+    // forces it for the same reason: an LRO cache can be full while the engine
+    // still sounds the neural oscillator (a preset carries the cache whatever
+    // mode it was saved in, and the oscillator toggle deliberately leaves the
+    // engine alone until something has been authored). Without it the whole
+    // instrument installs and NOTHING IS HEARD - and since the replay gate then
+    // fires on every further GENERATE, the LRO could never author its way out.
+    //
+    // ...but only while the LRO is still the paradigm in front, which is the
+    // authoring pass's own guard (`if (! easyMode_)`) and the SNAP recall's
+    // (activateSnapshot returns into its neural branch first). An authoring pass
+    // runs for minutes and its tail can land long after the player has moved on
+    // to T5osc; forcing there would yank the engine into Csound under a neural
+    // panel AND let setAuthorSettings below write the author's filter, envelopes
+    // and FX over the patch the player is holding.
+    if (isSurfaceParadigmLanguage())
+        forceCsoundEngineMode();
+    requestCsoundOrchestra(e.orchestra);
+    setCsoundPrompt(e.prompt);
+    setCsoundReading(e.reading);
+    setCsoundParamsText(e.paramsText);
+    setCsoundControls(LroControls::fromVar(e.controls), /*applyValues=*/true);
+    setAuthorSettings(e.settings);
+    return true;
+}
+
+bool T5ynthProcessor::playNextCsoundCacheEntry()
+{
+    if (!isCsoundCacheFull())
+        return false;
+    return playCsoundCacheEntry(csoundCachePlaybackIndex);
+}
+
+// ── Whichever cache is in force ─────────────────────────────────────────────
+bool T5ynthProcessor::isLanguageOscillatorSounding() const
+{
+    // Csound and nothing else. EngineMode::Lco is the retired wavetable-bake
+    // paradigm, not a Csound path (BlockParams.h) - a cached orchestra does not
+    // sound there, so counting it as "the language oscillator" would let the
+    // aftertouch bar install orchestras into an engine playing a wavetable.
+    return static_cast<int>(paramCache.engineMode->load()) == EngineMode::Csound;
+}
+
+void T5ynthProcessor::setSurfaceParadigmIsLanguage(bool isLanguage)
+{
+    surfaceParadigmIsLanguage_.store(isLanguage, std::memory_order_release);
+}
+
+int  T5ynthProcessor::getActiveCacheCapacity() const
+{ return isSurfaceParadigmLanguage() ? getCsoundCacheCapacity() : getInferenceCacheCapacity(); }
+
+void T5ynthProcessor::setActiveCacheCapacity(int capacity)
+{
+    if (isSurfaceParadigmLanguage()) setCsoundCacheCapacity(capacity);
+    else                             setInferenceCacheCapacity(capacity);
+}
+
+void T5ynthProcessor::selectActiveCacheCapacity(int capacity)
+{
+    // The ceiling is the neural side's alone; maxActiveCacheCapacityForDuration
+    // returns the full depth in the LRO, so this one call covers both.
+    const int ceiling = maxActiveCacheCapacityForDuration();
+
+    // A positive request is never clamped down to OFF. Above 96 s the ceiling is
+    // 0, and clamping there turned every press on a dimmed depth cell into
+    // "switch the cache off" - which CLEARS it. A player holding a finished
+    // 16-deep take recorded at 10 s, who then moves the Duration, loses the take
+    // to a press that asked for a smaller depth. Nothing is available at that
+    // Duration, so the press does nothing; only an explicit 0 switches off.
+    if (capacity > 0 && ceiling <= 0)
+        return;
+
+    setActiveCacheCapacity(juce::jmin(capacity, ceiling));
+}
+
+int  T5ynthProcessor::getActiveCacheFillCount() const
+{ return isSurfaceParadigmLanguage() ? getCsoundCacheFillCount() : getInferenceCacheFillCount(); }
+
+bool T5ynthProcessor::isActiveCacheFull() const
+{ return isSurfaceParadigmLanguage() ? isCsoundCacheFull() : isInferenceCacheFull(); }
+
+
+int T5ynthProcessor::maxActiveCacheCapacityForDuration() const
+{
+    // 16, always, in the LRO: the budget the ceiling enforces is slot-SECONDS of
+    // audio, and an LRO slot carries none.
+    return isSurfaceParadigmLanguage() ? 16 : maxInferenceCacheCapacityForDuration();
 }
 
 void T5ynthProcessor::reextractWavetable()
@@ -7672,7 +8058,16 @@ static const std::vector<const char*>& authorParamShelf()
         for (const auto& dp : kDriftPIDs) for (const char* id : dp.all()) v.push_back(id);
         v.push_back(PID::driftEnabled);
         for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
-            v.push_back(kAftertouchAmtPid[t]);
+            // Not Cache, not Snap. This shelf is sound-shaping, and those two do
+            // not shape a sound - they MOVE THE INSTRUMENT. Handing the Snap bar
+            // to an authoring model would hand it, one pressure gesture later,
+            // everything a snapshot recall restores: engine mode, voice count,
+            // tuning, seed, duration, the prompts and the sample. That is the
+            // generation state and the engine identity this shelf exists to
+            // withhold. The loop is why this needs saying out loud - it takes
+            // whatever the enum grows, and it grew two things it must not take.
+            if (! AftertouchTarget::movesTheInstrument(t))
+                v.push_back(kAftertouchAmtPid[t]);
         return v;
     }();
     return shelf;
@@ -9642,6 +10037,82 @@ void T5ynthProcessor::handleAsyncUpdate()
     const int snapReq = xlSnapshotReq_.exchange(-1, std::memory_order_acq_rel);
     if (snapReq >= 0 && onSnapshotRequested)
         onSnapshotRequested(snapReq);
+
+    // Aftertouch → Snap: recall the slot the pressure has reached. Own mailbox,
+    // drained before the controller's so a press in the same cycle wins the last
+    // word - it is the deliberate act, and it cannot repeat itself.
+    const int atSnapSlot = atSnapReq_.exchange(-1, std::memory_order_acq_rel);
+    if (atSnapSlot >= 0)
+    {
+        if (onSnapshotRequested)
+            onSnapshotRequested(atSnapSlot);
+        // The recall clears both bars' memory on its way through (it loads audio
+        // or an orchestra), so THIS slot is written back afterwards. Released
+        // even with no editor listening, or the bar would wait forever for an
+        // install that nobody is going to make.
+        atSnapInstalledSlot_.store(atSnapSlot, std::memory_order_release);
+        int expected = atSnapSlot;
+        atSnapPostedSlot_.compare_exchange_strong(expected, -1,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed);
+    }
+
+    // Aftertouch → Cache: play the entry the pressure has reached. Same editor path
+    // the Re-Prompt stepping uses, so the held note crossfades to it. -1 = none.
+    const int cachePosReq = atCachePosReq_.exchange(-1, std::memory_order_acq_rel);
+    if (cachePosReq >= 0)
+    {
+        // The install cleared the bar's claim on its way through (every load
+        // does); write it back only if the entry actually landed. A refused
+        // install that claimed the position anyway would make that position
+        // unreachable for the rest of the gesture.
+        const bool installed = onCachePositionRequested && onCachePositionRequested(cachePosReq);
+        atCacheInstalledIdx_.store(installed ? cachePosReq : -1, std::memory_order_release);
+        int expected = cachePosReq;
+        atCachePostedIdx_.compare_exchange_strong(expected, -1,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed);
+    }
+
+    // Aftertouch → Cache, LRO side. Out through the editor like the neural one:
+    // installing a slot is only half done in this processor.
+    //
+    // And it WAITS rather than blocking. requestCsoundOrchestra takes
+    // csoundLifecycleMutex_, which the compile thread holds across a full Csound
+    // prepare and warmup - over a second - so calling it from a performance
+    // gesture would freeze the whole GUI for that long, on a control the player
+    // is holding. So the newest position is kept and installed when the swap is
+    // free; the swap's own completion comes back through here (it re-triggers to
+    // let a request that arrived during the fade start), so nothing is stranded.
+    {
+        const int lroReq = atLroCachePosReq_.exchange(-1, std::memory_order_acq_rel);
+        if (lroReq >= 0)
+            pendingLroCachePos_ = lroReq;   // latest wins, as everywhere on this path
+
+        const bool swapBusy = csoundCompileInFlight_.load(std::memory_order_acquire)
+                           || csoundSwapPending_.load(std::memory_order_acquire)
+                           || csoundSwapFading_.load(std::memory_order_acquire);
+        if (pendingLroCachePos_ >= 0 && ! swapBusy)
+        {
+            const int idx = pendingLroCachePos_;
+            pendingLroCachePos_ = -1;
+            // Through the EDITOR, exactly as the neural landing goes through
+            // onCachePositionRequested. Installing the slot here directly would
+            // do the processor half only - and the panel half is not decoration:
+            // it opens the compile window the Re-Prompt gates read, and it hands
+            // the chain the prompt and reading of the instrument now sounding.
+            // Without it a bar press leaves the loop rewriting the orchestra it
+            // just travelled away from, and the KNOBS card announcing that a
+            // different patch has been loaded over the one that just landed.
+            const bool installed = onLroCachePositionRequested
+                                && onLroCachePositionRequested(idx);
+            atCacheInstalledIdx_.store(installed ? idx : -1, std::memory_order_release);
+            int expected = idx;
+            atCachePostedIdx_.compare_exchange_strong(expected, -1,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_relaxed);
+        }
+    }
 
     // XL cache button (CC 49): toggle the inference cache 4 ↔ Off via the editor (keeps the
     // on-screen radio buttons in sync).

@@ -1191,6 +1191,14 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
             { PID::aftertouchAmtEnv3Sustain, "ENV3 Sus" },
             { PID::aftertouchAmtEnv4Sustain, "ENV4 Sus" },
             { PID::aftertouchAmtEnv5Sustain, "ENV5 Sus" },
+            // Last, and apart in kind: these two do not modulate the voice, they
+            // move the instrument - to another cached sample, to another
+            // snapshot. Same bar, same bipolar amount, and the sign means the
+            // same thing it means everywhere else here: which way pressure
+            // travels. Through the cache that is the order the samples were
+            // generated in, forwards or back.
+            { PID::aftertouchAmtCache,       "Cache"    },
+            { PID::aftertouchAmtSnap,        "Snap"     },
         };
         static constexpr int kNumAtBars = sizeof(atBars) / sizeof(atBars[0]);
         static_assert(kNumAtBars == AftertouchTarget::kCount - 1,

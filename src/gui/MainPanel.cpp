@@ -80,6 +80,12 @@ const char* const kMainSnapshotParamIds[] = {
     PID::aftertouchAmtCutoff, PID::aftertouchAmtResonance, PID::aftertouchAmtScan,
     PID::aftertouchAmtDca, PID::aftertouchAmtPitch, PID::aftertouchAmtNoiseLevel,
     PID::aftertouchAmtEnv4Sustain, PID::aftertouchAmtEnv5Sustain,
+    // Neither Cache nor Snap. Both bars MOVE the instrument, and a recall must
+    // not seize a bar that is doing so under the player's finger: press into
+    // slot 2, and if slot 2 was stored with that bar at rest - or reversed -
+    // the gesture ends somewhere the hand did not send it, with no way back out
+    // under pressure. Every other aftertouch amount is stored here; these two
+    // are the two the stored value could take out of the player's hands.
     PID::driftEnabled, PID::driftRegen, PID::driftCrossfade,
     PID::drift1Rate, PID::drift1Depth, PID::drift1Target, PID::drift1Wave,
     PID::drift1ClockMode, PID::drift1ClockDivision,
@@ -484,6 +490,14 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
       fxPanel(processor.getValueTreeState(), processor),
       sequencerPanel(processor)
 {
+    // Which cache the row addresses, set before ANYTHING reads it. The processor
+    // outlives the editor and keeps the last one's answer, so an editor reopened
+    // after a session that ended in the LRO would otherwise draw its very first
+    // frame - and could label GENERATE "cache hit" - from the other oscillator's
+    // cache. setOscEasyMode further down writes the real value; this is the
+    // member initialiser's, so the two agree from the first line.
+    processorRef.setSurfaceParadigmIsLanguage(! oscEasyMode);
+
     setOpaque(true);
     computerKeyboardActiveNotes.fill(-1);
     // Feeds t5::physicalKeyDown from this app's own key events. Ref-counted, so a
@@ -589,12 +603,45 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     // snapshot buttons; activateSnapshot restores the params and syncs the UI).
     processorRef.onSnapshotRequested = [this](int slot) { activateSnapshot(slot); };
 
+    // Aftertouch → Cache: the pressure has reached another entry. Straight to the
+    // same call the Re-Prompt stepping makes, so the held note crossfades over.
+    // The NEURAL landing only - it goes through the panel, which owns the status
+    // line and the pending offsets a cache step clears. The LRO's landing never
+    // comes here: an LRO slot is six of the processor's own setters, and it has
+    // to wait for the Csound swap rather than block on it, so the processor
+    // installs that one itself.
+    processorRef.onCachePositionRequested = [this](int index)
+    {
+        return promptPanel.playCachedInferenceAt(index);
+    };
+
+    // The LRO's landing. Its own callback, not a branch inside the one above:
+    // the index was resolved against a particular cache on the audio thread and
+    // travels in that cache's mailbox, so which one it belongs to is already
+    // decided by the time it arrives here.
+    processorRef.onLroCachePositionRequested = [this](int index)
+    {
+        return promptPanel.playCachedCsoundAt(index);
+    };
+
     // XL cache button (CC 49) → toggle the inference cache between 4 and Off, mirroring
     // the on-screen radio buttons (read current, flip, then refresh the radio UI).
     processorRef.onCacheToggleRequested = [this]
     {
-        const int cur = processorRef.getInferenceCacheCapacity();
-        processorRef.setInferenceCacheCapacity(cur == 4 ? 0 : 4);
+        // ON/OFF, not "4 or 0". Testing the read-back against the literal 4
+        // breaks as soon as the Duration's ceiling clamps the 4 down: at 60s the
+        // capacity comes back as 2, never equals 4, so every press would ask for
+        // 4 again and the OFF half of the toggle would be unreachable - and the
+        // press that finally did land on a different value would clear a
+        // finished offline take on its way. Anything above 0 is "on"; off goes
+        // through the unclamped setter because 0 always fits.
+        if (processorRef.getActiveCacheCapacity() > 0)
+            processorRef.setActiveCacheCapacity(0);
+        else
+            // Above 96 s there is no depth to switch on at all, and this does
+            // nothing - the rule lives in selectActiveCacheCapacity, which every
+            // press on the row goes through too.
+            processorRef.selectActiveCacheCapacity(4);
         syncInferenceCacheUi();
     };
 
@@ -1180,11 +1227,16 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     addAndMakeVisible(snapLabel);
 
     {
-        static constexpr const char* labels[kNumSnapshotButtons] = { "OFF", "1", "2", "3", "4" };
+        static constexpr const char* labels[kNumSnapshotButtons] = { "", "1", "2", "3", "4" };
         for (int i = 0; i < kNumSnapshotButtons; ++i)
         {
             auto& b = snapshotButtons[i];
             b.setButtonText(labels[i]);
+            // The off cell wears the ARP row's off sign rather than the word.
+            // The same thing is meant, it reads at a glance next to the digits,
+            // and the cell no longer has to be widened to hold three letters.
+            if (i == 0)
+                setSwitchGlyph(b, SwitchGlyph::ArpOff);
             b.setSnapshotIndex(i);
             styleSwitchButton(b, kOscCol);
             b.setTooltip(i == 0 ? "Disable snapshot recall"
@@ -1206,7 +1258,7 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
 
     {
         static constexpr const char* labels[kNumInfCacheButtons] = {
-            "OFF", "2", "4", "8", "16"
+            "", "2", "4", "8", "16"
         };
         static constexpr int values[kNumInfCacheButtons] = {
             0, 2, 4, 8, 16
@@ -1215,8 +1267,19 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
         {
             auto& b = infCacheButtons[i];
             b.setButtonText(labels[i]);
+            if (i == 0)
+                setSwitchGlyph(b, SwitchGlyph::ArpOff);   // see the SNAP row above
             styleSwitchButton(b, kOscCol);
-            b.setClickingTogglesState(true);
+            // The lit cell is written by syncInferenceCacheUi and by NOTHING else.
+            // JUCE's own click-toggles-state would move the light before onClick
+            // even runs (juce_Button.cpp, internalClickCallback), and since
+            // selectActiveCacheCapacity CLAMPS to what the Duration affords, a
+            // click on a dimmed depth can leave the processor exactly where it was
+            // - a no-op that syncInferenceCacheUi's change guard then reads as
+            // "nothing to do", so the light would stay on a depth the engine does
+            // not have. Two writers, one memo that can only see one of them. So:
+            // the button reports the click, the sync below decides what lights up.
+            b.setClickingTogglesState(false);
             b.setRadioGroupId(3017);
             int edges = 0;
             if (i > 0) edges |= juce::Button::ConnectedOnLeft;
@@ -1224,7 +1287,17 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
             b.setConnectedEdges(edges);
             b.onClick = [this, value = values[i]]
             {
-                processorRef.setInferenceCacheCapacity(value);
+                // Pressing the depth that is already in force changes nothing -
+                // and MUST change nothing, because changing depth clears the
+                // cache. Without this the clamp turns such a press into a real
+                // change: a 16-deep offline take recorded at 10s, with the
+                // Duration since moved to 40s (ceiling 4), would be destroyed by
+                // a press on the one cell the panel draws lit and undimmed. A
+                // preset reaches that same state on load, where the depth it
+                // carries deliberately outruns the ceiling.
+                if (value == processorRef.getActiveCacheCapacity())
+                    return;
+                processorRef.selectActiveCacheCapacity(value);
                 syncInferenceCacheUi();
             };
             addAndMakeVisible(b);
@@ -1238,7 +1311,9 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
         // ~17 pt, which already ellipsises OFF and 16. The take switch gets the
         // width the two dropped depths freed (see the layout) and a label short
         // enough to survive there; the tooltip carries the meaning.
-        cacheAsyncBtn.setButtonText("A/S");
+        // "A/S" said nothing to anybody. The word itself now fits: the off cell
+        // beside it gave up the width it needed for three letters.
+        cacheAsyncBtn.setButtonText("async");
         styleSwitchButton(cacheAsyncBtn, kOscCol);
         cacheAsyncBtn.setClickingTogglesState(true);
         cacheAsyncBtn.setTooltip(
@@ -1665,6 +1740,14 @@ void MainPanel::setOscEasyMode(bool easy, bool persist)
 {
     oscEasyMode = easy;
 
+    // Which cache the CACHE row and the take switch address: the one belonging
+    // to the panel in front. NOT the engine mode - applyOscModeToEngine below
+    // deliberately leaves the engine where it is until something has been
+    // authored, so the LRO panel can sit in front of a neural engine for a whole
+    // session, and a depth press there would then have cleared the NEURAL cache
+    // from a panel that does not own it.
+    processorRef.setSurfaceParadigmIsLanguage(! oscEasyMode);
+
     promptPanel.setEasyMode(oscEasyMode);
 
     // Advanced IS the DCO panel — a different paradigm, not a neural variant.
@@ -1711,12 +1794,19 @@ void MainPanel::setOscEasyMode(bool easy, bool persist)
     for (auto& bCache : infCacheButtons)
     {
         bCache.setVisible(true);
-        bCache.setEnabled(neural);
-        bCache.setAlpha(dimA);
+        // No setEnabled, and no dim: the LRO has a cache of its own now, so this
+        // row reaches something in either oscillator. It used to be switched off
+        // here - which was also the standing rule against it, since a dimmed
+        // control in this synth means "does not apply right now" and never
+        // "cannot be touched".
+        bCache.setAlpha(1.0f);
     }
     cacheAsyncBtn.setVisible(true);
-    cacheAsyncBtn.setEnabled(neural);
-    cacheAsyncBtn.setAlpha(dimA);
+    // Reachable in either oscillator: the switch records a take on whichever
+    // cache the row addresses, and the LRO reads it (isLroAsyncTakeRecording).
+    // Switched off here, it could only ever be set from the OTHER panel — and a
+    // control of this synth is never made ungrabbable in the first place.
+    cacheAsyncBtn.setAlpha(1.0f);
     for (auto& bSrc : resynthSrcBtns)
         bSrc.setVisible(true);
     if (resynthRow)
@@ -1988,7 +2078,12 @@ void MainPanel::enterLibrarySaveMode(SaveNameMode mode)
     prefill.existingPathKeys = std::move(existingPathKeys);
     prefill.promptA          = promptPanel.getPromptA();
     prefill.promptB          = promptPanel.getPromptB();
-    prefill.canIncludeInferenceCache = processorRef.getInferenceCacheCapacity() > 0;
+    // Either cache, and only once something is IN one. Asked of the fill rather
+    // than the depth: an armed-but-empty cache has nothing to include, and
+    // offering it writes a depth into the file that then arms a cache on a
+    // machine that asked for nothing.
+    prefill.canIncludeInferenceCache = processorRef.getInferenceCacheFillCount() > 0
+                                    || processorRef.getCsoundCacheFillCount() > 0;
 
     showPresetManager();
     presetManager.enterSaveMode(std::move(prefill));
@@ -2271,6 +2366,32 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
         processorRef.setLastPrompts(result.promptA, result.promptB);
     }
 
+    processorRef.setCsoundCacheCapacity(0);
+    promptPanel.disarmLroTakeStep();   // an in-flight authoring pass must not claim this cache
+    if (result.csoundCacheCapacity > 0)
+    {
+        processorRef.setCsoundCacheCapacity(result.csoundCacheCapacity);
+        for (const auto& e : result.csoundCache)
+        {
+            T5ynthProcessor::CsoundCacheEntry slot;
+            slot.orchestra   = e.orchestra;
+            slot.prompt      = e.prompt;
+            slot.reading     = e.reading;
+            slot.paramsText  = e.paramsText;
+            slot.authorModel = e.authorModel;
+            slot.controls    = e.controls;
+            slot.settings    = e.settings;
+            processorRef.addCsoundCacheEntry(slot);
+        }
+        // After the entries: setCsoundCacheCapacity clears the flag with them.
+        // Asked of what LANDED, not of the depth the file asked for: a flag
+        // standing over an empty cache sends the replay gate at nothing. Fill,
+        // not capacity - the depth always lands now (sanitizeCacheCapacity
+        // rounds up), the ENTRIES are what can fail to.
+        if (processorRef.getCsoundCacheFillCount() > 0)
+            processorRef.setCsoundCacheOfflineTake(result.csoundCacheIsOfflineTake);
+    }
+
     processorRef.setInferenceCacheCapacity(0);
     promptPanel.disarmOfflineTakeStep();   // an in-flight render must not claim this cache
     if (result.inferenceCacheCapacity > 0)
@@ -2279,8 +2400,10 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
         for (const auto& entry : result.inferenceCache)
             processorRef.addInferenceCacheEntry(entry.audio, entry.sampleRate);
         // After the entries, not before: setInferenceCacheCapacity clears the flag
-        // along with the cache it is about.
-        processorRef.setInferenceCacheOfflineTake(result.inferenceCacheIsOfflineTake);
+        // along with the cache it is about. And only if entries actually landed,
+        // for the reason given on the LRO block above.
+        if (processorRef.getInferenceCacheFillCount() > 0)
+            processorRef.setInferenceCacheOfflineTake(result.inferenceCacheIsOfflineTake);
     }
     syncInferenceCacheUi();
 
@@ -2940,6 +3063,8 @@ MainPanel::~MainPanel()
     processorRef.onGenerateRequested = nullptr;
     processorRef.onSnapshotRequested = nullptr;
     processorRef.onCacheToggleRequested = nullptr;
+    processorRef.onCachePositionRequested = nullptr;
+    processorRef.onLroCachePositionRequested = nullptr;
     releaseComputerKeyboardNotes();
     t5::stopPhysicalKeyMonitor();
     stopTimer();
@@ -2951,7 +3076,13 @@ MainPanel::~MainPanel()
     auto bufFile = getBufferPresetFile();
     bufFile.getParentDirectory().createDirectory();
     const auto snaps = buildSnapshotsForSave();
-    PresetFormat::saveToFile(bufFile, processorRef, true,
+    // WITHOUT the caches. Saving a preset ASKS whether to include them; the
+    // session buffer never asks and used to always say yes, so a recording made
+    // in one sitting came back full in the next - and a full cache is not
+    // neutral: GENERATE reads "cache hit" and replays it instead of making
+    // anything, in an oscillator the player has not built a cache in yet. The
+    // patch is what the buffer is for.
+    PresetFormat::saveToFile(bufFile, processorRef, /*includeInferenceCache=*/false,
                              snaps.empty() ? nullptr : &snaps);
 }
 
@@ -3020,43 +3151,72 @@ void MainPanel::paint(juce::Graphics& g)
 
 void MainPanel::syncInferenceCacheUi()
 {
-    const int capacity = processorRef.getInferenceCacheCapacity();
-    const int fill = processorRef.getInferenceCacheFillCount();
-    const bool full = processorRef.isInferenceCacheFull();
+    const int capacity = processorRef.getActiveCacheCapacity();
+    const int fill = processorRef.getActiveCacheFillCount();
+    const bool full = processorRef.isActiveCacheFull();
+    // Depth ceiling from the Duration, and the panel mode that scales every
+    // alpha below. Both belong in the change guard: a Duration drag moves the
+    // ceiling and a mode switch moves dimA, and neither touches capacity/fill.
+    const int ceiling = processorRef.maxActiveCacheCapacityForDuration();
+    const bool easy = oscEasyMode;
     updateGenerateButtonsForCacheState(false);
 
     if (capacity == lastInfCacheUiCapacity
         && fill == lastInfCacheUiFill
-        && full == lastInfCacheUiFull)
+        && full == lastInfCacheUiFull
+        && ceiling == lastInfCacheUiCeiling
+        && easy == lastInfCacheUiEasy)
         return;
 
     lastInfCacheUiCapacity = capacity;
     lastInfCacheUiFill = fill;
     lastInfCacheUiFull = full;
+    lastInfCacheUiCeiling = ceiling;
+    lastInfCacheUiEasy = easy;
 
     static constexpr int values[kNumInfCacheButtons] = { 0, 2, 4, 8, 16 };
 
     // Pulse the *selected* button while the cache is filling. Once full,
     // pulsing stops and the button sits at solid kOscCol — that solid state
     // is the "cache full" signal, replacing the dropped status text row.
-    // Neural-only: the cache buttons are disabled + dimmed in LCO — never animate them.
-    const bool isFilling = oscEasyMode && (capacity > 0) && (fill < capacity);
+    // In BOTH oscillators: each has a cache of its own and each fills it.
+    const bool isFilling = (capacity > 0) && (fill < capacity);
+    // No panel dim on this row any more. It used to be dimmed to 0.4 in the LRO
+    // because the row was the neural cache's alone; the LRO has one of its own
+    // now, and dimming means "does not apply right now" - which would be the
+    // opposite of the truth in the one oscillator where every depth applies.
+    // What still dims is a depth the DURATION cannot afford, below.
     for (int i = 0; i < kNumInfCacheButtons; ++i)
     {
-        infCacheButtons[i].setToggleState(capacity == values[i], juce::dontSendNotification);
+        const bool selected = capacity == values[i];
+        // Over the ceiling AND not the one in force. A preset carries its own
+        // depth past this ceiling on purpose (the entries were recorded under
+        // whatever Duration was in force), and a depth that IS running is not
+        // "does not apply right now" - dimming it would say the opposite of the
+        // truth. It also keeps the fill pulse out of a transparency layer, which
+        // any alpha < 1 would put it in (juce_Component::paintEntireComponent).
+        const bool overCeiling = values[i] > ceiling && !selected;
+        infCacheButtons[i].setToggleState(selected, juce::dontSendNotification);
         infCacheButtons[i].setPulsing(isFilling);
+        infCacheButtons[i].setAlpha(overCeiling ? 0.4f : 1.0f);
     }
 }
 
 void MainPanel::updateGenerateButtonsForCacheState(bool pulseCacheHit)
 {
-    // Neural-only. In LCO the reused GENERATE button is owned by onLcoBusyChanged
-    // (bake busy-state) + setOscEasyMode (mode reset); letting this 20 Hz cache path
-    // touch it would re-enable it mid-bake and could leak a "cache hit" label there.
-    if (!oscEasyMode)
+    // While a bake runs, the reused GENERATE button belongs to onLcoBusyChanged
+    // and to setOscEasyMode's mode reset — letting this 20 Hz path touch it there
+    // would re-enable it mid-bake. Outside that, the LRO's own full cache is a
+    // cache hit exactly as the neural one is: triggerDcoBake replays it.
+    if (!oscEasyMode && lcoBakeBusy_)
         return;
 
-    const bool cachePlaybackReady = processorRef.isInferenceCacheFull();
+    // "Would a press play from the cache?", not "is the cache full?". In the LRO
+    // a full cache under a running Re-Prompt stance is deliberately NOT replayed
+    // - that loop needs a real authoring pass - so the full test put the label on
+    // a button whose press spends a model turn and replaces the sounding
+    // instrument. One question, asked in the one place that knows the answer.
+    const bool cachePlaybackReady = promptPanel.pressWouldReplayCache();
     if (cachePlaybackReady)
     {
         mainGenerateBtn.setButtonText("cache hit");
@@ -3068,7 +3228,7 @@ void MainPanel::updateGenerateButtonsForCacheState(bool pulseCacheHit)
         return;
     }
 
-    if (processorRef.getInferenceCacheCapacity() == 0)
+    if (processorRef.getActiveCacheCapacity() == 0)
     {
         cacheHitActive = false;
         if (!promptPanel.isGenerating())
@@ -3980,7 +4140,11 @@ void MainPanel::timerCallback()
     // Drive the cache-button pulse phase while the cache is still filling.
     // Uses an independent 2 Hz counter (not glowPhase, which crawls at idle)
     // so the selected button visibly blinks. Only the toggled button repaints.
-    if (oscEasyMode && lastInfCacheUiCapacity > 0 && lastInfCacheUiFill < lastInfCacheUiCapacity)
+    // Not gated on the panel: syncInferenceCacheUi arms the pulse for either
+    // oscillator's cache, and a driver that stopped at the neural one would leave
+    // the LRO's selected cell armed but frozen at whatever phase it last held —
+    // brightened, motionless, for the whole fill.
+    if (lastInfCacheUiCapacity > 0 && lastInfCacheUiFill < lastInfCacheUiCapacity)
     {
         cachePulsePhase += 2.0f * juce::MathConstants<float>::twoPi * dt;
         while (cachePulsePhase > juce::MathConstants<float>::twoPi)
@@ -4251,8 +4415,9 @@ void MainPanel::resized()
             }
         };
 
+        // The off cell is a glyph now, so it needs no more room than a digit.
         static constexpr float snapshotWeights[kNumSnapshotButtons] = {
-            1.65f, 1.00f, 1.00f, 1.00f, 1.00f
+            1.00f, 1.00f, 1.00f, 1.00f, 1.00f
         };
         layoutWeightedButtons(snapshotButtons, kNumSnapshotButtons, snapGroup, snapshotWeights);
         snapshotSwitchBounds = snapshotButtons[0].getBounds();
@@ -4260,16 +4425,18 @@ void MainPanel::resized()
             snapshotSwitchBounds = snapshotSwitchBounds.getUnion(snapshotButtons[i].getBounds());
 
         auto cacheGroup = snapCacheRow;
-        // What the two dropped depths bought: the word-shaped cells (OFF, 16, and
-        // the take switch) get the room the digits do not need, so the row reads at
+        // What the two dropped depths bought: the word-shaped cells (16 and the
+        // take switch) get the room the digits do not need, so the row reads at
         // the minimum window width instead of ellipsising three of its six cells.
+        // The off cell is no longer one of them - it is a glyph, and its width
+        // went to the switch on the right, which now carries a whole word.
         static constexpr float cacheWeights[kNumInfCacheButtons] = {
-            2.30f, 0.85f, 0.85f, 0.85f, 1.60f
+            1.00f, 0.85f, 0.85f, 0.85f, 1.60f
         };
         // The take switch takes the right end of the row, with a hairline gap: it is
         // read as its own control, not as a sixth depth in the connected group.
         {
-            constexpr float kAsyncWeight = 2.30f;
+            constexpr float kAsyncWeight = 3.15f;
             float capWeight = 0.0f;
             for (float w : cacheWeights) capWeight += w;
             const int asyncW = juce::jmax(1, juce::roundToInt(
@@ -4445,6 +4612,14 @@ void MainPanel::loadInitPreset()
         : 44100.0;
     processorRef.loadGeneratedAudio(emptyAudio, sampleRate);
     processorRef.setInferenceCacheCapacity(0);
+    // The LRO's cache too. It was the only piece of processor state Init left
+    // standing, and a recorded take surviving one is not a leftover but a trap:
+    // the replay gate fires on every GENERATE, the cadence stop fires on every
+    // tick, and the freshly-Init'ed LRO can neither author nor step - with the
+    // only way out being a depth press, which destroys the cache.
+    processorRef.setCsoundCacheCapacity(0);
+    promptPanel.disarmOfflineTakeStep();
+    promptPanel.disarmLroTakeStep();
     processorRef.setLastPrompts({}, {});
     processorRef.setLastPresetName({});
     processorRef.setLastTags({});

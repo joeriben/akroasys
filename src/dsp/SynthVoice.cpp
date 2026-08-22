@@ -23,6 +23,10 @@ float applyNormalizedOffset(float baseValue, float modulationOffset)
 // here. Per-target bipolar amounts live in BlockParams::aftertouchTargetAmt.
 bool aftertouchTargetActive(const BlockParams& p, int target)
 {
+    // Cache and Snap carry no per-voice depth: they are resolved once per block
+    // in the processor and move the whole instrument. Reading one here would
+    // hand a voice a modulation that does not exist.
+    jassert(! AftertouchTarget::movesTheInstrument(target));
     return p.aftertouchTargetAmt[target] != 0.0f;
 }
 

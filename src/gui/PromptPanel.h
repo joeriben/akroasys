@@ -87,6 +87,15 @@ class PromptPanel : public juce::Component, private juce::Timer
 {
 public:
     explicit PromptPanel(T5ynthProcessor& processor);
+    /** Play cache entry `index` - where the aftertouch traversal has landed.
+     *  Same handling as the private playNextCachedInference; only the choice of
+     *  entry differs. Called from MainPanel on the message thread. */
+    bool playCachedInferenceAt(int index);
+    /** Install LRO cache slot `index` whole - the processor half AND the panel
+     *  half. Reached from the GENERATE replay (via playNextCachedCsound) and
+     *  from the aftertouch Cache bar's landing, which is why it is public
+     *  exactly as its neural twin above is. */
+    bool playCachedCsoundAt(int index);
     // stopTimer() first (JUCE rule). Then stop any replay: the transport's
     // generation half lives here — with the panel gone, the tape's notes would keep
     // firing while its timbre changes never arrive. Recording is unaffected (it is
@@ -99,6 +108,10 @@ public:
      *  been so — but it must not also stamp the loaded entries as an offline take
      *  they were never part of. Called from the preset path. */
     void disarmOfflineTakeStep() { takeStepArmed_ = false; }
+    /** The LRO's twin. An authoring pass in flight must not stamp a cache that
+     *  has been replaced under it (a preset load), and a run whose cadence was
+     *  switched off mid-pass did not record a take. */
+    void disarmLroTakeStep() { lroTakeStepArmed_ = false; }
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -348,6 +361,12 @@ public:
     void paintOverChildren(juce::Graphics& g) override;
 
     bool isGenerating() const { return generating; }
+    /** Would pressing GENERATE right now play a cache entry instead of making a
+     *  new one? Asked by the button's own label, and by the LRO's bake, so the
+     *  two cannot drift apart - a button reading "cache hit" over a press that
+     *  spends a model turn and replaces the sounding instrument is worse than no
+     *  label at all. Answers for the panel in front. */
+    bool pressWouldReplayCache() const;
 
     /** Backend-selected inference device for this machine ("mps"/"cuda"/"cpu").
      *  Empty until the subprocess reports its device list. Used by the preset
@@ -367,6 +386,12 @@ private:
     // automatically, with its unchanged bar setting, when the translation finishes.
     void translatePromptsInPlace();
     bool playNextCachedInference();
+    bool lroTakeStepArmed_ = false;   // this LRO step may record a cache point as a take
+    bool lastLroTakeRecording_ = false;   // to notice the recording condition breaking
+    /** The LRO's counterpart: install the next cached authoring result. */
+    bool playNextCachedCsound();
+    /** True while a cadence-driven LRO run is recording a take. */
+    bool isLroAsyncTakeRecording() const;
     /** Push the realized seed from a generation result onto the processor's
      *  seed store (replaces the old seedEditor display sync — no widget to
      *  update anymore, the Easy Variation switchbox reads processor state). */
@@ -486,6 +511,10 @@ private:
     // entirely). Declared BEFORE durA (below) so the attachment tears down
     // first (reverse destruction order).
     std::unique_ptr<SliderRow> durationRow;
+    // Scale marks under the Duration bar at the cache-depth thresholds
+    // (12/24/48/96 s). Reads its positions from durationRow's slider, so it
+    // must be destroyed before it - declared after, per this file's convention.
+    std::unique_ptr<ScaleTicks> durationTicks;
     // Easy-view "VAR" caption for the Variation switchbox row (the 3 seed-mode
     // icons framed by paintSwitchBoxBorder — no card, standard row height).
     juce::Label varSwitchLabel;
@@ -611,6 +640,10 @@ private:
     //   refused  the part of the station that belongs to the authoring rather
     //            than to the live patch, so it is kept here
     // Message thread only.
+    /** The KNOBS station for author settings that have just been installed on
+     *  the processor. Shared by the authoring pass's publish and a cache replay,
+     *  which install the same var and must report the same station. */
+    void adoptAuthorSettingsStation(const juce::var& settings);
     void refreshLcoKnobStation();
     bool dcoKnobsKnown_ = false;
     int  dcoKnobsRev_ = -1;

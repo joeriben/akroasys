@@ -50,6 +50,7 @@
     X(aftertouchAmtLfo1Depth)   X(aftertouchAmtLfo2Depth)   X(aftertouchAmtLfo3Depth) \
     X(aftertouchAmtEnv1Sustain) X(aftertouchAmtEnv2Sustain) X(aftertouchAmtEnv3Sustain) \
     X(aftertouchAmtEnv4Sustain) X(aftertouchAmtEnv5Sustain) \
+    X(aftertouchAmtCache)       X(aftertouchAmtSnap) \
     X(aftertouchAmtCutoff)      X(aftertouchAmtResonance)   X(aftertouchAmtScan) \
     X(aftertouchAmtDca)         X(aftertouchAmtPitch)       X(aftertouchAmtNoiseLevel) \
     X(driftEnabled)     X(driftRegen)     X(driftCrossfade) \

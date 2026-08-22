@@ -61,6 +61,14 @@ GenerationEventLogEntry buildEventLogGenerationEntry(const PipeInference::Reques
 constexpr float kPromptPadFactor   = 0.04f;
 constexpr float kPromptMultiInput  = 3.7f;   // two-line prompt editor (roomy box)
 constexpr float kPromptCompactRow  = 1.15f;
+// Scale-mark strip under the Duration bar: hairline + the second number.
+// Reserved on EVERY model, not only on SA3, so selecting a model never moves
+// the two rows under it - the marks themselves come and go with the range.
+constexpr float kPromptTicks       = 0.75f;
+// Clearance under the numbers. The ordinary row gap is not enough here: the
+// numbers sit at the BOTTOM of the strip, so they end where the next bar
+// begins and the two read as one block.
+constexpr float kPromptTicksGap    = 0.45f;
 constexpr float kPromptCompactCtrl = 0.9f;
 constexpr float kPromptSeedCtrl    = 1.75f;
 constexpr float kPromptGap         = 0.28f;
@@ -91,12 +99,14 @@ constexpr float kPromptReprompt    = 4.0f;   // Re-Prompt MODULE total height (c
 //   + repromptRow                                                      = 4.0          -> 16.25
 //   + groupGap (divider)                                               = 1.0          -> 17.25
 //   + 2x(compactRow + gap)  (Duration|Variation, Magnitude|Chaos)      = 2*1.43 = 2.86 -> 20.11
+//   + durationTicks strip (under the Duration bar, both models)         = 0.75          -> 20.86
+//   + clearance under the tick numbers                                  = 0.45          -> 21.31
 // Advanced (the DCO panel: one prompt editor + a BAKE/status row) needs LESS
 // minimum height than this sum, so it is a valid minimum for Advanced too —
 // resized()'s Advanced branch lays the BAKE/status row out at a fixed
 // compactRow height and gives the DCO prompt editor 100% of whatever height
 // remains, so it simply absorbs the slack instead of needing its own budget.
-constexpr float kPromptContentUnits = 20.11f;
+constexpr float kPromptContentUnits = 21.31f;
 constexpr int kBaseSeed = 123456789;
 
 float preferredPromptFontForWidth(int width)
@@ -291,6 +301,17 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
         kOscCol);
     durationRow->setInlineLabel(true);
     addAndMakeVisible(*durationRow);
+
+    // The four cache-depth thresholds. 16 slots fit up to 12s, 8 up to 24s,
+    // 4 up to 48s, 2 up to 96s (192 slot-seconds, see
+    // T5ynthProcessor::maxInferenceCacheCapacityForDuration) - so these marks
+    // are where the cache ladder steps down, and each sits on a whole-second
+    // detent snapGenerationDuration already provides. Above 11s they only
+    // exist on SA3, and ScaleTicks drops them by itself on the short-sound
+    // engines because the range ends below the first one.
+    durationTicks = std::make_unique<ScaleTicks>(durationRow->getSlider());
+    durationTicks->setValues({ 12.0, 24.0, 48.0, 96.0 });
+    addAndMakeVisible(*durationTicks);
 
     // Magnitude — Easy view only, house-standard inline-bar SliderRow (mirrors
     // durationRow above). Moved out of Advanced entirely. Attached to
@@ -767,7 +788,8 @@ int PromptPanel::getPreferredHeightForWidth(int width) const
     return (compactRowH + 2) + modelGap             // model selector row
          + abBlockH + innerGap + repromptRowH       // A↔B block + Re-Prompt row
          + groupGap                                 // divider
-         + 2 * (compactRowH + gap);                 // 2x2 gen block: Duration|Variation, Magnitude|Chaos
+         + 2 * (compactRowH + gap)                  // 2x2 gen block: Duration|Variation, Magnitude|Chaos
+         + juce::roundToInt(f * (kPromptTicks + kPromptTicksGap));  // scale marks under Duration
 }
 
 void PromptPanel::timerCallback()
@@ -1116,6 +1138,7 @@ void PromptPanel::resized()
     // Duration/Magnitude/Chaos have no advanced form any more — they're the
     // inline durationRow/magRow/noiseRow, shown in Easy only.
     durationRow->setVisible(easy);
+    durationTicks->setVisible(easy);
     magRow->setVisible(easy);
     noiseRow->setVisible(easy);
     varSwitchLabel.setVisible(easy);
@@ -1428,6 +1451,8 @@ void PromptPanel::resized()
     auto layoutEasyGenParamsBlock = [&]
     {
         const int rowH = compactRowH;
+        const int tickH = juce::roundToInt(f * kPromptTicks);
+        const int tickGapH = juce::roundToInt(f * kPromptTicksGap);
         const int colW = (area.getWidth() - colGap) / 2;
 
         // The VAR switchbox occupies one pair-cell: "VAR" caption + the 3
@@ -1450,12 +1475,18 @@ void PromptPanel::resized()
                 .getUnion(seedModeBtns[kNumSeedModeBtns - 1].getBounds());
         };
 
-        // Row 1: Duration | Variation.
+        // Row 1: Duration | Variation, with the Duration bar's scale marks in a
+        // strip directly beneath it (left column only, same x and width as the
+        // bar so the hairlines meet the fill edge).
         {
             auto row = area.removeFromTop(rowH);
-            durationRow->setBounds(row.removeFromLeft(colW));
+            const auto durBounds = row.removeFromLeft(colW);
+            durationRow->setBounds(durBounds);
             row.removeFromLeft(colGap);
             layoutVarSwitchbox(row);
+            durationTicks->setBounds(area.removeFromTop(tickH).withX(durBounds.getX())
+                                                             .withWidth(durBounds.getWidth()));
+            area.removeFromTop(tickGapH);
             area.removeFromTop(gap);
         }
 
@@ -1473,7 +1504,9 @@ void PromptPanel::resized()
     // At the panel's preferred (minimum) height the slack is zero, so the block
     // sits flush above SEMANTIC AXES; any extra height is split evenly above and
     // below it. (Easy-only code from here on — Advanced returned above.)
-    area.removeFromTop(juce::jmax(0, area.getHeight() - 2 * (compactRowH + gap)) / 2);
+    area.removeFromTop(juce::jmax(0, area.getHeight()
+                                    - (2 * (compactRowH + gap)
+                                       + juce::roundToInt(f * (kPromptTicks + kPromptTicksGap)))) / 2);
 
     layoutEasyGenParamsBlock();
 }
@@ -1824,6 +1857,11 @@ void PromptPanel::applyDurationRangeForCurrentModel()
     // re-clamps the thumb with dontSendNotification (juce_Slider.cpp updateRange),
     // so it never writes back to the parameter on its own.
     durationRow->getSlider().setNormalisableRange(toDoubleRange(T5ynthProcessor::makeDurationRange(maxSec)));
+
+    // The marks read their x back out of that range, so every one of them has
+    // just moved (or left the scale entirely, on the 11s engines). Scoped to
+    // the strip - a model change must not repaint the panel.
+    durationTicks->repaint();
 
     // Model selection is UI state from the backend handshake, not an APVTS
     // parameter — at editor-construction / DAW state-restore time no model is
@@ -2221,6 +2259,18 @@ void PromptPanel::triggerLcoGenerate()
     if (auto* p = processorRef.getValueTreeState().getParameter(PID::driftRegen))
         p->setValueNotifyingHost(p->convertTo0to1(static_cast<float>(DriftRegen::Manual)));
 
+    // A full cache is answered HERE, before the stance routing below. The bake
+    // at the end of a re-prompt step would replay too, but only after the step
+    // has taken the Csound lifecycle lock for a bare-oscillator render, run a
+    // listen and two model turns, and rewritten the prompt editor - which the
+    // replay then writes straight back over. The button says "cache hit"; the
+    // press has to be one.
+    if (processorRef.isCsoundCacheFull())
+    {
+        playNextCachedCsound();
+        return;
+    }
+
     const int stance = static_cast<int>(processorRef.getValueTreeState()
                           .getRawParameterValue(PID::dcoRepromptStance)->load());
     if (stance != RepromptStance::Off && processorRef.hasCsoundOrchestra() && ! dcoEarFailed_)
@@ -2237,6 +2287,36 @@ void PromptPanel::triggerLcoGenerate()
 // (read back off the parameters while they stand, from the request while they
 // wait) and only the sentence that says WHY they wait is decided here, because
 // only this side knows whether it was the switch or the oscillator.
+// The KNOBS station for a set of author settings that has JUST been installed on
+// the processor. Written once and called from both places that install one: the
+// authoring pass's publish, and a cache replay - which installs the very same var
+// and must therefore report the very same station, rather than the "a different
+// patch has been loaded" line a stale generation counter would produce.
+void PromptPanel::adoptAuthorSettingsStation(const juce::var& settings)
+{
+    juce::StringArray refused;
+    if (auto* arr = settings.getArray())
+        for (const auto& e : *arr)
+        {
+            if (static_cast<bool>(e.getProperty("ok", juce::var(false))))
+                continue;
+            const auto name = e.getProperty("name", juce::var()).toString();
+            const auto val  = e.getProperty("value", juce::var()).toString();
+            const auto note = e.getProperty("note", juce::var()).toString();
+            refused.add(name + "  " + val + " - "
+                        + (note.isEmpty() ? juce::String("not set") : note));
+        }
+    dcoKnobsRefused_ = refused;
+    dcoKnobsAsked_.clear();
+    dcoKnobsKnown_   = true;
+    // The generation this card's station belongs to: the request just handed
+    // over. Anything that replaces it — a preset, a restored session — is a
+    // different patch, and the station says so instead of reporting that
+    // patch's answer as this one's.
+    dcoKnobsGen_ = processorRef.getAuthorSettingsGeneration();
+    refreshLcoKnobStation();
+}
+
 void PromptPanel::refreshLcoKnobStation()
 {
     if (! dcoKnobsKnown_) return;
@@ -2480,6 +2560,9 @@ void PromptPanel::triggerDcoBake()
     if (! llmAvailable_)
     {
         setLcoStatus("Load the language model in Settings");
+        // The cadence armed this step; it will not reach the cache, and an arm
+        // left standing stamps whichever LATER pass happens to land.
+        lroTakeStepArmed_ = false;
         return;
     }
 
@@ -2490,6 +2573,7 @@ void PromptPanel::triggerDcoBake()
     {
         if (onStatusChanged) onStatusChanged(juce::String::fromUTF8(
             "replay running \xe2\x80\x94 stop it to craft"), false);
+        lroTakeStepArmed_ = false;
         return;
     }
 
@@ -2514,18 +2598,39 @@ void PromptPanel::triggerDcoBake()
     if (generating || translatingPrompts_ || loopStepInFlight_)
     {
         setLcoStatus("Still generating");
+        lroTakeStepArmed_ = false;
         return;
     }
+    // A full cache is AUDITIONED, not authored again - the same rule the neural
+    // Generate follows, and with no exception for a running Re-Prompt stance:
+    // the depth the player set IS the budget (BJ, 22.08.2026).
+    //
+    // Asked of the LRO cache directly, NOT of pressWouldReplayCache(): that one
+    // answers for the panel in front, which is right for a button label and
+    // wrong here. This function is an LRO operation reached asynchronously - the
+    // Re-Prompt tail calls it after a listen and two model turns - and the
+    // oscillator toggle stays live throughout, so by the time it runs the panel
+    // may be the neural one and the panel-shaped answer would be about the
+    // wrong cache entirely.
+    if (processorRef.isCsoundCacheFull())
+    {
+        lroTakeStepArmed_ = false;
+        playNextCachedCsound();
+        return;
+    }
+
     auto pipePtr = processorRef.getPipeInferencePtr();
     if (pipePtr == nullptr)
     {
         setLcoStatus("The synthesis helper is not running");
+        lroTakeStepArmed_ = false;
         return;
     }
     const auto text = dcoPromptEditor.getText().trim();
     if (text.isEmpty())
     {
         setLcoStatus("Type what the instrument should sound like");
+        lroTakeStepArmed_ = false;
         return;
     }
 
@@ -2595,6 +2700,10 @@ void PromptPanel::triggerDcoBake()
                 self->setLcoStatus(authored.errorMessage.isNotEmpty()
                                        ? authored.errorMessage
                                        : juce::String("Could not write an instrument for this prompt"));
+                // Nothing was authored, so nothing reached the cache and this
+                // step's stamp belongs to no entry - see the ear tail in
+                // triggerDcoReprompt for what a flag left armed would mark.
+                self->lroTakeStepArmed_ = false;
                 return;
             }
 
@@ -2697,34 +2806,56 @@ void PromptPanel::triggerDcoBake()
             // dropped and the previous sound's staying on record in its place.
             self->processorRef.setAuthorSettings(authored.settings);
 
+            // ...and the same result into the LRO's cache. Every authoring pass
+            // offers its result here; the cache takes it while one is recording
+            // and refuses it otherwise, exactly as the neural side does with a
+            // landed render. A Re-Prompt run is what makes this worth having:
+            // it leaves its whole series behind, and the CACHE row then travels
+            // it without asking the model for any of it a second time.
+            {
+                T5ynthProcessor::CsoundCacheEntry slot;
+                slot.orchestra   = authored.orchestra;
+                slot.prompt      = text;
+                slot.reading     = authored.reading;
+                slot.paramsText  = authored.paramsText;
+                // Whoever wrote THIS one. A replay puts the name back on the
+                // model tab with the orchestra it belongs to, instead of leaving
+                // the last bake's name standing over somebody else's work.
+                slot.authorModel = authored.authorModel;
+                slot.controls    = authored.controls;
+                slot.settings    = authored.settings;
+                // The arm belongs to THIS pass and is spent here whatever the
+                // cache did with the result. Left standing when the entry is
+                // refused - the depth changed mid-pass, the cache filled or was
+                // switched off - it would mark whichever later pass happened to
+                // land, a hand-played one included.
+                const bool armed = self->lroTakeStepArmed_;
+                self->lroTakeStepArmed_ = false;
+                if (self->processorRef.addCsoundCacheEntry(slot))
+                {
+                    // A recording is a recording only while EVERY entry in it is
+                    // one. The first sets the flag; each further one can keep it
+                    // where it stands but never raise it again - so a live entry
+                    // (a manual press, Manual cadence, the switch off) makes the
+                    // cache a mixture for good, instead of the last entry alone
+                    // deciding what the whole run was.
+                    //
+                    // The next step follows from HERE - from the code being
+                    // finished, not from a clock (see isLroAsyncTakeRecording):
+                    // the cadence skips its interval entirely while a take
+                    // records.
+                    const bool first = self->processorRef.getCsoundCacheFillCount() <= 1;
+                    self->processorRef.setCsoundCacheOfflineTake(
+                        armed && (first || self->processorRef.isCsoundCacheOfflineTake()));
+                }
+            }
+
             // The KNOBS station. What LANDED is read back off the parameters by
             // the apply, so a line the backend passed and this side then refused
             // cannot be reported as set; what is only WAITING is shown as the
             // request. Everything that will never land is listed as refused,
             // with the reason.
-            {
-                juce::StringArray refused;
-                if (auto* arr = authored.settings.getArray())
-                    for (const auto& e : *arr)
-                    {
-                        if (static_cast<bool>(e.getProperty("ok", juce::var(false))))
-                            continue;
-                        const auto name = e.getProperty("name", juce::var()).toString();
-                        const auto val  = e.getProperty("value", juce::var()).toString();
-                        const auto note = e.getProperty("note", juce::var()).toString();
-                        refused.add(name + "  " + val + " - "
-                                    + (note.isEmpty() ? juce::String("not set") : note));
-                    }
-                self->dcoKnobsRefused_ = refused;
-                self->dcoKnobsAsked_.clear();
-                self->dcoKnobsKnown_   = true;
-                // The generation this card's station belongs to: the request
-                // just handed over. Anything that replaces it — a preset, a
-                // restored session — is a different patch, and the station says
-                // so instead of reporting that patch's answer as this one's.
-                self->dcoKnobsGen_ = self->processorRef.getAuthorSettingsGeneration();
-                self->refreshLcoKnobStation();
-            }
+            self->adoptAuthorSettingsStation(authored.settings);
             self->dcoTraceView.setBody(authored.paramsText);   // the back of the card
 
             // The engine now holds a new, unsaved sound — drop the loaded/
@@ -3260,6 +3391,10 @@ void PromptPanel::triggerDcoReprompt()
                 // process-wide Csound lifecycle lock for the probe's create/compile/
                 // start, against the live engine, several times a second.
                 self->lastLcoStepFailureMs_ = juce::Time::getMillisecondCounterHiRes();
+                // A step that authored nothing recorded nothing. Left armed, the
+                // stamp would sit on whichever LATER pass happened to land - a
+                // hand-played one included - and mark it a take.
+                self->lroTakeStepArmed_ = false;
                 self->setLcoStatus(earError.isNotEmpty()
                                        ? earError
                                        : juce::String("Could not listen to the instrument"));
@@ -3305,6 +3440,7 @@ void PromptPanel::triggerDcoReprompt()
                                                  ? errorMessage
                                                  : juce::String("The rewrite came back empty");
                 self->lastLcoStepFailureMs_ = juce::Time::getMillisecondCounterHiRes();  // see the ear tail
+                self->lroTakeStepArmed_ = false;                                         // ditto
                 self->setLcoStatus(failMsg);
                 return;   // do NOT touch the prompt editor on failure/empty
             }
@@ -3633,6 +3769,119 @@ PipeInference::Request PromptPanel::buildInferenceRequest(
 bool PromptPanel::playNextCachedInference()
 {
     if (!processorRef.playNextInferenceCacheEntry())
+        return false;
+
+    pendingOffsets_.clear();
+    if (onStatusChanged) onStatusChanged("From cache", false);
+    return true;
+}
+
+bool PromptPanel::pressWouldReplayCache() const
+{
+    if (easyMode_)
+        // The neural manual press replays whenever the cache is full, stance or
+        // no stance (see triggerGenerationWithOffsets' own gate).
+        return processorRef.isInferenceCacheFull();
+
+    // The LRO's, and it is the same rule: a full cache is a full cache. The depth
+    // the player set IS the budget, and once it is spent nothing more is written
+    // - whether the entries were recorded as a take or played in by hand, and
+    // whether or not a Re-Prompt stance is engaged.
+    //
+    // It used to carry an exception for a running stance, on the grounds that
+    // the loop listens to its own output in order to rewrite and so needs a real
+    // authoring pass. What that produced was an LRO that kept authoring past a
+    // full cache forever - every step paying a bare render, a listen and two
+    // model turns for a result addCsoundCacheEntry then refused (BJ, 22.08.2026:
+    // "hoert nicht auf zu generieren auch wenn der Cache voll ist").
+    return processorRef.isCsoundCacheFull();
+}
+
+bool PromptPanel::playNextCachedCsound()
+{
+    // Which slot is next - read BEFORE the play, which advances the index past
+    // it. playCachedCsoundAt does the installing for both callers.
+    if (! processorRef.isCsoundCacheFull())
+        return false;
+    return playCachedCsoundAt(processorRef.getCsoundCachePlaybackIndex());
+}
+
+bool PromptPanel::playCachedCsoundAt(int index)
+{
+    // Clamped HERE, with the same limit the processor half applies, so both
+    // halves install the same slot. Left to the processor alone, an index past
+    // the end would play a clamped entry while the bounds check below skipped
+    // the panel half entirely - a half-recall, which is the one thing this
+    // function exists to prevent.
+    const int count = processorRef.getCsoundCacheFillCount();
+    if (count <= 0)
+        return false;
+    index = juce::jlimit(0, count - 1, index);
+
+    if (!processorRef.playCsoundCacheEntry(index))
+        return false;
+
+    // FIRST, because a status REPLACES the trace (see setLcoStatus) - written
+    // after the card below it would blank the very thing this replay has to
+    // show. The label keeps the word; the card keeps the instrument.
+    setLcoStatus("From cache", {}, /*busy=*/false);
+
+    // A replay IS a recall, so it does what MainPanel's SNAP recall does. The
+    // processor half (engine mode, orchestra, prompt, reading, params, knobs,
+    // author settings) has just run inside playCsoundCacheEntry; everything
+    // below belongs to the panel and has no other way in.
+    const auto& entries = processorRef.getCsoundCacheEntries();
+    if (index < static_cast<int>(entries.size()))
+    {
+        const auto& e = entries[static_cast<size_t>(index)];
+
+        // The trace card. NOT setLcoStatus alone: a status REPLACES the trace,
+        // so a replay would show nothing at all about the instrument now
+        // sounding, although the slot carries its prompt, its reading and its
+        // body. A slot holds no consultation and no repairs - those happened at
+        // bake time - and those stations stay absent rather than blank, exactly
+        // as they do for a recalled snapshot.
+        setLcoRecalledTrace(e.prompt, e.reading, e.authorModel, e.paramsText);
+        // Whoever wrote THIS orchestra, including "not known" - which has to
+        // clear the previous bake's name rather than let it stand over a
+        // different sound.
+        if (e.authorModel.isNotEmpty()) setLcoAuthorModel(e.authorModel);
+        else                            resetLcoAuthorModel();
+        // Re-Prompt reads the panel's own last reading and prompt to build its
+        // next turn. Without this a stance step would rewrite the orchestra the
+        // replay just replaced - and the ear-failure latch would still be armed
+        // from an instrument that is no longer loaded.
+        adoptRecalledOrchestra(e.prompt, e.reading);
+        // The editor too, exactly as MainPanel's SNAP recall writes it:
+        // triggerDcoBake authors from the editor's TEXT, not from the chain's
+        // last prompt, so a GENERATE without a stance would otherwise write a
+        // new instrument for whatever the last step happened to leave standing
+        // there rather than for the one the player is listening to.
+        setLcoPrompt(e.prompt);
+        // The KNOBS station belongs to the request that was just installed - the
+        // same var the authoring pass handed over, so the same station. Without
+        // it the generation counter is left behind (setAuthorSettings bumps it)
+        // and the card reports "a different patch has been loaded" over settings
+        // that ARE on the synth. AFTER setLcoRecalledTrace, which clears the
+        // station on the grounds that a recalled PRESET carries no answer - a
+        // slot does carry one.
+        adoptAuthorSettingsStation(e.settings);
+    }
+
+    // The compile window, same as a fresh bake and a recalled snapshot: a cached
+    // orchestra can fail to compile like any other (a preset travels to other
+    // sample rates and oversampling factors), and without this the flags line
+    // reports nothing either way - and csoundCompileWatching_, which both
+    // triggerDcoReprompt and the cadence gate on, would stay false while the
+    // swap is still in flight. LAST: setLcoRecalledTrace resets the RUNNING
+    // station to Unknown, exactly as it does for a recalled snapshot.
+    beginCsoundCompileWatch();
+    return true;
+}
+
+bool PromptPanel::playCachedInferenceAt(int index)
+{
+    if (!processorRef.playInferenceCacheEntry(index))
         return false;
 
     pendingOffsets_.clear();
@@ -4394,6 +4643,32 @@ void PromptPanel::stepOfflineTakeAfterCapture(bool captured)
     processorRef.requestDriftGenerationStep(static_cast<float>(cadenceIntervalSeconds()));
 }
 
+bool PromptPanel::isLroAsyncTakeRecording() const
+{
+    // The LRO's counterpart, and it means something different here, because a
+    // bar is not a unit this side can work in: "async" is the LLM's inference
+    // time until the Csound code is finished, and no coding model available
+    // today writes an orchestra inside one bar (BJ, 2026-08-22). So a bar
+    // interval on this side is not a pace, it is a number that is always
+    // already overdue.
+    //
+    // With the switch on, the interval is therefore not consulted at all: each
+    // step WAITS until the code is there and the next re-prompt follows from
+    // that. One step per pass, in order, however long any of them took - which
+    // is the only sense in which a recorded run on this side can come out the
+    // same twice.
+    //
+    // Manual is left as it is, exactly as on the neural side: no cadence, no
+    // pace to hold. Cache Off likewise - the switch records takes, it does not
+    // re-pace live play.
+    return isAsyncCacheMode()
+        && ! easyMode_
+        && ! processorRef.isReplayActive()
+        && processorRef.getCsoundCacheCapacity() > 0
+        && ! processorRef.isCsoundCacheFull()
+        && processorRef.driftRegenMode.load(std::memory_order_relaxed) != 0;
+}
+
 bool PromptPanel::isAsyncTakeRecording() const
 {
     // Manual is left exactly as it was: there is no cadence to step, a take fills
@@ -4776,6 +5051,30 @@ void PromptPanel::pollDriftRegen()
 // that the user never asked for.
 void PromptPanel::pollLcoRepromptCadence()
 {
+    // Is a take still recording? Asked BEFORE every early return below, because
+    // most of those returns - the panel switched away, the stance turned off, a
+    // manual press writing Manual over the cadence - are exactly the states this
+    // has to notice. Without it the flag has no release path at all: it would
+    // survive the pass it belonged to and stamp whichever later one landed.
+    //
+    // But NOT while a pass is in flight. Unlike the neural side, where the same
+    // conditions ARE the parameter freeze and breaking one really does spoil the
+    // render, nothing here reaches into a pass that is already running: the
+    // authoring happens on a detached thread from the prompt the cadence handed
+    // it. A step started by the recording cadence stays a step of that
+    // recording, even if the player looks at the other panel for two seconds
+    // while it runs - and that mattered most on the pass that FILLS the cache,
+    // where a disarm turned the whole recorded run into a live one.
+    {
+        const bool recording = isLroAsyncTakeRecording();
+        if (recording != lastLroTakeRecording_)
+        {
+            lastLroTakeRecording_ = recording;
+            if (! recording && ! dcoRepromptBusy_ && ! dcoBaking_)
+                lroTakeStepArmed_ = false;
+        }
+    }
+
     // Easy/neural panel: pollDriftRegen owns the cadence there, and its mirror of
     // this line (`if (!easyMode_) return;`) makes the two mutually exclusive.
     if (easyMode_) return;
@@ -4796,6 +5095,15 @@ void PromptPanel::pollLcoRepromptCadence()
     // triggerDcoReprompt.
     const int regenMode = processorRef.driftRegenMode.load(std::memory_order_relaxed);
     if (regenMode == 0) return;
+
+    // A full cache is not stepped over. triggerDcoBake would REPLAY it (its own
+    // gate says so) and throw the step's result away - but the step still costs a
+    // bare-oscillator render, a listen and two model turns first, every cadence
+    // tick, for a rewrite nobody will hear. What was recorded is travelled by the
+    // CACHE row and the aftertouch bar from here on, not written over.
+    // Same condition as the replay gate, deliberately.
+    if (processorRef.isCsoundCacheFull())
+        return;
 
     // Nothing to listen to yet, or the last step found the orchestra unlistenable.
     // Both are conditions under which triggerLcoGenerate AUTHORS instead of
@@ -4832,7 +5140,14 @@ void PromptPanel::pollLcoRepromptCadence()
     // has no cooldown — the busy gates above are its floor, and one LCO step is
     // seconds of real work (probe render + ear + two model calls + compile), never
     // the cached replay that ASAP is throttled against on the neural side.
-    if (regenMode >= 2)
+    //
+    // ...and while a take is recording, no cooldown either, whatever the bars
+    // say: the switch means "wait until the code is there, then go on" (see
+    // isLroAsyncTakeRecording), and the busy gates above are that wait. Asked
+    // before the block rather than inside it so ASAP and the five bar settings
+    // behave identically under the switch, instead of the interval quietly
+    // applying to five of the six.
+    if (regenMode >= 2 && ! lastLroTakeRecording_)
     {
         static constexpr int beatCounts[] = { 0, 0, 4, 8, 16, 32, 64 }; // man,asap,1/2/4/8/16 bar
         const int    beats = beatCounts[juce::jlimit(0, 6, regenMode)];
@@ -4842,6 +5157,12 @@ void PromptPanel::pollLcoRepromptCadence()
             return;
     }
 
+    // Does this step earn a cache point recorded as a take? Asked before the
+    // step, like the neural takeStepArmed_, because the answer must be the state
+    // the step STARTED in - the cache fills during it. (Read from the value the
+    // hold-break check at the top already took, so the one answer governs both
+    // the pacing above and the stamp.)
+    lroTakeStepArmed_ = lastLroTakeRecording_;
     lastLcoStepTimeMs_ = juce::Time::getMillisecondCounterHiRes();
     triggerDcoReprompt();
 }

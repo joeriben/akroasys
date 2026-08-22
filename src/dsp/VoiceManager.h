@@ -178,6 +178,14 @@ public:
     // ── Query ──
     int getActiveVoiceCount() const;
     bool hasActiveVoices() const;
+    /** Keys actually DOWN. Unlike hasActiveVoices(), which stays true for the
+     *  whole release tail, this goes to zero the moment the player lets go. */
+    int getHeldVoiceCount() const;
+    /** The hardest-pressed sounding voice, 0 when nothing sounds. What a target
+     *  reads when it acts on the whole instrument instead of on one voice: MPE
+     *  gives every note its own pressure, and the instrument can only be in one
+     *  place, so the note leaning hardest is the one that moves it. */
+    float maxSoundingPressure() const;
 
     /** Set voice limit at runtime (1=mono, 4/6/8/12/16). */
     void setVoiceLimit(int limit) { voiceLimit = juce::jlimit(1, MAX_VOICES, limit); }
@@ -251,7 +259,6 @@ private:
     int stealVoice() const; // tiered: releasing-oldest first, then lowest-amplitude
 
     void updateGainTarget();
-    int getHeldVoiceCount() const;
     void releaseSustainedVoices();
     void releaseSostenutoVoices();
     void refreshPerformancePressure();

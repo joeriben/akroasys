@@ -209,6 +209,8 @@ private:
     int lastInfCacheUiCapacity = -1;
     int lastInfCacheUiFill = -1;
     bool lastInfCacheUiFull = false;
+    int lastInfCacheUiCeiling = -1;
+    bool lastInfCacheUiEasy = true;
     float glowPhase = 0.0f;
     double glowLastTimeSec = 0.0;
     bool glowGenerating = false;

@@ -1559,6 +1559,82 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SliderRow)
 };
 
+/**
+ * Scale marks under a slider: one hairline per value, that value's number
+ * centred beneath it.
+ *
+ * Positions are read back out of the SLIDER's own NormalisableRange
+ * (valueToProportionOfLength), never recomputed from a skew here. A tick can
+ * therefore not drift away from the thumb it annotates, and re-scoping the
+ * range (Duration: 11s for the short-sound engines, 120s for SA3) moves every
+ * mark with it for free.
+ *
+ * A value outside the current range is simply not drawn. That is how the
+ * Duration marks vanish on the 11s engines - the first one sits at 12s, above
+ * that ceiling - without this component, or its owner, knowing which model is
+ * selected.
+ *
+ * Pairs with SliderRow's inline-bar mode, whose fill runs edge to edge with no
+ * thumb inset (paintInlineBar), so proportion maps straight onto x. Give it the
+ * same x and width as the row and the marks line up with the fill exactly.
+ */
+class ScaleTicks : public juce::Component
+{
+public:
+    explicit ScaleTicks(juce::Slider& sliderToAnnotate)
+        : slider(sliderToAnnotate)
+    {
+        // Decoration, never a target: the row underneath keeps the whole gesture.
+        setInterceptsMouseClicks(false, false);
+    }
+
+    /** Values in the slider's own units. Kept sorted by the caller. */
+    void setValues(std::vector<double> newValues)
+    {
+        values = std::move(newValues);
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const auto b = getLocalBounds().toFloat();
+        if (b.isEmpty() || values.empty())
+            return;
+
+        const double lo = slider.getMinimum();
+        const double hi = slider.getMaximum();
+        const float tickH = juce::jlimit(3.0f, 6.0f, b.getHeight() * 0.40f);
+        const float fs    = juce::jlimit(8.0f, 11.0f, b.getHeight() * 0.62f);
+        g.setFont(juce::FontOptions(fs));
+
+        for (double v : values)
+        {
+            // Strictly inside: a mark on the end stop annotates nothing.
+            if (v <= lo || v >= hi)
+                continue;
+
+            const double prop = juce::jlimit(0.0, 1.0, slider.valueToProportionOfLength(v));
+            const float x = b.getX() + b.getWidth() * static_cast<float>(prop);
+
+            g.setColour(kTextMuted);
+            g.fillRect(juce::Rectangle<float>(x - 0.5f, b.getY(), 1.0f, tickH));
+
+            const auto txt = juce::String(juce::roundToInt(v));
+            const float tw = static_cast<float>(measureTextWidth(txt, fs)) + 2.0f;
+            g.drawText(txt,
+                       juce::Rectangle<float>(x - tw * 0.5f, b.getY() + tickH,
+                                              tw, b.getHeight() - tickH),
+                       juce::Justification::centredTop, false);
+        }
+    }
+
+private:
+    juce::Slider& slider;
+    std::vector<double> values;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ScaleTicks)
+};
+
 inline std::array<juce::Rectangle<int>, 2> layoutSliderRowPairBounds(juce::Rectangle<int> area,
                                                                       SliderRow& left,
                                                                       SliderRow& right,
