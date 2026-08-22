@@ -716,6 +716,13 @@ private:
          *  at all and the host should not reserve space for it. */
         static constexpr int minimumUsefulHeight() { return kHeaderH + 2 + kRowH; }
 
+        /** Header + n chip rows, exactly. Hosts used to cap this cloud at a flat
+         *  100 px, which is two rows and a sliver of a third whatever the drawer
+         *  was actually offering - the chips scroll, so the cap read as "there
+         *  are only two rows of tags" rather than "there is no more room". */
+        static constexpr int heightForRows(int n)
+        { return kHeaderH + 2 + n * kRowH + (n - 1) * kGapY; }
+
     private:
         static constexpr int kHeaderH = 14;
         static constexpr int kRowH = 22;
@@ -2012,7 +2019,8 @@ private:
                 && cloud.hasVocabulary()
                 && L.tags.getHeight() >= cloudFloor + 26)
             {
-                L.cloud = L.tags.removeFromBottom(juce::jlimit(cloudFloor, 100, L.tags.getHeight() / 2));
+                L.cloud = L.tags.removeFromBottom(
+                    juce::jlimit(cloudFloor, TagCloud::heightForRows(6), L.tags.getHeight() / 2));
                 L.tags.removeFromBottom(4);
             }
             return L;
@@ -2540,6 +2548,21 @@ private:
             repaint();
         }
 
+        /** How many rows the ACTIVE chips need at this width. Same measuring as
+         *  the flow in paint() below - one place would be better, but the flow
+         *  paints as it measures and cannot be asked without a Graphics. */
+        int activeChipRowsNeeded(int width) const
+        {
+            int rows = 1, x = 0;
+            for (const auto& t : tags)
+            {
+                const int chipW = juce::Font(juce::FontOptions(11.0f)).getStringWidth(t) + 28;
+                if (x > 0 && x + chipW > width) { ++rows; x = 0; }
+                x += chipW + 4;
+            }
+            return rows;
+        }
+
         void paint(juce::Graphics& g) override
         {
             paintCard(g, getLocalBounds());
@@ -2626,9 +2649,19 @@ private:
             // flow). Empty when there is no vocabulary at all, in which case
             // the active chip area absorbs the space. The slice no longer
             // decides which tags are reachable — the cloud scrolls.
+            //
+            // The split used to be a flat half, which reserved several empty
+            // rows for the chips the preset does not have and squeezed the cloud
+            // into two rows in a drawer with room for four or more. The active
+            // set gets the rows it ACTUALLY needs (at least one, so there is
+            // somewhere to drop a chip), and everything left over goes to the
+            // cloud, up to six rows.
+            const int chipsNeeded = activeChipRowsNeeded(area.getWidth());
+            const int chipsH = juce::jmin(area.getHeight(), 22 + (chipsNeeded - 1) * 26);
             const int cloudH = cloud.hasVocabulary()
-                                   ? juce::jlimit(TagCloud::minimumUsefulHeight(), 100,
-                                                  area.getHeight() / 2 + 10)
+                                   ? juce::jlimit(TagCloud::minimumUsefulHeight(),
+                                                  TagCloud::heightForRows(6),
+                                                  area.getHeight() - chipsH - 4)
                                    : 0;
             cloud.setVisible(cloudH > 0);
             if (cloudH > 0)
