@@ -1911,6 +1911,42 @@ void caseGlidingStepTakesTheReadingWithIt()
 }
 
 
+// ── 49. Reset All Controllers does not un-own a sounding note ───────────────
+//      The other half of [46]. A voice's channel tag is not a controller value
+//      -- it is which finger owns the note -- and CC 121 releases nothing. Wipe
+//      it and the note goes on sounding, cut off from its own member channel's
+//      bend, pressure and slide for the rest of its life, with no way back: the
+//      tag is only ever written at note-on.
+void caseResetAllControllersDoesNotUnownASoundingNote()
+{
+    std::printf ("[49] reset-all-controllers does not un-own a sounding note\n");
+    Rig r;
+    r.noteOn (3, 60);
+    r.flush();
+    r.pressure (3, 100);
+    r.flush();
+    const auto* v = r.heldVoiceForNote (60);
+    check (v != nullptr, "the note is sounding on its member channel");
+    if (v == nullptr) return;
+    checkNear (v->getAftertouch(), 100.0f / 127.0f, 1e-3f, "and follows its channel");
+
+    r.cc (1, 121, 0);             // Reset All Controllers
+    r.flush();
+    check (r.heldVoiceForNote (60) != nullptr, "it is still sounding afterwards");
+    checkNear (v->getAftertouch(), 0.0f, 1e-3f,
+               "with its expression reset, which is what the message asks for");
+
+    r.pressure (3, 80);           // the same finger, the same channel
+    r.flush();
+    checkNear (v->getAftertouch(), 80.0f / 127.0f, 1e-3f,
+               "and its channel still reaches it");
+    r.wheel (3, 16383);
+    r.flush();
+    checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
+               "-- bend included, because the note never changed hands");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1965,6 +2001,7 @@ int main()
     caseResetAllControllersIsNotTheHandLeaving();
     caseAftertouchBeforeThePressDoesNotSeedIt();
     caseGlidingStepTakesTheReadingWithIt();
+    caseResetAllControllersDoesNotUnownASoundingNote();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

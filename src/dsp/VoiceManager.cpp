@@ -609,8 +609,19 @@ void VoiceManager::resetPerformanceControllers()
             v.setAftertouch(0.0f);
         v.setPerVoicePitchBend(0.0f);
     }
-    voiceMidiChannel_.fill(0);
-    voiceExprChannel_.fill(0);
+    // Only voices that are not sounding. A channel tag is not a controller
+    // value -- it is which finger owns the note -- and this runs for CC 121,
+    // which releases nothing. Untagging a sounding voice cuts it off from its
+    // own member channel's bend, pressure and slide for the rest of its life,
+    // with no way back: the tag is only ever written at note-on. A voice that
+    // IS sounding here is one a panic has just released, and it loses its tag
+    // when it goes idle, exactly as it always did.
+    for (int i = 0; i < MAX_VOICES; ++i)
+        if (! voices[static_cast<size_t>(i)].isActive())
+        {
+            voiceMidiChannel_[static_cast<size_t>(i)] = 0;
+            voiceExprChannel_[static_cast<size_t>(i)] = 0;
+        }
     voiceMpePressure_.fill(0.0f);
     channelTimbre_.fill(SynthVoice::kTimbreRest);
 }
