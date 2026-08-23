@@ -59,20 +59,57 @@ public:
     float getPerVoicePitchBend() const { return perVoicePitchBendSemitones_; }
     float getPerVoicePitchBendNorm() const { return perVoicePitchBendNorm_; }
 
-    // MPE per-note Timbre (the Y axis, MIDI CC 74), normalised 0..1 and read
-    // ABSOLUTE: 0 is "no effect", 127 is full effect. Rest is therefore 0, and a
-    // note that never receives a CC 74 is exactly unmodulated.
+    // MPE per-note Timbre (the Y axis, MIDI CC 74). What this voice holds is not
+    // the CC value: it is HOW FAR THIS NOTE HAS TRAVELLED from where it began,
+    // signed, -1..+1, zero at note-on always.
     //
-    // It used to be 64/127 — a centre detent, from the LinnStrument, whose Y is a
-    // sideways travel and genuinely bipolar. That is not the general case and it
-    // was measured to be wrong here: an Expressive E Osmose rests its Y at 0 and
-    // rises with forward key travel (201 of 203 note-ons in a 120 s capture had
-    // CC 74 = 0 in force), so a centred reading put every one of its notes four
-    // octaves below the dialled cutoff. Absolute is also what MPE instruments
-    // generally do with CC 74. A bipolar controller now rests at half scale
-    // instead of at zero; that is the cost, and it is the smaller one.
+    // Neither a fixed 0 nor a fixed 64/127 can be right for every instrument,
+    // and the MPE spec says so itself (1.0, §3.3.5): a controller sends CC 74
+    // either "Initial-position", where the value at Note On encodes where the
+    // interaction started, or "Initial-64", where it "must be 40h (64 decimal),
+    // such that movement can follow in either a positive or negative direction".
+    // The spec adds that neither scheme fits every mode of interaction, so a
+    // receiver that picks one picks wrong for half the instruments.
+    //
+    // Reading the value IN FORCE AT NOTE ON as this note's rest fits both, needs
+    // no setting and no table of devices. An Osmose sends CC 74 = 0 immediately
+    // before each Note On (measured: 201 of 203 note-ons in a 120 s capture) --
+    // its Y is the key's second, deeper pressure stage, so rest is the bottom and
+    // the whole travel is upward, exactly as before this. An Initial-64
+    // controller arrives at 64 and gets a rest of 64, so its Y is bipolar around
+    // where the finger landed, which is what the sentence above asks for.
+    //
+    // The travel is the PLAIN difference, and deliberately not scaled to the
+    // remaining span in each direction. Scaling was the first version and it
+    // inverted the axis at the ends: a rest captured at 127 left no upward span
+    // at all, so the reading was pinned at 0 going up and ran to -1 going down
+    // -- the whole gesture sign-flipped, on the notes least able to afford it
+    // (Y is what Cutoff and Scan start on). Plain, the same note reads 0 at the
+    // top and travels down as the finger lifts, which is what the finger is
+    // doing. Monotone with the hand, always, at every rest.
+    //
+    // The cost is that a rest in the middle of the axis has half the travel in
+    // each direction rather than a full one. That is not a defect to correct:
+    // the finger really does have half the key each way. For rest 0 this is
+    // bit-identical to reading the CC absolutely, which is what keeps the Osmose
+    // exactly where it was.
     static constexpr float kTimbreRest = 0.0f;
-    void setTimbre(float t) { timbre_ = juce::jlimit(0.0f, 1.0f, t); }
+
+    /** Where this note's Y starts. Called once per note-on with the CC 74 value
+        in force on the note's channel; the travel is measured from there. */
+    void beginTimbre(float restAbsolute)
+    {
+        timbreRest_ = juce::jlimit(0.0f, 1.0f, restAbsolute);
+        timbre_     = 0.0f;
+    }
+
+    void setTimbre(float absolute)
+    {
+        absolute = juce::jlimit(0.0f, 1.0f, absolute);
+        timbre_  = absolute - timbreRest_;   // both in [0..1], so this is in [-1..+1]
+    }
+
+    /** Signed travel from this note's rest, -1..+1. */
     float getTimbre() const { return timbre_; }
 
     // ── Per-block setup ──
@@ -243,7 +280,8 @@ private:
     float aftertouch_ = 0.0f;
     float perVoicePitchBendSemitones_ = 0.0f;
     float perVoicePitchBendNorm_ = 0.0f;   // same gesture, ±1 at full wheel
-    float timbre_ = kTimbreRest;           // MPE CC74, absolute; rest is 0
+    float timbre_     = 0.0f;              // signed travel from timbreRest_
+    float timbreRest_ = kTimbreRest;       // the CC 74 in force when this note began
     bool active = false;
     bool noteHeld = false;
     float lastAmpEnvLevel = 0.0f;

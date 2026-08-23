@@ -1142,6 +1142,39 @@ private:
     static constexpr int kMpePerNoteBendRange = 24;   // not the spec's 48: over-bends a LinnStrument
     static constexpr int kMpeMasterBendRange  = 2;
 
+    // How much lateral lean fills the X axis as a MODULATION source, in
+    // semitones. The bend itself is untouched by this -- it stays the wheel
+    // travel times the range in force, as the spec says. This is only about
+    // what X means when a target is routed to it.
+    //
+    // It has to be a musical interval and not the wheel travel, because the
+    // wheel travel is not comparable between instruments. Measured on an Osmose
+    // (tools/midi_monitor.cpp, 120 s of ordinary playing): pitch bend never left
+    // 8021..8363, i.e. +/-171 of +/-8192 -- 2.1% of the wheel. Routed as a raw
+    // wheel fraction, a target on X moved by two percent with the bar pulled all
+    // the way over, while a LinnStrument sliding across pads would have covered
+    // the same range many times.
+    //
+    // ONE SEMITONE, because that is the smallest interval that is unambiguously
+    // a musical gesture rather than intonation.
+    //
+    // What that gives on the measured Osmose, stated rather than guessed: +/-171
+    // of the wheel against THIS synth's kMpePerNoteBendRange of 24 is +/-0.50
+    // semitones, so a full lean fills HALF the axis. Whether the device intends
+    // more is not knowable from the capture -- it transmitted no RPN 0 in 120 s,
+    // so its own assumed receiver range is unrecorded (at the MPE default of 48
+    // the same lean would be a full semitone and would fill the axis exactly).
+    // What is certain is the direction: 2.1% of the wheel became 50% of the
+    // axis. The MPE settings overlay will own this number; a constant until it
+    // exists, so that it exists in one place when it does.
+    static_assert (true, "");   // (kMpeXFullScaleSemitones is checked below)
+    static constexpr float kMpeXFullScaleSemitones = 1.0f;
+    // Divided by, so it can never be zero. When the overlay makes it a
+    // parameter, the parameter's range takes this job: jlimit passes a NaN
+    // straight through both clamps and into the expression matrix.
+    static_assert (kMpeXFullScaleSemitones > 0.0f,
+                   "kMpeXFullScaleSemitones is a divisor -- zero would make X NaN.");
+
     // Only the channel count is read back out of this: the two ranges are
     // seeded so the zone is not silently inconsistent with the pair below, but
     // the pair below is the authority and nothing ever reads the zone's own.

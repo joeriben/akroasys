@@ -262,6 +262,16 @@ private:
     std::array<int, MAX_VOICES> voiceSourceId {};
     std::array<int8_t, MAX_VOICES> voiceMidiChannel_ {};  // 0=unassigned, 1-16=MIDI channel
     std::array<float, MAX_VOICES> voiceMpePressure_ {};   // MPE per-note Z (member-channel pressure)
+    // Last CC 74 seen per MIDI channel (1..16; index 0 unused). Not a voice
+    // property: a note's Y rest is the value in force when it STARTED, and the
+    // controller sends that before the note-on, when no voice holds the channel.
+    std::array<float, 17> channelTimbre_ {};
+    float channelTimbreFor(int midiChannel) const
+    {
+        return (midiChannel >= 1 && midiChannel <= 16)
+                 ? channelTimbre_[static_cast<size_t>(midiChannel)]
+                 : SynthVoice::kTimbreRest;
+    }
     std::array<bool, MAX_VOICES> sustainedVoice {};
     std::array<bool, MAX_VOICES> sostenutoVoice {};
     std::array<bool, MAX_VOICES> sostenutoReleasedVoice {};

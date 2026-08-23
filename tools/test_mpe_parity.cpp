@@ -65,21 +65,27 @@ namespace
     // MPE defaults the hand-written path starts from (PluginProcessor.h:947/954).
     constexpr float kDefaultMasterBendRange = 2.0f;
     constexpr float kDefaultNoteBendRange   = 24.0f;
-    // SynthVoice::kTimbreRest -- a fresh voice's CC74 value.
+    // Zero travel -- what a voice reports before its Y has moved.
     //
-    // This number moved, and the corpus is not allowed to be regenerated from
-    // the implementation, so the accounting belongs here. It was 64/127: CC74
-    // was read as a CENTRE DETENT, which is right for a LinnStrument (whose Y is
-    // a sideways travel) and was measured wrong for an Expressive E Osmose,
+    // This number moved twice, and the corpus is not allowed to be regenerated
+    // from the implementation, so the accounting belongs here. It was 64/127:
+    // CC74 was read as a CENTRE DETENT, which is right for a LinnStrument (whose
+    // Y is a sideways travel) and was measured wrong for an Expressive E Osmose,
     // whose Y rests at 0 and rises with forward key travel -- 201 of 203
-    // note-ons in a 120 s capture had CC 74 = 0 in force. CC74 is now read
-    // ABSOLUTE, so rest is 0.
+    // note-ons in a 120 s capture had CC 74 = 0 in force. Then the whole
+    // QUANTITY changed: a voice no longer holds a CC value at all, it holds the
+    // signed TRAVEL from the value in force when its note began (case 25).
     //
-    // What did NOT change is any capability below. Cases 10, 11 and 14 each send
-    // a non-zero CC74 (127) and assert the voice stays AT REST; they still
-    // discriminate exactly what they always did -- that CC74 on a master channel
-    // is not timbre, that CC70/102/106 are not timbre, and that a note ignores
-    // what arrived on its channel before it. Only the value of "rest" moved.
+    // What that costs the cases below, honestly. Cases 10 and 11 send CC74 = 127
+    // to a channel and assert the voice stays at zero; they still discriminate
+    // exactly what they always did, because in both the value goes to a channel
+    // the voice is not on -- a master channel in 10, a different CC number in
+    // 11. Case 14 does NOT: it sends CC74 = 127 on the note's own channel BEFORE
+    // the note, and under a per-note rest the voice reads zero because it
+    // adopted that value as its origin, not because it ignored it. The
+    // assertion is still worth making -- a note must not JUMP because of a stale
+    // CC74, which is capability 27's actual content -- so it is relabelled
+    // rather than deleted, and case 25 carries what it no longer proves.
     constexpr float kTimbreRest = 0.0f;
 
     int gChecks = 0;
@@ -480,7 +486,7 @@ namespace
     // ── 14. A fresh note starts neutral, whatever arrived on that channel ────
     void caseFreshNoteStartsNeutral()
     {
-        std::printf ("[14] a note starts at neutral timbre and zero pressure, ignoring earlier CC74\n");
+        std::printf ("[14] a note starts at zero Y travel and zero pressure, whatever CC74 preceded it\n");
         Rig r;
         r.cc (7, 74, 127);            // before any note on this channel
         r.flush();
@@ -491,7 +497,7 @@ namespace
         check (v != nullptr, "the voice is alive");
         if (v == nullptr) return;
         checkNear (v->getTimbre(), kTimbreRest, 1e-4f,
-                   "the note does not inherit the channel's last CC74");
+                   "the note does not JUMP on the channel's last CC74 -- it starts at no travel");
         checkNear (v->getAftertouch(), 0.0f, 1e-4f, "and starts unpressed");
     }
 
@@ -880,6 +886,170 @@ namespace
         checkNear (maxPerVoiceBend (r), fullUpBend (kDefaultNoteBendRange), 0.01f,
                    "the handed-back key kept its MPE channel and follows its wheel");
     }
+
+    // ── 25. Y's rest is where the note began, not a constant ────────────────
+    // The MPE spec (1.0, SS3.3.5) defines TWO schemes for CC 74 and says neither
+    // fits every instrument: "Initial-position", where the value at Note On
+    // encodes where the interaction started, and "Initial-64", whose initial
+    // value "must be 40h (64 decimal), such that movement can follow in either a
+    // positive or negative direction". A receiver that hard-codes either one is
+    // wrong for the other half of the instruments, so this reads the value in
+    // force at Note On as that note's rest and reports the TRAVEL from it.
+    void caseTimbreRestIsPerNote()
+    {
+        std::printf ("[25] a note's Y rests where it began, and travels both ways from there\n");
+
+        {   // Initial-position at the bottom: an Osmose, whose Y is the key's
+            // second pressure stage. Whole travel upward, exactly as before.
+            Rig r;
+            r.cc (5, 74, 0);
+            r.noteOn (5, 60);
+            r.flush();
+            const auto* v = r.voiceForNote (60);
+            check (v != nullptr, "the bottom-rest note sounds");
+            if (v != nullptr)
+            {
+                checkNear (v->getTimbre(), 0.0f, 1e-4f, "and starts at no travel");
+                r.cc (5, 74, 127);
+                r.flush();
+                checkNear (v->getTimbre(), 1.0f, 1e-3f, "full CC74 is full travel up");
+                r.cc (5, 74, 0);
+                r.flush();
+                checkNear (v->getTimbre(), 0.0f, 1e-4f, "and back to rest, never below");
+            }
+        }
+
+        {   // Initial-64: the note arrives at the middle and moves both ways,
+            // each direction reaching full depth on its own remaining travel.
+            Rig r;
+            r.cc (9, 74, 64);
+            r.noteOn (9, 67);
+            r.flush();
+            const auto* v = r.voiceForNote (67);
+            check (v != nullptr, "the centre-rest note sounds");
+            if (v != nullptr)
+            {
+                checkNear (v->getTimbre(), 0.0f, 1e-4f, "starts at no travel, not at half");
+                r.cc (9, 74, 127);
+                r.flush();
+                checkNear (v->getTimbre(), 0.496f, 1e-2f, "forward is the travel that is left");
+                r.cc (9, 74, 0);
+                r.flush();
+                checkNear (v->getTimbre(), -0.504f, 1e-2f, "and back is the travel the other way");
+            }
+        }
+
+        {   // A rest captured at the TOP of the range. The first version of this
+            // scaled each direction to its own remaining span, which left no
+            // upward span at all here and ran the axis 0 -> -1 while the finger
+            // pressed HARDER: the whole gesture inverted. Plain travel cannot do
+            // that -- at the top the only way is down, and down is what it says.
+            Rig r;
+            r.cc (5, 74, 127);
+            r.noteOn (5, 72);
+            r.flush();
+            const auto* v = r.voiceForNote (72);
+            check (v != nullptr, "the top-rest note sounds");
+            if (v != nullptr)
+            {
+                checkNear (v->getTimbre(), 0.0f, 1e-4f, "starts at no travel");
+                r.cc (5, 74, 127);
+                r.flush();
+                checkNear (v->getTimbre(), 0.0f, 1e-4f, "pressing harder cannot go up, and does not invert");
+                r.cc (5, 74, 64);
+                r.flush();
+                check (v->getTimbre() < -0.4f && v->getTimbre() > -0.6f,
+                       "releasing travels DOWN, monotonically with the finger");
+                r.cc (5, 74, 0);
+                r.flush();
+                checkNear (v->getTimbre(), -1.0f, 1e-3f, "and reaches the bottom at -1");
+            }
+        }
+    }
+
+    // ── 27. A slide is the same note: its Y origin does not move ────────────
+    void caseLegatoKeepsItsTimbreOrigin()
+    {
+        std::printf ("[27] a legato slide keeps the Y origin the note was struck with\n");
+        Rig r;
+        // Mono, so the second note-on is a legato slide rather than a new voice.
+        // Through the PARAMETER, because processBlock re-reads voice_count every
+        // block and would put the pool straight back.
+        if (auto* p = r.proc.getValueTreeState().getParameter (PID::voiceCount))
+            p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = 1 voice
+        r.run (2);
+        r.cc (5, 74, 0);
+        r.noteOn (5, 60);
+        r.flush();
+        r.cc (5, 74, 127);            // finger presses deep on the held key
+        r.flush();
+        const auto* v = r.voiceForNote (60);
+        check (v != nullptr, "the note sounds");
+        if (v != nullptr)
+            checkNear (v->getTimbre(), 1.0f, 1e-3f, "and is at full travel");
+
+        r.noteOn (5, 67);             // slide to a new pitch, finger never leaves
+        r.flush();
+        const auto* g = r.voiceForNote (67);
+        check (g != nullptr, "the slide arrives");
+        if (g != nullptr)
+            checkNear (g->getTimbre(), 1.0f, 1e-3f,
+                       "and the travel is unchanged -- the ground did not move under the finger");
+    }
+
+    // ── 26. X as a modulation source is a musical interval ──────────────────
+    // The bend itself is the wheel travel times the range in force (case 2).
+    // What a target routed to X reads is that bend measured against
+    // kMpeXFullScaleSemitones, because the wheel fraction is not comparable
+    // between instruments: an Osmose's entire lateral travel is 2.1% of the
+    // wheel, a LinnStrument's slide is many times it, and a preset's depth has
+    // to mean the same gesture on both.
+    void caseXIsScaledInSemitones()
+    {
+        std::printf ("[26] X as a source is semitones of bend, not wheel travel\n");
+        Rig r;
+        r.noteOn (5, 60);
+        r.flush();
+
+        // A wheel value worth HALF a semitone at the default per-note range.
+        const int halfSemitoneUp = 8192 + (int) (8191.0 / (2.0 * kDefaultNoteBendRange));
+        r.wheel (5, halfSemitoneUp);
+        r.flush();
+        const auto* v = r.voiceForNote (60);
+        check (v != nullptr, "the voice is alive");
+        if (v == nullptr) return;
+        checkNear (v->getPerVoicePitchBend(), 0.5f, 0.01f, "the bend is half a semitone");
+        checkNear (v->getPerVoicePitchBendNorm(), 0.5f, 0.01f, "and X is half the axis");
+
+        // The SAME wheel value under a wider declared range is a bigger
+        // interval, and X follows the interval rather than the wheel.
+        Rig r2;
+        r2.rpn (5, 0, 0, (int) (2.0f * kDefaultNoteBendRange));
+        r2.noteOn (5, 60);
+        r2.flush();
+        r2.wheel (5, halfSemitoneUp);
+        r2.flush();
+        const auto* v2 = r2.voiceForNote (60);
+        check (v2 != nullptr, "the wide-range voice is alive");
+        if (v2 == nullptr) return;
+        checkNear (v2->getPerVoicePitchBend(), 1.0f, 0.01f,
+                   "the same wheel is now a whole semitone of bend");
+        checkNear (v2->getPerVoicePitchBendNorm(), 1.0f, 0.01f,
+                   "and X has doubled with it -- the interval, not the wheel");
+
+        // Downward is symmetric, and past full scale it clamps rather than
+        // running away: a target on X can be driven to -1 and no further.
+        Rig r3;
+        r3.noteOn (5, 60);
+        r3.flush();
+        r3.wheel (5, 0);
+        r3.flush();
+        const auto* v3 = r3.voiceForNote (60);
+        check (v3 != nullptr, "the down-bent voice is alive");
+        if (v3 != nullptr)
+            checkNear (v3->getPerVoicePitchBendNorm(), -1.0f, 1e-4f,
+                       "a full down-bend saturates at -1, not beyond");
+    }
 }
 
 int main()
@@ -913,6 +1083,9 @@ int main()
     caseBendRangeAboveTheSpecMaximum();
     caseRpnRegisterIsNotSharedWithNrpn();
     caseNrpnCannotDestroyADeclaredZone();
+    caseTimbreRestIsPerNote();
+    caseXIsScaledInSemitones();
+    caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

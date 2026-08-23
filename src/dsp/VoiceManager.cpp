@@ -109,6 +109,7 @@ void VoiceManager::reset()
     voiceSourceId.fill(-1);
     voiceMidiChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
+    channelTimbre_.fill(SynthVoice::kTimbreRest);
     sustainedVoice.fill(false);
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);
@@ -165,6 +166,12 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             voicePan[0] = pan;
             voiceMidiChannel_[0] = effectiveMidiChannel;
             voiceMpePressure_[0] = 0.0f;
+            // NO beginTimbre here. This branch is a legato slide or a bind:
+            // the same note continuing to a new pitch, so its Y origin is the
+            // one it was struck with. Re-capturing it mid-slide would move the
+            // ground under a finger that has not left the key -- and on the bind
+            // path it would run BEFORE the conditional noteOn below, which
+            // resets the rest again.
             sustainedVoice[0] = false;
             sostenutoVoice[0] = false;
             sostenutoReleasedVoice[0] = false;
@@ -201,6 +208,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         voicePan[0] = pan;
         voiceMidiChannel_[0] = effectiveMidiChannel;
         voiceMpePressure_[0] = 0.0f;
+        v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
         v.setPerVoicePitchBend(0.0f);
         samplerVoiceDebugLog("noteOn mono trigger voice=0 note=" + juce::String(note)
                              + " velocity=" + juce::String(velocity, 3)
@@ -265,6 +273,8 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             voiceSourceId[static_cast<size_t>(newest)] = sourceId;
             voiceMidiChannel_[static_cast<size_t>(newest)] = effectiveMidiChannel;
             voiceMpePressure_[static_cast<size_t>(newest)] = 0.0f;
+            // No beginTimbre: same reason as the mono legato branch above --
+            // this is a continued voice gliding, not a fresh strike.
             v.glideToNote(note, glideMs);
             // Continued voice is now the newest: keeps it from becoming the steal
             // victim mid-slide, and makes the next same-source bind find it.
@@ -315,6 +325,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     voicePan[static_cast<size_t>(idx)] = pan;
     voiceMidiChannel_[static_cast<size_t>(idx)] = effectiveMidiChannel;
     voiceMpePressure_[static_cast<size_t>(idx)] = 0.0f;
+    v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
     v.setPerVoicePitchBend(0.0f);
     samplerVoiceDebugLog("noteOn poly trigger voice=" + juce::String(idx)
                          + " note=" + juce::String(note)
@@ -513,6 +524,7 @@ void VoiceManager::resetPerformanceControllers()
     }
     voiceMidiChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
+    channelTimbre_.fill(SynthVoice::kTimbreRest);
 }
 
 void VoiceManager::setPerVoicePitchBend(int midiChannel, float semitones, float normalised)
@@ -548,6 +560,11 @@ void VoiceManager::setTimbre(int midiChannel, float value)
     if (midiChannel < 1 || midiChannel > 16)
         return;
     value = juce::jlimit(0.0f, 1.0f, value);
+    // Remembered per channel, because a note's Y REST is the value in force when
+    // it began (SynthVoice::beginTimbre) and MPE controllers send it just BEFORE
+    // the note-on rather than after. Kept even while no voice holds the channel:
+    // that is exactly the moment it is being set for.
+    channelTimbre_[static_cast<size_t>(midiChannel)] = value;
     const auto ch = static_cast<int8_t>(midiChannel);
     for (int i = 0; i < MAX_VOICES; ++i)
         if (voiceMidiChannel_[static_cast<size_t>(i)] == ch)
@@ -825,7 +842,14 @@ void VoiceManager::writeCsoundControls(CsoundEngine* const* engines, int numEngi
                         : 1.0f);
         c.velocity = v.getCurrentVelocity();
         c.pressure = pressureForVoice(vi);
-        c.timbre   = v.getTimbre();
+        // The `timb` channel a body reads is 0..1 and means "how far the player
+        // has pushed Y", so it takes the UPWARD half of the signed travel. On a
+        // controller whose Y rests at the bottom -- the Osmose, and every
+        // Initial-position device -- that is the whole travel and nothing
+        // changes. On an Initial-64 controller the downward half has nowhere to
+        // go in a 0..1 channel; better a body that rests at 0 everywhere than
+        // one that rests at half scale on some instruments.
+        c.timbre   = juce::jmax(0.0f, v.getTimbre());
         // D8: wrap to stay float-exact (well inside float's 24-bit exact-
         // integer range) — the orchestra only needs changed2() to detect a
         // step, not the absolute value.
@@ -1171,9 +1195,9 @@ int VoiceManager::getKeyHeldVoiceCount() const
 
 float VoiceManager::maxHeldExpression(int src) const
 {
-    // Furthest from rest, sign kept. For pressure, timbre and velocity that is
-    // the largest value, since none of them goes below zero; X is bipolar, and
-    // there "leaning hardest" has to be able to lean down.
+    // Furthest from rest, sign kept. For pressure and velocity that is the
+    // largest value, since neither goes below zero; X and Y are both bipolar,
+    // and there "leaning hardest" has to be able to lean the other way.
     // A target nobody wired reads rest, and says so before walking the pool.
     if (src == ExprSource::None)
         return 0.0f;

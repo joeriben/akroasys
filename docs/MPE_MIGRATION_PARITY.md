@@ -74,7 +74,7 @@ the new code keeps the old behaviour deliberately, and the reason is given.
 | 24 | `voiceMidiChannel_` also discriminates origin: a step-seq slide must not continue a held external note | Unchanged — this is not MPE routing and must not be replaced by a note ID |
 | 25 | A voice's MPE tag is cleared when it goes idle | Unchanged |
 | 26 | Expression is applied at the event's sample position within the block, not at block start | Unchanged — the feed sits inside the existing sample-accurate walk |
-| 27 | A note starts at the synth's timbre REST and zero pressure, ignoring values received on that channel before the note | Unchanged as a rule; the rest position itself moved from `64/127` to `0` on 2026-08-23. Measured, not assumed: an Osmose in MPE mode sends CC74 from 0 and returns to 0 (26,939 messages, min 0, first and last 0 — `tools/midi_monitor.cpp`). Y is an absolute travel from rest, not a centred axis, so a note that nobody has touched sits at zero — `MPEInstrument` would apply the channel's last-received value as the note's initial value. Arguably better, and deliberately not adopted: it changes how the instrument sounds, which is not this task's licence |
+| 27 | A note does not JUMP on Y because of a CC74 that preceded it, and starts unpressed | Preserved, by a different mechanism since 2026-08-23, and the row title is narrower than it was for that reason. It used to read "ignoring values received on that channel before the note", and the note did ignore them: it started at a fixed value. It now *adopts* the preceding value as its ORIGIN and starts at zero travel from there. `MPEInstrument` would have applied it as the note's initial VALUE, which is the jump this has always refused. Corpus [14] asserts the no-jump; what the old title claimed beyond that is gone, and [25] carries what replaced it |
 
 ## 2. What the library refuses that the old code allowed
 
@@ -147,9 +147,62 @@ controller the case is rare — one note per channel is the point of the format 
 and it costs a released note a little extra bend, not a wrong pitch on a held
 one. That is the whole of the difference.
 
+## 4a. The two normalisations (2026-08-23)
+
+Neither is parity — both are new, and both exist because a preset has to mean
+the same gesture on a different controller. They are here because the corpus
+now gates them.
+
+**Y's rest is the value in force at Note On, per note.** The MPE spec (1.0,
+§3.3.5) defines two schemes and says outright that neither fits every
+instrument: *Initial-position*, where the value at Note On encodes where the
+interaction started, and *Initial-64*, whose initial value "must be 40h (64
+decimal), such that movement can follow in either a positive or negative
+direction". A receiver that hard-codes either is wrong for the other half of
+the instruments. Reading the value at Note On as the note's origin fits both
+and needs no setting and no device table: an Osmose sends CC74 = 0 immediately
+before each Note On — measured, 201 of 203 note-ons in a 120 s capture — so for
+those 201 the travel is entirely upward and bit-identical to a plain absolute
+reading, while an Initial-64 controller becomes bipolar around where the finger
+landed. `VoiceManager::channelTimbre_` → `SynthVoice::beginTimbre`. Corpus [25].
+
+The travel is the PLAIN difference, not scaled to the remaining span in each
+direction. Scaling was the first version and it inverted the axis at the ends:
+a rest captured at 127 left no upward span, so the reading pinned at 0 going up
+and ran to −1 going down — the gesture sign-flipped, on the axis Cutoff and Scan
+start on. Plain, the same note reads 0 at the top and travels down as the finger
+lifts. Monotone with the hand at every rest, which is the property that matters;
+the price is that a rest in the middle has half the travel each way, and that is
+simply true of the finger. Corpus [25] third block.
+
+Two things the rest is deliberately NOT re-captured for: a mono legato slide and
+a glide continuation. Both are the same note reaching a new pitch, so moving
+their origin would move the ground under a finger that never left the key.
+Corpus [27].
+
+Cost, stated: the Csound `timb` channel is 0..1 and takes the upward half
+(`VoiceManager.cpp`, `c.timbre`). Unchanged for any note that began at the
+bottom of the axis; a note that began higher loses its downward half there.
+
+**X as a modulation source is measured in semitones, not wheel travel.** The
+bend is unchanged — wheel travel times the range in force. But the wheel
+fraction is not comparable between instruments: an Osmose's entire lateral
+travel is ±171 of ±8192, 2.1 % of the wheel (`tools/midi_monitor.cpp`, 120 s of
+ordinary playing), while a LinnStrument's slide crosses it many times over. So
+a target routed to X reads `bend semitones / kMpeXFullScaleSemitones`, clamped
+to ±1. One semitone, because it is the smallest unambiguously musical interval.
+What that gives on the measured Osmose, stated rather than guessed: ±171 of the
+wheel against this synth's `kMpePerNoteBendRange` of 24 is ±0.50 semitones, so a
+full lean fills HALF the axis. Whether the device intends more is not knowable
+from the capture — it transmitted no RPN 0 in 120 s, so its own assumed receiver
+range is unrecorded, and at the MPE default of 48 the same lean would be a whole
+semitone and would fill the axis exactly. What is certain is the direction:
+2.1 % of the wheel became 50 % of the axis. The MPE settings overlay will own
+that number. Corpus [26].
+
 ## 5. The gate
 
-`tools/test_mpe_parity.cpp` is the frozen corpus: 65 assertions driven as raw
+`tools/test_mpe_parity.cpp` is the frozen corpus: 90 assertions driven as raw
 MIDI through the real `T5ynthProcessor::processBlock`, reading the result off
 the voices. It was written against the hand-written code and was green on it
 before the library was introduced — that is what makes it a record of the old
@@ -168,6 +221,11 @@ the new code therefore lost: a controller that transmits its bend range BEFORE
 declaring its zone had that range reset by the declaration. It was added after
 the fact, so it was checked against the hand-written code as well before being
 trusted — a case only the new implementation has ever passed is not evidence.
+
+Cases 25 to 27 are the exception to all of the above and are labelled as such:
+they assert the two normalisations in §4a, which the hand-written code never
+had. They are not parity and are not evidence about it. They are here because a
+capability that is a requirement but not a test is a regression waiting to ship.
 
 Cases 21 to 24 came from the adversarial reviews and were run against the
 hand-written code for the same reason. 22, 23 and 24 pass there, so they are

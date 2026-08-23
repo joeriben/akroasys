@@ -41,8 +41,9 @@ bool aftertouchTargetActive(const BlockParams& p, int target)
 // ExprSource, so a target's source is a lookup rather than a branch.
 //
 // Ranges are each source's own, and only X reaches below zero: a bend is
-// genuinely bipolar (down is not "less up"), while pressure, timbre and velocity
-// have a floor at rest and no meaning below it.
+// genuinely bipolar (down is not "less up"), as is Y once its rest is the value
+// the note began on; pressure and velocity have a floor at rest and no meaning
+// below it.
 struct ExprSources
 {
     float v[ExprSource::kCount] {};   // last entry is ExprSource::None, always 0
@@ -73,11 +74,11 @@ ExprSources makeExprSources (float velocity, float bendNorm, float timbre, float
 // Signed expression drive for a target: the target's SOURCE value (clamped to
 // [-1..+1]) times its bipolar amount, so drive ∈ [-1..+1]; 0 when off.
 //
-// The clamp was [0..1] while pressure was the only source, and for pressure,
-// timbre and velocity the two are the same thing -- none of them is ever
-// negative. It is X that needs the lower half: a downward bend has to be able to
-// drive a target the other way, and rectifying it would fold it onto the upward
-// one.
+// The clamp was [0..1] while pressure was the only source, and for pressure and
+// velocity the two are the same thing -- neither is ever negative. X and Y both
+// need the lower half: a downward bend, or a finger sliding back past where the
+// note began, has to be able to drive a target the other way, and rectifying it
+// would fold it onto the upward one.
 float aftertouchDrive(const BlockParams& p, int target, const ExprSources& src)
 {
     return aftertouchTargetActive(p, target)
@@ -120,8 +121,9 @@ float applyAftertouchTarget(const BlockParams& p, int target, float baseValue,
 // factor in range. X does not rest at zero-and-up — it leans both ways. At
 // amt = +1 a full DOWN-bend gives 1 − 1 + (−1) = −1: full level, polarity
 // inverted. At amt = −1 the same bend gives +2, the boost the paragraph above
-// says this law exists to prevent. Neither is reachable from V, Y or Z, whose
-// values are bounded to [0..1], so the clamp costs those exactly nothing.
+// says this law exists to prevent. Y can reach the same place, for the same
+// reason: its rest is where the note began, so it too runs both ways. V and Z
+// are bounded to [0..1] and the clamp costs them exactly nothing.
 float applyAftertouchDcaGain(const BlockParams& p, float gain, const ExprSources& src)
 {
     // Through the gate, not straight out of the struct: the pedestal below is
@@ -323,7 +325,11 @@ void SynthVoice::noteOn(int note, float velocity, bool legato)
         for (auto& e : modEnvs) e.noteOn(peak);
         // Fresh note starts at the MPE timbre REST until its first CC74 arrives;
         // legato (held finger sliding to a new note) keeps the current timbre.
-        timbre_ = kTimbreRest;
+        timbre_     = 0.0f;
+        timbreRest_ = kTimbreRest;   // VoiceManager overwrites it with the
+                                     // channel's CC 74 right after, where there
+                                     // is one; a note with no channel starts at
+                                     // the bottom of the travel, as before.
     }
     samplerPreStretchNormDirty_ = true;
 

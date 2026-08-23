@@ -5182,13 +5182,21 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         }
                         else
                         {
-                            // `centered` rides along untouched as MPE X's own
-                            // value: it is the wheel travel, independent of the
-                            // bend range, which is what a modulation target can
-                            // use. The semitones are that travel times the range.
-                            voiceManager.setPerVoicePitchBend(pbChannel,
-                                centered * static_cast<float>(mpePerNoteBendRangeInForce_),
-                                centered);
+                            // Two different quantities out of one wheel. The
+                            // BEND is the travel times the range in force, as
+                            // the spec says. X as a MODULATION source is that
+                            // same bend measured against a musical interval
+                            // (kMpeXFullScaleSemitones), not against the wheel:
+                            // the wheel fraction is not comparable between
+                            // instruments -- the Osmose's whole lateral travel
+                            // is 2.1% of it, a LinnStrument's slide is many
+                            // times it -- and a preset's depth has to mean the
+                            // same gesture on both.
+                            const float bendSemis =
+                                centered * static_cast<float>(mpePerNoteBendRangeInForce_);
+                            voiceManager.setPerVoicePitchBend(pbChannel, bendSemis,
+                                juce::jlimit(-1.0f, 1.0f,
+                                             bendSemis / kMpeXFullScaleSemitones));
                         }
                     }
                     else if (msg.isAllNotesOff() || msg.isAllSoundOff())

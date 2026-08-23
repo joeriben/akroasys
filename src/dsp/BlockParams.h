@@ -842,7 +842,7 @@ namespace ExprSource {
     enum : int {
         Velocity = 0,   // V -- note-on velocity, constant for the note
         X        = 1,   // per-note pitch bend, normalised by the bend range in force
-        Y        = 2,   // CC74, absolute 0..127; 0 is "no effect", not "centre"
+        Y        = 2,   // CC74 as TRAVEL from the value in force at note-on
         Z        = 3,   // pressure (channel/poly/mod wheel/breath), the old behaviour
         // Nothing drives this target. Appended, not inserted at 0, because a DAW
         // session stores a Choice as its INDEX and index 0 is Velocity in every

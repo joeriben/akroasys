@@ -1029,8 +1029,9 @@ bool CsoundEngine::prepare (double sampleRate, int maxBlockSize, const char* orc
         impl->setNamedChannel("pres", 1, 0.0);
         // SynthVoice::kTimbreRest — what a note with no MPE timbre actually
         // carries, so the measured level is the level of an ordinary note. It
-        // was 64/127 while CC 74 was read as a centre detent; CC 74 is now read
-        // absolute, so rest is 0.
+        // was 64/127 while CC 74 was read as a centre detent; the voice now
+        // reports the TRAVEL from the value its note began on, which is 0 for an
+        // untouched note on any controller.
         impl->setNamedChannel("timb", 1, 0.0);
         impl->setNamedChannel("trig", 1, 1.0);
 
@@ -1555,8 +1556,10 @@ std::vector<float> CsoundEngine::renderBareOscillator (const std::string& orches
     // the probe asks what the ORCHESTRA sounds like, not what a performance does
     // to it. `timb` is 0.0 and not 0.5 because 0.0 is what an untouched note
     // publishes: MPE's Y axis (CC74) rests at zero, measured on the Osmose, and
-    // the bridge sends SynthVoice::getTimbre() straight through. Half-scale here
-    // would probe a Y position no untouched note produces.
+    // the bridge sends the upward half of SynthVoice::getTimbre() -- the travel
+    // from where the note began, which is 0 for an untouched note whatever the
+    // controller. Half-scale here would probe a Y position no untouched note
+    // produces.
     *gate = (MYFLT) 1.0;  *freq = (MYFLT) freqHz;  *vel  = (MYFLT) 0.85;
     *pres = (MYFLT) 0.0;  *timb = (MYFLT) 0.0;     *trig = (MYFLT) 1.0;
 
