@@ -1148,6 +1148,11 @@ namespace
                    "instead of being driven by the next key");
 
         // Same for the other two per-note axes, on the same pair of voices.
+        // Checked again HERE and not only above: voice 0 is in its amp release,
+        // and once it goes idle the setters skip it for a reason that has
+        // nothing to do with the hand-off -- the case would then pass without
+        // discriminating anything.
+        check (releasing->isActive(), "the first note is still audible at this point");
         r.wheel (5, 16383);
         r.cc (5, 74, 127);
         r.flush();
@@ -1190,6 +1195,43 @@ namespace
                    "the pedalled note keeps its own");
     }
 
+
+    // ── 33. Two keys DOWN on one channel share it ───────────────────────────
+    //      The boundary of case 28, and the assertion that catches the obvious
+    //      over-fix. The hand-off takes a channel from a note the finger has
+    //      LEFT; it must never take it from one still held. Two ordinary setups
+    //      put two live notes on one channel: a plain keyboard transmitting on
+    //      channel 2 (channels 2-16 are per-note routed here whatever the zone
+    //      says), and an MPE zone with fewer member channels than fingers, where
+    //      MPE's own rule is that the channel drives every note on it.
+    void caseTwoHeldKeysShareOneChannel()
+    {
+        std::printf ("[33] a chord held on one channel bends together, it does not tear apart\n");
+        Rig r;
+        r.noteOn (2, 60);
+        r.noteOn (2, 64);
+        r.noteOn (2, 67);            // three fingers, one channel
+        r.flush();
+
+        const auto* a = r.heldVoiceForNote (60);
+        const auto* b = r.heldVoiceForNote (64);
+        const auto* c = r.heldVoiceForNote (67);
+        check (a != nullptr && b != nullptr && c != nullptr, "all three notes are held");
+        if (a == nullptr || b == nullptr || c == nullptr) return;
+
+        r.wheel (2, 16383);
+        r.pressure (2, 100);
+        r.cc (2, 74, 127);
+        r.flush();
+
+        const float bend = fullUpBend (r.noteBendRange());
+        checkNear (a->getPerVoicePitchBend(), bend, 0.01f, "the first note bends");
+        checkNear (b->getPerVoicePitchBend(), bend, 0.01f, "the second bends with it");
+        checkNear (c->getPerVoicePitchBend(), bend, 0.01f, "and so does the third");
+        checkNear (a->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                   "the oldest held note still follows the channel's pressure");
+        checkNear (a->getTimbre(), 1.0f, 1e-3f, "and its slide");
+    }
 
     // ── 30. Poly key pressure stops being a permanent floor ─────────────────
     //      polyPressureByNote is indexed by note NUMBER and pressureForNote
@@ -1331,6 +1373,7 @@ int main()
     caseXIsScaledInSemitones();
     caseMemberChannelHandsOver();
     caseMemberChannelHandsOverUnderSustain();
+    caseTwoHeldKeysShareOneChannel();
     casePolyPressureIsNotAPermanentFloor();
     casePolyPressureSurvivesAHeldUnison();
     caseNoteOffNamesItsChannel();

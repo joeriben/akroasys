@@ -574,17 +574,34 @@ void VoiceManager::resetPerformanceControllers()
 
 void VoiceManager::claimExprChannel(int voiceIndex, int8_t channel) noexcept
 {
-    // A member channel belongs to exactly ONE voice: the newest note struck on
-    // it. The controller reuses its channels, and without this hand-off the
-    // previous note on the same channel -- releasing, or held by the sustain
-    // pedal -- keeps following the NEW key's pressure, bend and slide.
+    // A member channel is taken over by the newest note struck on it -- but ONLY
+    // from voices no finger is on any more. The controller reuses its channels,
+    // and without the hand-off the previous note there (releasing, or held by
+    // the pedal) keeps following the NEW key's pressure, bend and slide.
     //
-    // The voice that loses the channel is NOT reset: it keeps the last
-    // expression it was given, frozen where the finger left it, which is what a
-    // note in its release should do.
+    // The isKeyHeldVoice guard is not a refinement, it is the boundary: two
+    // notes really can be down on one channel at the same time, and there the
+    // channel's expression belongs to BOTH.
+    //   - A plain MIDI keyboard on any channel but 1. Channels 2-16 are per-note
+    //     routed here whatever the zone says, so a three-note chord held on
+    //     channel 2 shares one channel. Stripping the older two would leave only
+    //     the last-struck note bending, and the chord would tear apart under the
+    //     wheel -- and under pressure and CC74 with it.
+    //   - An MPE zone with fewer member channels than fingers, where the
+    //     controller doubles two live notes onto one channel. MPE's own rule
+    //     there is that the channel's expression applies to every note on it.
+    //
+    // It is also what bounds the freeze. A voice that loses the channel keeps
+    // the expression its own finger left, which ends with its release or with
+    // the pedal -- but on a voice whose key is still DOWN nothing would ever end
+    // it: no setter reaches expression channel 0 and the idle clear cannot run
+    // on a sounding voice. Its X, Y and Z would be nailed where they stood for
+    // as long as the key is held, and maxHeldExpression would keep reading them
+    // into the instrument-wide Cache/Snap targets.
     if (channel != 0)
         for (int i = 0; i < MAX_VOICES; ++i)
-            if (i != voiceIndex && voiceExprChannel_[static_cast<size_t>(i)] == channel)
+            if (i != voiceIndex && voiceExprChannel_[static_cast<size_t>(i)] == channel
+                && ! isKeyHeldVoice(i))
                 voiceExprChannel_[static_cast<size_t>(i)] = 0;
 
     voiceExprChannel_[static_cast<size_t>(voiceIndex)] = channel;
