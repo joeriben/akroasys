@@ -148,6 +148,19 @@ struct Tally
     int  chanPressLo = 128,   chanPressHi = -1;
     int  polyAtLo    = 128,   polyAtHi    = -1;
 
+    // RPN 0 (pitch bend sensitivity), reassembled the way PluginProcessor does:
+    // CC101/CC100 select the parameter, CC6 writes it. Without this the capture
+    // cannot say what range the device THINKS the receiver is using, and every
+    // statement in semitones about its bend or its lateral travel is a guess.
+    int  rpnMsb[17], rpnLsb[17];        // parameter select, per channel
+    long bendRangeWrites = 0;
+    int  bendRangeFirst = -1, bendRangeLast = -1;
+
+    Tally()
+    {
+        for (int c = 0; c < 17; ++c) { rpnMsb[c] = -1; rpnLsb[c] = -1; }
+    }
+
     static int typeIndex (int status) { return ((status & 0xF0) >> 4) - 8; }  // 0x80 -> 0
 };
 
@@ -167,6 +180,18 @@ void account (int status, int channel, int d1, int d2)
     {
         case 0xB0:
             if (channel >= 1 && channel <= 16) ++gTally.ccPerChannel[channel][d1];
+            if (channel >= 1 && channel <= 16)
+            {
+                if      (d1 == 101) gTally.rpnMsb[channel] = d2;
+                else if (d1 == 100) gTally.rpnLsb[channel] = d2;
+                else if (d1 == 6 && gTally.rpnMsb[channel] == 0
+                                 && gTally.rpnLsb[channel] == 0)
+                {
+                    ++gTally.bendRangeWrites;
+                    if (gTally.bendRangeFirst < 0) gTally.bendRangeFirst = d2;
+                    gTally.bendRangeLast = d2;
+                }
+            }
             {
                 auto& s = gTally.cc[d1];
                 ++s.count;
@@ -385,6 +410,15 @@ void printSummary()
                      (y.first < 32) ? "   <- rests near 0, not 64: every note sits dark here" : "");
     else
         std::printf ("  CC74                                        : never sent\n");
+    if (gTally.bendRangeWrites > 0)
+        std::printf ("  bend range the device TRANSMITS (RPN 0)     : %d semitones"
+                     " (%ld writes, last %d)\n",
+                     gTally.bendRangeFirst, gTally.bendRangeWrites, gTally.bendRangeLast);
+    else
+        std::printf ("  bend range the device TRANSMITS (RPN 0)     : NONE"
+                     "   <- the synth's own default is in force, so every\n"
+                     "                                                 statement in"
+                     " semitones about this capture rests on it\n");
     std::printf ("──────────────────────────────────────────────────────────────────────\n");
 }
 
