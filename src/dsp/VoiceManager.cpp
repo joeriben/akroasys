@@ -423,17 +423,7 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
     // too: a drone holding this pitch is still a reason to keep the latch.
     // No refreshPerformancePressure(): a releasing voice keeps the pressure its
     // own finger left, exactly as it does when it loses its expression channel.
-    if (note >= 0 && note < 128)
-    {
-        bool stillHeld = false;
-        for (int i = 0; i < MAX_VOICES && ! stillHeld; ++i)
-        {
-            const auto& v = voices[static_cast<size_t>(i)];
-            stillHeld = v.isActive() && ! v.isReleasing() && v.getCurrentNote() == note;
-        }
-        if (! stillHeld)
-            polyPressureByNote[static_cast<size_t>(note)] = 0.0f;
-    }
+    clearPolyPressureIfReleased(note);
 
     // Update gain: held voice count decreased (releasing voices don't count).
     updateGainTarget();
@@ -570,6 +560,24 @@ void VoiceManager::resetPerformanceControllers()
     voiceExprChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
     channelTimbre_.fill(SynthVoice::kTimbreRest);
+}
+
+void VoiceManager::clearPolyPressureIfReleased(int note) noexcept
+{
+    if (note < 0 || note > 127)
+        return;
+
+    // The same note number can be sounding on more than one voice, and the
+    // drone is scanned too: a drone holding this pitch is still a reason to keep
+    // the latch. Releasing voices do not count -- one keeps the pressure its own
+    // finger left, exactly as it does when it loses its expression channel.
+    for (int i = 0; i < MAX_VOICES; ++i)
+    {
+        const auto& v = voices[static_cast<size_t>(i)];
+        if (v.isActive() && ! v.isReleasing() && v.getCurrentNote() == note)
+            return;
+    }
+    polyPressureByNote[static_cast<size_t>(note)] = 0.0f;
 }
 
 void VoiceManager::claimExprChannel(int voiceIndex, int8_t channel) noexcept
@@ -1191,7 +1199,11 @@ void VoiceManager::releaseSustainedVoices()
             if (sostenutoPedalDown && sostenutoVoice[static_cast<size_t>(i)])
                 sostenutoReleasedVoice[static_cast<size_t>(i)] = true;
             else
+            {
+                const int releasedNote = v.getCurrentNote();
                 v.noteOff();
+                clearPolyPressureIfReleased(releasedNote);
+            }
         }
         sustainedVoice[static_cast<size_t>(i)] = false;
     }
@@ -1210,7 +1222,9 @@ void VoiceManager::releaseSostenutoVoices()
         {
             if (hasCurrentBlockParams_)
                 v.configureForBlock(applyPerformanceControllers(currentBlockParams_));
+            const int releasedNote = v.getCurrentNote();
             v.noteOff();
+            clearPolyPressureIfReleased(releasedNote);
         }
         sostenutoVoice[static_cast<size_t>(i)] = false;
         sostenutoReleasedVoice[static_cast<size_t>(i)] = false;
@@ -1403,7 +1417,11 @@ void VoiceManager::clearDroneNote()
     if (droneVoiceIndex < 0) return;
     auto& v = voices[static_cast<size_t>(droneVoiceIndex)];
     if (v.isActive())
+    {
+        const int releasedNote = v.getCurrentNote();
         v.noteOff();
+        clearPolyPressureIfReleased(releasedNote);
+    }
     droneVoiceIndex = -1;
     droneNote = -1;
     updateGainTarget();

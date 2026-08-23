@@ -1271,6 +1271,41 @@ namespace
     }
 
 
+    // ── 34. ...and the latch ends with the PEDAL too ────────────────────────
+    //      Case 30 covers the note-off message. Three other paths end a hold
+    //      without going through it -- both pedals and the drone all call
+    //      SynthVoice::noteOff on the voice directly -- and a latch the clear
+    //      forgets is the same permanent floor, reached the long way round.
+    void casePolyPressureEndsWithThePedal()
+    {
+        std::printf ("[34] the poly-pressure latch ends with the damper, not only with the key\n");
+        Rig r;
+        r.cc (1, 64, 127);            // damper down
+        r.noteOn (1, 60);
+        r.flush();
+        r.polyPressure (1, 60, 127);  // pressed as hard as it goes
+        r.flush();
+        r.noteOff (1, 60);            // held by the pedal: the latch must SURVIVE here
+        r.flush();
+        const auto* pedalled = r.heldVoiceForNote (60);
+        check (pedalled != nullptr, "the note is held by the pedal");
+        if (pedalled != nullptr)
+            checkNear (pedalled->getAftertouch(), 1.0f, 1e-3f, "and keeps its pressure");
+
+        r.cc (1, 64, 0);              // damper up -- the hold ends HERE
+        r.flush();
+
+        // Same pitch again, with the lightest touch there is.
+        r.noteOn (1, 60, 1);
+        r.flush();
+        const auto* fresh = r.heldVoiceForNote (60);
+        check (fresh != nullptr, "the new note is sounding");
+        if (fresh == nullptr) return;
+        checkNear (fresh->getAftertouch(), 0.0f, 1e-3f,
+                   "and it starts at no pressure -- the pedalled note's latch did not "
+                   "outlive the pedal");
+    }
+
     // ── 31. Poly pressure survives while another voice still holds the pitch ─
     //      The other half of case 30, and it only became reachable with the
     //      channel-aware note-off below: until then one key-up released every
@@ -1375,6 +1410,7 @@ int main()
     caseMemberChannelHandsOverUnderSustain();
     caseTwoHeldKeysShareOneChannel();
     casePolyPressureIsNotAPermanentFloor();
+    casePolyPressureEndsWithThePedal();
     casePolyPressureSurvivesAHeldUnison();
     caseNoteOffNamesItsChannel();
     caseLegatoKeepsItsTimbreOrigin();

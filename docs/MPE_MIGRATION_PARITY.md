@@ -58,7 +58,7 @@ the new code keeps the old behaviour deliberately, and the reason is given.
 | 12 | Channel pressure on a master channel is zone-wide, on a member channel per-note | Unchanged routing; the master/member question is the zone's to answer now |
 | 13 | A voice's pressure is `max(per-note, zone-wide)`, so master and member compose instead of clobbering | Unchanged — `VoiceManager::pressureForVoice`, below the library's level |
 | 14 | Poly key pressure matches by note number across external voices | Unchanged |
-| 14a | **New, 2026-08-23.** That match is by note NUMBER, and `polyPressureByNote` is a latch that `pressureForNote` takes the max of — so a value left standing is a FLOOR under everything that note can later receive, MPE Z included. Nothing lowered it but a panic. Play in the controller's Poly-AT mode, switch it to MPE, and every note number that had been pressed hard stayed pressed for the rest of the session. `noteOff` now clears the latch once no voice still HOLDS that pitch (the drone counts, and a releasing voice keeps its own frozen value). Corpus [30], [31] |
+| 14a | **New, 2026-08-23.** That match is by note NUMBER, and `polyPressureByNote` is a latch that `pressureForNote` takes the max of — so a value left standing is a FLOOR under everything that note can later receive, MPE Z included. Nothing lowered it but a panic. Play in the controller's Poly-AT mode, switch it to MPE, and every note number that had been pressed hard stayed pressed for the rest of the session. The latch is now dropped once no voice still HOLDS that pitch (the drone counts, and a releasing voice keeps its own frozen value) — from the note-off message AND from each of the three paths that release a voice directly without one: the damper, sostenuto, and the drone. A latch the clear forgets is the same permanent floor, reached the long way round. Corpus [30] the key, [34] the pedal, [31] a held unison |
 | 15 | CC74 on a member channel is per-note timbre | Unchanged |
 | 16 | CC74 on a master channel is **not** timbre: it stays the control-surface default that drives Scan (`kExtMap`, `midi/LaunchControlXLLeds.h:235`) | Unchanged — and it is why `MPEInstrument` could not simply be handed the stream: it reads CC74 on the master channel as zone-wide timbre |
 | 17 | CC70 is `seq_steps`; CC102/CC106 are not MPE LSBs, so timbre stays 7-bit | Unchanged — `MPEInstrument` maps all three |
@@ -266,7 +266,7 @@ decides: the read-out is the element that has to give.
 
 ## 5. The gate
 
-`tools/test_mpe_parity.cpp` is the frozen corpus: 121 assertions driven as raw
+`tools/test_mpe_parity.cpp` is the frozen corpus: 125 assertions driven as raw
 MIDI through the real `T5ynthProcessor::processBlock`, reading the result off
 the voices. It was written against the hand-written code and was green on it
 before the library was introduced — that is what makes it a record of the old
@@ -279,7 +279,8 @@ and 6; moving the per-note default off ±48 fails 2, 17, 19 and 26;
 putting the three expression setters back on `voiceMidiChannel_` fails 28 and
 29 with four assertions, and dropping the hand-off's held-key guard fails 33
 with four more — the chord on one channel tears apart, only the last-struck
-note still bending; leaving `polyPressureByNote` uncleared fails 30;
+note still bending; leaving `polyPressureByNote` uncleared fails 30, and clearing it only on the
+note-off message fails 34;
 dropping the channel from the external note-off fails 31 and 32 — all four
 mutations measured, not argued;
 dropping the master-to-member mirror fails 9; dropping the RPN deselect fails 7.

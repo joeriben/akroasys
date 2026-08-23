@@ -292,6 +292,12 @@ private:
         every other voice that still holds it. Called wherever a voice is tagged
         with a MIDI channel; `channel` 0 simply clears this voice. */
     void claimExprChannel(int voiceIndex, int8_t channel) noexcept;
+
+    /** Drop `note`'s poly-key-pressure latch unless a voice still HOLDS that
+        pitch. Called wherever a hold ends -- the note-off message and each of
+        the three paths that release a voice directly (both pedals and the
+        drone), because the latch outlives any of them that forgets it. */
+    void clearPolyPressureIfReleased(int note) noexcept;
     std::array<float, MAX_VOICES> voiceMpePressure_ {};   // MPE per-note Z (member-channel pressure)
     // Last CC 74 seen per MIDI channel (1..16; index 0 unused). Not a voice
     // property: a note's Y rest is the value in force when it STARTED, and the
