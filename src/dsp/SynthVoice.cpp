@@ -27,12 +27,18 @@ bool aftertouchTargetActive(const BlockParams& p, int target)
     // in the processor and move the whole instrument. Reading one here would
     // hand a voice a modulation that does not exist.
     jassert(! AftertouchTarget::movesTheInstrument(target));
+    // A HALF-STEP, not `!= 0.0f`. The amount comes off a 0.01-step control whose
+    // rest value is -2.235e-08 rather than 0 (juce::NormalisableRange computes
+    // -1.0f + 0.01f * 100.0f; see AftertouchBar::isAtRest), so an exact
+    // comparison calls every untouched row active. Nothing audible follows from
+    // a depth of 2e-08, but "off" should mean off where the player set it off.
+    //
     // BOTH halves, not the amount alone. A row set to Ø says nothing drives it,
     // and a depth without an axis is not a routing -- it is a number nobody can
     // reach. Everywhere but the DCA that distinction is free, because drive 0
     // through applyNormalizedOffset is the identity; on the DCA it is not, and
     // the row would have kept its RESTING ATTENUATION while claiming to be off.
-    return p.aftertouchTargetAmt[target] != 0.0f
+    return std::abs (p.aftertouchTargetAmt[target]) >= kAftertouchAmtEpsilon
         && p.aftertouchTargetSrc[(std::size_t) target] != ExprSource::None;
 }
 

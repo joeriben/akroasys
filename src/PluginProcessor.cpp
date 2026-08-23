@@ -7252,8 +7252,17 @@ void T5ynthProcessor::cancelParkedSnapSlot()
 
 void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
 {
-    const float cacheAmt = bp.aftertouchTargetAmt[AftertouchTarget::Cache];
-    const float snapAmt  = bp.aftertouchTargetAmt[AftertouchTarget::Snap];
+    // Snapped to a clean zero at the threshold below which the control cannot be
+    // set at all: a bar at rest holds -2.235e-08, not 0 (kAftertouchAmtEpsilon),
+    // and every `== 0.0f` / `!= 0.0f` in this function would otherwise read an
+    // untouched bar as armed.
+    auto amtOf = [&bp] (int t)
+    {
+        const float a = bp.aftertouchTargetAmt[t];
+        return std::abs (a) >= kAftertouchAmtEpsilon ? a : 0.0f;
+    };
+    const float cacheAmt = amtOf(AftertouchTarget::Cache);
+    const float snapAmt  = amtOf(AftertouchTarget::Snap);
 
     // A press this bar made was dropped, or the slot it holds was written over.
     // Either way it no longer holds what it last asked for, and going on

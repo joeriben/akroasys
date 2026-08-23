@@ -70,7 +70,17 @@ public:
         else
         {
             doubleClick_ = false;
-            dragSign_ = (getValue() < 0.0) ? -1.0 : 1.0; // 0 defaults to positive
+            // Rest reads POSITIVE. `getValue() < 0.0` was the whole bug and it
+            // looked correct: a bar at rest does not hold 0. juce::Slider snaps
+            // every value through the attachment's NormalisableRange, and
+            // NormalisableRange<float>(-1, 1, 0.01) computes zero as
+            // -1.0f + 0.01f * 100.0f, which in float is -2.235e-08. Measured,
+            // not inferred. The DISPLAY rounds that to 0 and paints the bar off,
+            // so the eye sees rest while the comparison sees a negative number
+            // -- and the first pull on every untouched bar ran negative, on
+            // every row, from the first pixel. Nothing to do with click-versus-
+            // drag; asking the same question the display asks is the fix.
+            dragSign_ = (isAtRest() || getValue() >= 0.0) ? 1.0 : -1.0;
         }
         repaint();
     }
@@ -107,16 +117,22 @@ public:
             return;
 
         // A click with no drag toggles the sign of the current depth. Not of a
-        // bar at rest: -0 is 0, so the only thing that gesture could do is leave
-        // a negative zero behind for the next drag to inherit.
+        // bar at rest -- negating rest is rest, and `!= 0.0` would have said yes
+        // to the -2.235e-08 above and flipped an invisible number.
         if (! doubleClick_ && ! dragged_ && e.getNumberOfClicks() == 1
-            && getValue() != 0.0)
+            && ! isAtRest())
             setValue(-getValue(), juce::sendNotificationSync);
 
         held_ = false;
         if (onDragEnd) onDragEnd();
         repaint();
     }
+
+    /** What the bar SHOWS as off: the display's own test, at its own precision
+        (paint rounds to two decimals, which is also the parameter's step). Every
+        decision about sign asks this rather than comparing against 0.0, because
+        the value at rest is not 0.0 -- see mouseDown. */
+    bool isAtRest() const { return juce::roundToInt (getValue() * 100.0) == 0; }
 
     void paint(juce::Graphics& g) override
     {

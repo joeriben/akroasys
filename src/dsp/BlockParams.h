@@ -838,6 +838,14 @@ namespace AftertouchTarget {
 // "amount alone" meant pressure, so such a preset restores to exactly what it
 // did. defaultFor is what a FRESH patch starts on, and for most rows that is
 // None -- nothing drives it until the player says what should.
+/** Below this an aftertouch AMOUNT is off. Half of the control's 0.01 step, so
+ *  it can only ever swallow a value the player cannot set -- and it has one job:
+ *  a bar at rest does not hold 0.0f. juce::Slider snaps through
+ *  NormalisableRange<float>(-1, 1, 0.01), which computes zero as
+ *  -1.0f + 0.01f * 100.0f = -2.235e-08. Measured. An exact `!= 0.0f` therefore
+ *  calls every untouched row active, and `< 0.0` calls it negative. */
+static constexpr float kAftertouchAmtEpsilon = 0.005f;
+
 namespace ExprSource {
     enum : int {
         Velocity = 0,   // V -- note-on velocity, constant for the note
