@@ -188,17 +188,18 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         bool legato = v.isActive() && !v.isReleasing();
         if (legato || (isBind && v.isActive()))
         {
+            const int8_t previousChannel = voiceMidiChannel_[0];
             voiceSourceId[0] = sourceId;
             voicePan[0] = pan;
             voiceMidiChannel_[0] = effectiveMidiChannel;
             claimExprChannel(0, effectiveMidiChannel);
             voiceMpePressure_[0] = 0.0f;
-            // NO beginTimbre here. This branch is a legato slide or a bind:
-            // the same note continuing to a new pitch, so its Y origin is the
-            // one it was struck with. Re-capturing it mid-slide would move the
-            // ground under a finger that has not left the key -- and on the bind
-            // path it would run BEFORE the conditional noteOn below, which
-            // resets the rest again.
+            // Y's origin is NOT re-captured for a slide under one finger: this
+            // branch is the same note continuing to a new pitch, and moving the
+            // ground there would move it under a hand that never left the key.
+            // It IS re-captured when the finger changes, below, after the
+            // conditional noteOn -- which resets the rest itself, so anything
+            // set before it is undone.
             // A hold can end WITHOUT a release. Taking this voice over wipes the
             // three flags above, so neither pedal scan will ever see it again and
             // the pitch it was on would keep its poly-pressure latch for the rest
@@ -215,11 +216,23 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             v.setAftertouch(pressureForNote(note));
             // Glide pitch without retriggering envelopes
             // (If voice is releasing, re-hold it so it stays alive during glide)
-            if (v.isReleasing())
+            const bool wasReleasing = v.isReleasing();
+            if (wasReleasing)
             {
                 v.noteOn(v.getCurrentNote(), velocity, false);
                 // Don't retrigger sampler — keep audio continuous
             }
+            // A different member channel is a different FINGER. On a channel-
+            // rotating MPE controller the mono "legato slide" is the next key
+            // played, not the same key sliding, and measuring the new finger
+            // against the old one's slide origin put the note off by the
+            // difference between the two -- with Y -> Cutoff, the default
+            // source, up to several octaves, and a different amount note to
+            // note. Re-held voices are re-based too: SynthVoice::noteOn resets
+            // timbreRest_ itself, so the origin they would otherwise keep is
+            // already gone. A true slide under one finger reaches neither.
+            if (effectiveMidiChannel != previousChannel || wasReleasing)
+                v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
             v.glideToNote(note, glideMs > 0.0f ? glideMs : 30.0f);
             return;
         }

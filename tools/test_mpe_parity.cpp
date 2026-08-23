@@ -2530,6 +2530,64 @@ void caseTheResetBurstDoesNotLandOnTheTail()
 }
 
 
+// ── 59. A mono slide onto a new member channel is a new FINGER ─────────────
+//      [27] pins the other half: a legato slide keeps the Y origin it was
+//      struck with, because moving the ground under a hand that never left the
+//      key is wrong. On a channel-rotating MPE controller, though, the mono
+//      "slide" is the NEXT key played, on its own member channel -- a different
+//      finger, sitting wherever it happens to sit on its own slide. Measured
+//      against the old finger's origin it read -0.2835 while sitting at the
+//      centre of its travel; with Y -> Cutoff, the default source, that is up
+//      to several octaves, and a different amount from note to note. X and Z
+//      were re-based three lines away in the same branch; Y was not.
+void caseMonoSlideOntoANewChannelIsANewFinger()
+{
+    std::printf ("[59] a mono slide onto a new member channel is a new finger\n");
+    Rig r;
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::voiceCount))
+        p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = 1 voice
+    r.run (2);
+
+    r.cc (2, 74, 100);            // the first finger, resting deep on its slide
+    r.noteOn (2, 60);
+    r.flush();
+    const auto* v = r.heldVoiceForNote (60);
+    check (v != nullptr, "the first note sounds");
+    if (v == nullptr) return;
+    checkNear (v->getTimbre(), 0.0f, 1e-3f, "at its own rest, so travel is zero");
+
+    r.cc (3, 74, 64);             // a second finger, its own channel, mid-slide
+    r.noteOn (3, 67);             // mono: this is the legato branch
+    r.flush();
+    r.cc (3, 74, 64);             // and it streams where it sits
+    r.flush();
+    const auto* g = r.heldVoiceForNote (67);
+    check (g != nullptr, "the slide arrives");
+    if (g != nullptr)
+        checkNear (g->getTimbre(), 0.0f, 1e-3f,
+                   "and reads its OWN finger's rest, not the one before it");
+
+    // The counter-check, which is [27]'s rule and must survive: one finger, one
+    // channel, sliding -- the ground does not move under it.
+    Rig o;
+    if (auto* p = o.proc.getValueTreeState().getParameter (PID::voiceCount))
+        p->setValueNotifyingHost (p->convertTo0to1 (0.0f));
+    o.run (2);
+    o.cc (5, 74, 0);
+    o.noteOn (5, 60);
+    o.flush();
+    o.cc (5, 74, 127);            // the finger presses deep on the held key
+    o.flush();
+    o.noteOn (5, 67);             // slides to a new pitch, never leaving
+    o.flush();
+    const auto* s2 = o.heldVoiceForNote (67);
+    check (s2 != nullptr, "the one-finger slide arrives");
+    if (s2 != nullptr)
+        checkNear (s2->getTimbre(), 1.0f, 1e-3f,
+                   "-- and keeps the travel it had, ground unmoved");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2595,6 +2653,7 @@ int main()
     caseSeqNoteOffDoesNotEndAHeldKey();
     caseTwoFingersOnOneKeyAreTwoKeysToTheArp();
     caseTheResetBurstDoesNotLandOnTheTail();
+    caseMonoSlideOntoANewChannelIsANewFinger();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
