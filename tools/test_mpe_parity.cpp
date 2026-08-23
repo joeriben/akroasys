@@ -2081,6 +2081,102 @@ void caseGlidingStepArrivesAtItsNewPitchesPressure()
 }
 
 
+// ── 53. A re-strike under the arpeggiator does not inherit the old peak ─────
+//      [37] is this gesture with the arp OFF. With it ON the key events never
+//      reach the sample-accurate walk, so the ledger is kept in a pass that
+//      reads the whole buffer first -- and a key-down there does TWO things:
+//      it records the finger, and it starts that pitch's reading over. Only the
+//      first has to wait for the walk. Holding both back put the reset AFTER
+//      the arp step it was for: the step was dispatched inside the walk and
+//      seeded from the previous press's peak, so the note entered at full
+//      pressure and stayed there -- and the reset landing at the end of the
+//      block then froze the voice above everything that computes it, until one
+//      channel-pressure message dropped it to nothing in a single step. On
+//      aftertouch -> DCA that is full level, then silence.
+void caseArpReStrikeDoesNotInheritTheOldPeak()
+{
+    std::printf ("[53] a re-strike under the arpeggiator starts at its own pressure\n");
+    Rig r;
+    r.cc (1, 64, 127);            // damper down, so the note-off keeps the latch
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    r.noteOff (1, 60);
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 1.0f, 1e-3f,
+               "the pedalled note keeps its pressure while the damper is down");
+
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+
+    r.noteOn (1, 60, 1);          // the same key again, lightest touch there is
+    r.run (80);
+
+    // Two voices carry this pitch now: the one the pedal holds, which keeps
+    // what it had, and the arp's fresh one, which must carry nothing. Read the
+    // lowest rather than "the" voice -- voiceForNote would answer either.
+    const auto& vm = r.proc.getVoiceManager();
+    float lowest = 1.0f;
+    int   onPitch = 0;
+    for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+    {
+        const auto& v = vm.getVoice (i);
+        if (v.isActive() && v.getCurrentNote() == 60)
+        {
+            lowest = juce::jmin (lowest, v.getAftertouch());
+            ++onPitch;
+        }
+    }
+    check (onPitch > 0, "the arp is sounding the re-struck key");
+    checkNear (lowest, 0.0f, 1e-3f,
+               "and it entered at its own pressure, not the last press's peak");
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "-- the reading started over at the key event, not at the end of the block");
+}
+
+
+// ── 54. A note shorter than one buffer leaves no finger behind ──────────────
+//      The buffer-reading pass sees a press and a release of the same key in
+//      one block. Deferring the press past the walk while applying the release
+//      at once reversed them: the release found nothing recorded and returned,
+//      the press then landed after it, and that pitch stayed recorded as held
+//      with no finger anywhere on the instrument. From there every aftertouch
+//      message for it is accepted and nothing can ever clear it again, so a
+//      later untouched note of that pitch -- a sequencer step, the drone, the
+//      machine's own keyboard -- enters at whatever the ghost was left at.
+//      A note this short is 5.8 ms at 256 samples and 46 ms at 2048, which is
+//      an ordinary staccato at the larger sizes.
+void caseNoteShorterThanOneBufferLeavesNoFinger()
+{
+    std::printf ("[54] a note shorter than one buffer leaves no finger behind\n");
+    Rig r;
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+
+    r.noteOnAt  (1, 60, 100, 10);    // pressed and released inside one buffer
+    r.noteOffAt (1, 60,      100);
+    r.run (4);
+
+    // Nobody is touching the instrument. A reading for that pitch has no
+    // finger to belong to and must be refused.
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 0.0f, 1e-3f,
+               "with the key long gone, nothing can write that pitch a pressure");
+
+    // And the gate is still a gate, not a wall: a key that IS down still reads.
+    r.noteOn (1, 60);
+    r.run (4);
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 1.0f, 1e-3f,
+               "while a finger actually on the key writes as it always did");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2140,6 +2236,8 @@ int main()
     caseAftertouchBeforeThePressUnderTheArp();
     caseGlidingStepArrivesAtItsNewPitchesPressure();
     caseLegatoKeepsItsTimbreOrigin();
+    caseArpReStrikeDoesNotInheritTheOldPeak();
+    caseNoteShorterThanOneBufferLeavesNoFinger();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

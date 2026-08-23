@@ -82,6 +82,8 @@ void VoiceManager::prepare(double sampleRate, int samplesPerBlock)
     // one held key across a stream restart would deafen that pitch for good.
     keyDownChannels_.fill(0);
     keysDown_ = 0;
+    bufferedPress_.fill(false);
+    freshPresses_ = 0;
     channelPressure = 0.0f;
     modWheelPressure = 0.0f;
     breathPressure = 0.0f;
@@ -126,6 +128,8 @@ void VoiceManager::reset()
     // one held key across a stream restart would deafen that pitch for good.
     keyDownChannels_.fill(0);
     keysDown_ = 0;
+    bufferedPress_.fill(false);
+    freshPresses_ = 0;
     channelPressure = 0.0f;
     modWheelPressure = 0.0f;
     breathPressure = 0.0f;
@@ -579,7 +583,8 @@ void VoiceManager::setPolyPressure(int note, float pressure, int sourceId)
     // arpeggiator on nothing asks a second time, so the value it re-armed would
     // stand for the session. Note-ons are read in that same pass, so a fresh
     // press and its first aftertouch in one buffer are still in the right order.
-    if (keyDownChannels_[static_cast<size_t>(note)] == 0)
+    if (keyDownChannels_[static_cast<size_t>(note)] == 0
+        || bufferedPress_[static_cast<size_t>(note)])
         return;
     sourceId = sourceId >= 0 ? juce::jlimit(0, 15, sourceId) : -1;
     polyPressureByNote[static_cast<size_t>(note)] = juce::jlimit(0.0f, 1.0f, pressure);
@@ -674,6 +679,32 @@ void VoiceManager::noteKeyDown(int note, int midiChannel) noexcept
     mask |= bit;
 }
 
+void VoiceManager::noteKeyDownBuffered(int note, int midiChannel) noexcept
+{
+    if (note < 0 || note > 127)
+        return;
+    // Only a FIRST finger creates the hazard. When the key was already down,
+    // noteKeyDown performs no reset, and an aftertouch message earlier in this
+    // buffer belongs to a finger that was on the key the whole time -- refusing
+    // it would throw away a good reading for nothing. A retransmitted note-on
+    // and a second finger are both that case, and the corpus names both.
+    const bool firstFinger = keyDownChannels_[static_cast<size_t>(note)] == 0;
+    noteKeyDown(note, midiChannel);
+    if (firstFinger && ! bufferedPress_[static_cast<size_t>(note)])
+    {
+        bufferedPress_[static_cast<size_t>(note)] = true;
+        ++freshPresses_;
+    }
+}
+
+void VoiceManager::beginBlockKeyEvents() noexcept
+{
+    if (freshPresses_ == 0)
+        return;
+    bufferedPress_.fill(false);
+    freshPresses_ = 0;
+}
+
 void VoiceManager::noteKeyUp(int note, int midiChannel) noexcept
 {
     if (note < 0 || note > 127)
@@ -703,6 +734,8 @@ void VoiceManager::allKeysReleased() noexcept
         return;
     keyDownChannels_.fill(0);
     keysDown_ = 0;
+    bufferedPress_.fill(false);
+    freshPresses_ = 0;
     for (int n = 0; n < 128; ++n)
         clearPolyPressureIfReleased(n);
 }

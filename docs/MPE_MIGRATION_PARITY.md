@@ -266,7 +266,7 @@ decides: the read-out is the element that has to give.
 
 ## 5. The gate
 
-`tools/test_mpe_parity.cpp` is the frozen corpus: 184 assertions driven as raw
+`tools/test_mpe_parity.cpp` is the frozen corpus: 190 assertions driven as raw
 MIDI through the real `T5ynthProcessor::processBlock`, reading the result off
 the voices. It was written against the hand-written code and was green on it
 before the library was introduced — that is what makes it a record of the old
@@ -295,7 +295,12 @@ back into the block-top pass fails 47 twice and, for the arp-on half, 51;
 dropping the clear from the poly bind/glide branch fails 48 and dropping its
 arrival seed fails 52; leaving the tags on a panic's dying voices fails 50 three
 times — the tail swells, slides and changes timbre under a hand still on the
-key. Dropping the channel
+key. The arp-on pass keeps the ledger in two instants and both are checked:
+deferring the key event itself rather than only the gate fails 53 twice (the
+first-finger reset lands behind the arp step it was for), and applying the
+key-down after the key-up of the same buffer fails 54 (a note shorter than one
+buffer leaves a finger recorded on a key nobody is touching, and nothing can
+clear it again). Dropping the channel
 from the external note-off fails 31 and 32. Every one of these run, measured, and reverted, not
 argued;
 dropping the master-to-member mirror fails 9; dropping the RPN deselect fails 7.

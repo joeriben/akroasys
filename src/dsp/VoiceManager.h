@@ -87,6 +87,25 @@ public:
         holds it, which is the damper. */
     void noteKeyDown(int note, int midiChannel) noexcept;
     void noteKeyUp(int note, int midiChannel) noexcept;
+    /** noteKeyDown from a pass that reads a whole buffer before any of it is
+        walked -- which is where the arpeggiator's branch has to keep the ledger,
+        because with the arp on the note events never reach the walk at all.
+
+        The key event itself lands at once, mask and reset together: the arp can
+        emit a step for this very key in this same block, and a note-on is seeded
+        from the reading, so a reset that waits arrives after the note it was for.
+        What cannot be answered here is the GATE -- whether an aftertouch message
+        elsewhere in the same buffer belongs to this press or to the one before
+        it. The pass does carry sample positions, but it runs to completion
+        before the walk starts, so the comparison the gate needs is not available
+        at the moment the mark is set. So a FIRST finger marks the note and every
+        reading for it is refused for the rest of the block. That costs one
+        buffer of a fresh press's aftertouch; letting a stale one through costs
+        the whole note. A key that was already down is not marked: nothing there
+        is ambiguous. */
+    void noteKeyDownBuffered(int note, int midiChannel) noexcept;
+    /** Clears the buffered-press marks. Once per block, before any key event. */
+    void beginBlockKeyEvents() noexcept;
     /** Every key up at once: panic, editor focus loss, replay takeover. */
     void allKeysReleased() noexcept;
 
@@ -365,6 +384,12 @@ private:
     // panic can skip the sweep when nothing was down.
     std::array<uint32_t, 128> keyDownChannels_ {};
     int keysDown_ = 0;
+    // Note numbers that were pressed in a pass that could not say WHEN -- see
+    // noteKeyDownBuffered. Every reading for them is refused for the rest of
+    // the block. freshPresses_ is the count, so the usual empty block clears
+    // nothing.
+    std::array<bool, 128> bufferedPress_ {};
+    int freshPresses_ = 0;
     float channelPressure = 0.0f;
     float modWheelPressure = 0.0f;
     float breathPressure = 0.0f;

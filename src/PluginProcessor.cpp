@@ -4715,6 +4715,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // (driftRegenBpm is now stored in updateDriftState() with the resolved
     // sync BPM — no duplicate write needed here.)
 
+    // Every block that reaches the sample-accurate walk passes here first, and
+    // the walk is where a reading is judged against the ledger. Clearing the
+    // buffered-press marks here therefore scopes them to exactly one block --
+    // see VoiceManager::noteKeyDownBuffered.
+    voiceManager.beginBlockKeyEvents();
+
     // Stage 2: Arpeggiator. The source is what is HELD: computer-keyboard keys
     // (registered in beginComputerKeyboardNote — they never enter the MIDI buffer)
     // and external MIDI keys (consumed here). A running sequencer's lead note is
@@ -4755,15 +4761,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 // like a key-up. It is therefore buffer-granular here, which
                 // costs nothing that matters: the arp plays at its own step
                 // times, not at the offsets these events carry.
-                // Held back until after the walk -- see pendingKeyDowns_. The
-                // key-UP below is applied at once: shutting the gate early only
-                // ever refuses, which is the harmless direction.
-                if (numPendingKeyDowns_ < static_cast<int>(pendingKeyDowns_.size()))
-                    pendingKeyDowns_[static_cast<size_t>(numPendingKeyDowns_++)] =
-                        { static_cast<int16_t>(msg.getNoteNumber()),
-                          static_cast<int8_t>(ch) };
-                else
-                    voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
+                // Buffered, not deferred: the key event lands here in stream
+                // order with the key-UP below, and what waits is only the GATE
+                // for readings of this pitch, which stays shut for the rest of
+                // the block. Deferring the event itself split a pair that has
+                // to stay ordered, and moved the first-finger reset behind the
+                // arp step it was for.
+                voiceManager.noteKeyDownBuffered(msg.getNoteNumber(), ch);
                 arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                    /*sourceId=*/-1, ch);
                 if (stepRecordArmed.load(std::memory_order_relaxed))
@@ -5701,13 +5705,6 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // THIS block, into the next one's renderPos (spec §3/D2 worked example).
         if (csoundActive)
             csoundLastWritePos_ -= numSamples;
-
-        // The arp-on key-downs held back above, now that every message in this
-        // buffer has been judged against the ledger as it stood at its instant.
-        for (int i = 0; i < numPendingKeyDowns_; ++i)
-            voiceManager.noteKeyDown(pendingKeyDowns_[static_cast<size_t>(i)].note,
-                                     pendingKeyDowns_[static_cast<size_t>(i)].channel);
-        numPendingKeyDowns_ = 0;
 
         lastTriggeredNote = voiceOut.lastTriggeredNote;
 
