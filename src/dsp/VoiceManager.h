@@ -261,6 +261,31 @@ private:
     std::array<float, MAX_VOICES> voicePan {};
     std::array<int, MAX_VOICES> voiceSourceId {};
     std::array<int8_t, MAX_VOICES> voiceMidiChannel_ {};  // 0=unassigned, 1-16=MIDI channel
+
+    // Which voice a member channel's EXPRESSION reaches. A second field and not
+    // a reuse of the one above, because that one carries a second meaning:
+    // ORIGIN, so a step-seq bind cannot continue a held external note (noteOn's
+    // originMatches, parity capability 24). Clearing it on hand-off would allow
+    // exactly that.
+    //
+    // The defect this closes: voiceMidiChannel_ falls only when a voice goes
+    // silent (renderBlock), so a RELEASING or sustained voice keeps its tag. An
+    // MPE controller rotates its member channels, and with a normal release time
+    // a channel comes round again while the previous voice on it is still
+    // audible -- the new key's pressure then also drove the old, dying note. With
+    // AT->DCA a released note swelled back up; with AT->Cutoff it brightened
+    // again. Poly-AT never showed it because it matches by NOTE NUMBER, which is
+    // the whole reason PolyAT mode behaved and MPE mode did not.
+    //
+    // 0 = this voice answers to no channel. A voice that loses the channel keeps
+    // the pressure, bend and timbre it last had, frozen -- which is what a
+    // released note should do.
+    std::array<int8_t, MAX_VOICES> voiceExprChannel_ {};
+
+    /** Give voice `voiceIndex` the expression channel `channel`, taking it off
+        every other voice that still holds it. Called wherever a voice is tagged
+        with a MIDI channel; `channel` 0 simply clears this voice. */
+    void claimExprChannel(int voiceIndex, int8_t channel) noexcept;
     std::array<float, MAX_VOICES> voiceMpePressure_ {};   // MPE per-note Z (member-channel pressure)
     // Last CC 74 seen per MIDI channel (1..16; index 0 unused). Not a voice
     // property: a note's Y rest is the value in force when it STARTED, and the

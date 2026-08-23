@@ -1085,6 +1085,96 @@ namespace
             checkNear (v3->getPerVoicePitchBendNorm(), -1.0f, 1e-4f,
                        "a full down-bend saturates at -1, not beyond");
     }
+
+    // ── 28. A member channel drives the voice that owns it NOW ──────────────
+    //      The defect: voiceMidiChannel_ falls only when a voice goes silent, so
+    //      a RELEASING note kept its channel tag. An MPE controller reuses its
+    //      member channels, and with an ordinary release time a channel comes
+    //      round while the previous note on it is still audible -- the new key's
+    //      pressure then also drove the old, dying one. With AT->DCA a released
+    //      note swelled back up. Poly-AT never showed it, because it matches by
+    //      NOTE NUMBER; that asymmetry is the whole reason PolyAT mode behaved
+    //      and MPE mode did not.
+    void caseMemberChannelHandsOver()
+    {
+        std::printf ("[28] a member channel's pressure leaves the note it has left\n");
+        Rig r;
+        r.noteOn (5, 64);
+        r.flush();
+        r.pressure (5, 100);
+        r.flush();
+
+        const auto* first = r.voiceForNote (64);
+        check (first != nullptr, "the first note is sounding");
+        if (first == nullptr) return;
+        checkNear (first->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                   "and it followed its channel's pressure");
+
+        // Let go, then strike a NEW note on the same channel while the first is
+        // still in its release -- the channel rotation an MPE keyboard does.
+        r.noteOff (5, 64);
+        r.flush();
+        r.noteOn (5, 67);
+        r.flush();
+
+        const auto* releasing = r.voiceForNote (64);
+        const auto* fresh     = r.voiceForNote (67);
+        check (releasing != nullptr, "the first note is still ringing out");
+        check (fresh != nullptr, "the second note is sounding");
+        if (releasing == nullptr || fresh == nullptr) return;
+
+        r.pressure (5, 20);
+        r.flush();
+        checkNear (fresh->getAftertouch(), 20.0f / 127.0f, 1e-3f,
+                   "the new note follows the channel");
+        checkNear (releasing->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                   "and the releasing note keeps the pressure its own finger left, "
+                   "instead of being driven by the next key");
+
+        // Same for the other two per-note axes, on the same pair of voices.
+        r.wheel (5, 16383);
+        r.cc (5, 74, 127);
+        r.flush();
+        checkNear (fresh->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
+                   "the new note follows the channel's wheel");
+        checkNear (releasing->getPerVoicePitchBend(), 0.0f, 1e-4f,
+                   "the releasing note does not");
+        checkNear (releasing->getTimbre(), 0.0f, 1e-4f,
+                   "and its slide stays where the finger left it");
+    }
+
+    // ── 29. The same hand-off under the sustain pedal ───────────────────────
+    //      Worse than the release case: a sustained voice is held indefinitely,
+    //      so without the hand-off one pedalled chord follows every later key.
+    void caseMemberChannelHandsOverUnderSustain()
+    {
+        std::printf ("[29] a sustained note does not follow the next key on its channel\n");
+        Rig r;
+        r.cc (5, 64, 127);            // sustain down
+        r.noteOn (5, 64);
+        r.flush();
+        r.pressure (5, 110);
+        r.flush();
+        r.noteOff (5, 64);            // held by the pedal, not released
+        r.flush();
+
+        r.noteOn (5, 67);
+        r.flush();
+        const auto* held  = r.voiceForNote (64);
+        const auto* fresh = r.voiceForNote (67);
+        check (held != nullptr, "the pedalled note is still held");
+        check (fresh != nullptr, "the new note is sounding");
+        if (held == nullptr || fresh == nullptr) return;
+
+        r.pressure (5, 5);
+        r.flush();
+        checkNear (fresh->getAftertouch(), 5.0f / 127.0f, 1e-3f,
+                   "the new note follows the channel");
+        checkNear (held->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                   "the pedalled note keeps its own");
+    }
+
+
 }
 
 int main()
@@ -1120,6 +1210,8 @@ int main()
     caseNrpnCannotDestroyADeclaredZone();
     caseTimbreRestIsPerNote();
     caseXIsScaledInSemitones();
+    caseMemberChannelHandsOver();
+    caseMemberChannelHandsOverUnderSustain();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

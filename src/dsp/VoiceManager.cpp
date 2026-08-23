@@ -71,6 +71,7 @@ void VoiceManager::prepare(double sampleRate, int samplesPerBlock)
     voicePan.fill(0.0f);
     voiceSourceId.fill(-1);
     voiceMidiChannel_.fill(0);
+    voiceExprChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
     sustainedVoice.fill(false);
     sostenutoVoice.fill(false);
@@ -108,6 +109,7 @@ void VoiceManager::reset()
     voicePan.fill(0.0f);
     voiceSourceId.fill(-1);
     voiceMidiChannel_.fill(0);
+    voiceExprChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
     channelTimbre_.fill(SynthVoice::kTimbreRest);
     sustainedVoice.fill(false);
@@ -165,6 +167,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             voiceSourceId[0] = sourceId;
             voicePan[0] = pan;
             voiceMidiChannel_[0] = effectiveMidiChannel;
+            claimExprChannel(0, effectiveMidiChannel);
             voiceMpePressure_[0] = 0.0f;
             // NO beginTimbre here. This branch is a legato slide or a bind:
             // the same note continuing to a new pitch, so its Y origin is the
@@ -207,6 +210,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         voiceSourceId[0] = sourceId;
         voicePan[0] = pan;
         voiceMidiChannel_[0] = effectiveMidiChannel;
+        claimExprChannel(0, effectiveMidiChannel);
         voiceMpePressure_[0] = 0.0f;
         v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
         v.setPerVoicePitchBend(0.0f);
@@ -272,6 +276,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             v.setPerVoicePitchBend(0.0f);
             voiceSourceId[static_cast<size_t>(newest)] = sourceId;
             voiceMidiChannel_[static_cast<size_t>(newest)] = effectiveMidiChannel;
+            claimExprChannel(newest, effectiveMidiChannel);
             voiceMpePressure_[static_cast<size_t>(newest)] = 0.0f;
             // No beginTimbre: same reason as the mono legato branch above --
             // this is a continued voice gliding, not a fresh strike.
@@ -324,6 +329,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     voiceSourceId[static_cast<size_t>(idx)] = sourceId;
     voicePan[static_cast<size_t>(idx)] = pan;
     voiceMidiChannel_[static_cast<size_t>(idx)] = effectiveMidiChannel;
+    claimExprChannel(idx, effectiveMidiChannel);
     voiceMpePressure_[static_cast<size_t>(idx)] = 0.0f;
     v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
     v.setPerVoicePitchBend(0.0f);
@@ -523,8 +529,27 @@ void VoiceManager::resetPerformanceControllers()
         v.setPerVoicePitchBend(0.0f);
     }
     voiceMidiChannel_.fill(0);
+    voiceExprChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
     channelTimbre_.fill(SynthVoice::kTimbreRest);
+}
+
+void VoiceManager::claimExprChannel(int voiceIndex, int8_t channel) noexcept
+{
+    // A member channel belongs to exactly ONE voice: the newest note struck on
+    // it. The controller reuses its channels, and without this hand-off the
+    // previous note on the same channel -- releasing, or held by the sustain
+    // pedal -- keeps following the NEW key's pressure, bend and slide.
+    //
+    // The voice that loses the channel is NOT reset: it keeps the last
+    // expression it was given, frozen where the finger left it, which is what a
+    // note in its release should do.
+    if (channel != 0)
+        for (int i = 0; i < MAX_VOICES; ++i)
+            if (i != voiceIndex && voiceExprChannel_[static_cast<size_t>(i)] == channel)
+                voiceExprChannel_[static_cast<size_t>(i)] = 0;
+
+    voiceExprChannel_[static_cast<size_t>(voiceIndex)] = channel;
 }
 
 void VoiceManager::setPerVoicePitchBend(int midiChannel, float semitones, float normalised)
@@ -533,7 +558,7 @@ void VoiceManager::setPerVoicePitchBend(int midiChannel, float semitones, float 
         return;
     const auto ch = static_cast<int8_t>(midiChannel);
     for (int i = 0; i < MAX_VOICES; ++i)
-        if (voiceMidiChannel_[static_cast<size_t>(i)] == ch)
+        if (voiceExprChannel_[static_cast<size_t>(i)] == ch)
             voices[static_cast<size_t>(i)].setPerVoicePitchBend(semitones, normalised);
 }
 
@@ -544,7 +569,7 @@ void VoiceManager::setChannelPressureForChannel(int midiChannel, float pressure)
     pressure = juce::jlimit(0.0f, 1.0f, pressure);
     const auto ch = static_cast<int8_t>(midiChannel);
     for (int i = 0; i < MAX_VOICES; ++i)
-        if (voiceMidiChannel_[static_cast<size_t>(i)] == ch
+        if (voiceExprChannel_[static_cast<size_t>(i)] == ch
             && voices[static_cast<size_t>(i)].isActive())
         {
             // Per-note Z stored separately, then the voice's effective pressure is
@@ -567,7 +592,7 @@ void VoiceManager::setTimbre(int midiChannel, float value)
     channelTimbre_[static_cast<size_t>(midiChannel)] = value;
     const auto ch = static_cast<int8_t>(midiChannel);
     for (int i = 0; i < MAX_VOICES; ++i)
-        if (voiceMidiChannel_[static_cast<size_t>(i)] == ch)
+        if (voiceExprChannel_[static_cast<size_t>(i)] == ch)
             voices[static_cast<size_t>(i)].setTimbre(value);
 }
 
@@ -672,6 +697,7 @@ VoiceManager::VoiceOutput VoiceManager::renderBlock(
             voiceSourceId[static_cast<size_t>(vi)] = -1;
             voicePan[static_cast<size_t>(vi)] = 0.0f;
             voiceMidiChannel_[static_cast<size_t>(vi)] = 0;
+            voiceExprChannel_[static_cast<size_t>(vi)] = 0;
             voiceMpePressure_[static_cast<size_t>(vi)] = 0.0f;
             v.setPerVoicePitchBend(0.0f);
             sustainedVoice[static_cast<size_t>(vi)] = false;
@@ -1285,6 +1311,7 @@ void VoiceManager::setDroneNote(int note, float velocity, bool lfo1TrigMode, boo
         voiceSourceId[static_cast<size_t>(idx)] = -1;
         voicePan[static_cast<size_t>(idx)] = 0.0f;
         voiceMidiChannel_[static_cast<size_t>(idx)] = 0;  // drone is not an MPE note
+        claimExprChannel(idx, 0);
         voiceMpePressure_[static_cast<size_t>(idx)] = 0.0f;
         v.setPerVoicePitchBend(0.0f);
         v.noteOnTimestamp = ++noteOnCounter;
