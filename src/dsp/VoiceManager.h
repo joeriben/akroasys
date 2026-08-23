@@ -288,13 +288,24 @@ public:
         caller with sourceId < 0 -- which is the step sequencer and the
         arpeggiator as much as it is external MIDI -- so under the damper an
         arpeggio froze at whatever the wheel last held, and with aftertouch ->
-        DCA the whole pedalled stack sat at full level with the wheel down. */
+        DCA the whole pedalled stack sat at full level with the wheel down.
+
+        It reads voiceStartedByHand_ rather than deriving the answer from
+        voiceMidiChannel_ and voiceSourceId, and the first version of it did
+        derive: a panic then handed every dying note straight back to the wheel.
+        allNotesOff wipes voiceMidiChannel_ mid-tail on purpose -- so a panic's
+        own dying notes stop obeying a finger that is still resting on a key --
+        and that wipe also erased the only evidence a hand had ever been there,
+        turning each panicked tail into "a voice with no hand behind it", which
+        follows live controls by definition. Touch the wheel after a panic and,
+        with aftertouch -> DCA, the stack just killed came back at full level
+        for the length of its release, up to ten seconds; a DAW sends that panic
+        on transport stop, with the hands still down. Whether a HAND started a
+        voice is a fact about its ORIGIN, so it gets a field that says exactly
+        that and that no controller reset clears. */
     bool followsLivePressure(int i) const
     {
-        const bool startedByAHand =
-            voiceMidiChannel_[static_cast<size_t>(i)] > 0
-            || voiceSourceId[static_cast<size_t>(i)] == kComputerKeyboardSourceId;
-        return ! startedByAHand || isKeyHeldVoice(i);
+        return ! voiceStartedByHand_[static_cast<size_t>(i)] || isKeyHeldVoice(i);
     }
 
     /** Set voice limit at runtime (1=mono, 4/6/8/12/16). */
@@ -348,6 +359,12 @@ private:
     std::vector<float> dcaAnalysisScratch;
     std::array<float, MAX_VOICES> voicePan {};
     std::array<int, MAX_VOICES> voiceSourceId {};
+    // Did a HAND start this voice -- an external MIDI key, or the computer
+    // keyboard? Set once where the voice is allocated, cleared when the slot is
+    // freed, and NOT cleared by allNotesOff or resetPerformanceControllers:
+    // a panic ends the notes, it does not retroactively unmake the hand that
+    // played them. followsLivePressure is the reader.
+    std::array<bool, MAX_VOICES> voiceStartedByHand_ {};
     std::array<int8_t, MAX_VOICES> voiceMidiChannel_ {};  // 0=unassigned, 1-16=MIDI channel
 
     // Which voice a member channel's EXPRESSION reaches. A second field and not

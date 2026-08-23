@@ -2748,6 +2748,184 @@ void casePolyAftertouchDoesNotReachAReleasedNote()
 }
 
 
+
+// ── 62. A panic does not hand the dying notes back to the wheel ─────────────
+//      allNotesOff wipes voiceMidiChannel_ while every voice is still in its
+//      release tail, on purpose: an MPE controller streams X/Y/Z for as long as
+//      a finger rests on a key, and a panic's own dying notes must stop obeying
+//      that finger. But the first version of followsLivePressure DERIVED
+//      "started by a hand" from that same tag, so the wipe also erased the
+//      evidence a hand had ever been there -- and every panicked tail became a
+//      hand-less voice, which follows live controls by definition. Touch the
+//      wheel after a panic and, with aftertouch -> DCA, the stack just killed
+//      came back at full level for the length of its release. A DAW sends this
+//      panic on transport stop, with the hands still down.
+//
+//      Case 50 does not catch it: it disturbs the tails with MEMBER-channel
+//      messages, and voiceExprChannel_ is wiped too, so those stay blocked. The
+//      zone-wide doors -- CC1, CC2, master channel pressure -- were the open
+//      ones.
+void casePanicDoesNotHandTheTailsBackToTheWheel()
+{
+    std::printf ("[62] a panic does not hand the dying notes back to the wheel\n");
+
+    auto killedChord = [] (Rig& r, const SynthVoice** out)
+    {
+        r.noteOn (2, 60); r.noteOn (3, 64); r.noteOn (4, 67);
+        r.flush();
+        r.pressure (2, 110); r.pressure (3, 110); r.pressure (4, 110);
+        r.flush();
+        out[0] = r.heldVoiceForNote (60);
+        out[1] = r.heldVoiceForNote (64);
+        out[2] = r.heldVoiceForNote (67);
+        r.cc (1, 123, 0);            // all notes off
+        r.flush();
+    };
+
+    const char* names[3] = { "the first", "the second", "the third" };
+
+    {
+        Rig r; const SynthVoice* v[3] = {};
+        killedChord (r, v);
+        check (v[0] != nullptr && v[1] != nullptr && v[2] != nullptr,
+               "the chord sounded before the panic");
+        if (v[0] == nullptr) return;
+        r.cc (1, 1, 127);            // the wheel, over the panicked tails
+        r.flush();
+        for (int i = 0; i < 3; ++i)
+            if (v[i] != nullptr)
+            {
+                const juce::String what = juce::String ("the wheel does not raise ")
+                                        + names[i] + " panicked tail";
+                checkNear (v[i]->getAftertouch(), 0.0f, 1e-3f, what.toRawUTF8());
+            }
+    }
+    {
+        // The same door, reached by zone-wide channel pressure and by breath.
+        Rig r; const SynthVoice* v[3] = {};
+        killedChord (r, v);
+        r.pressure (1, 127);
+        r.flush();
+        if (v[0] != nullptr)
+            checkNear (v[0]->getAftertouch(), 0.0f, 1e-3f,
+                       "nor does zone-wide pressure");
+        r.cc (1, 2, 127);            // breath
+        r.flush();
+        if (v[0] != nullptr)
+            checkNear (v[0]->getAftertouch(), 0.0f, 1e-3f,
+                       "nor the breath controller");
+    }
+    {
+        // And by poly aftertouch on a NEW key of the same pitch, which is how a
+        // panicked tail can end up following a finger that was never on it.
+        Rig r; const SynthVoice* v[3] = {};
+        killedChord (r, v);
+        r.noteOn (5, 60);
+        r.flush();
+        r.polyPressure (5, 60, 127);
+        r.flush();
+        if (v[0] != nullptr)
+            checkNear (v[0]->getAftertouch(), 0.0f, 1e-3f,
+                       "nor a fresh finger on the same pitch");
+    }
+    {
+        // Still a gate: after the panic, notes played fresh work normally.
+        Rig r; const SynthVoice* v[3] = {};
+        killedChord (r, v);
+        r.noteOn (2, 72);
+        r.flush();
+        r.pressure (2, 100);
+        r.flush();
+        const auto* fresh = r.heldVoiceForNote (72);
+        check (fresh != nullptr, "a note played after the panic sounds");
+        if (fresh != nullptr)
+            checkNear (fresh->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                       "and takes pressure as it always did");
+    }
+}
+
+
+// ── 63. The machine's own keyboard is a hand too ────────────────────────────
+//      followsLivePressure has two ways to recognise a hand and the corpus
+//      pinned only one. Deleting the computer-keyboard half left 249 checks
+//      green while a computer-keyboard note's tail went 0.8661 -> 1.0000 with
+//      the wheel up and -> 0.0000 with it down: the swell and the cut this
+//      whole class exists to prevent, on the keyboard the machine itself has.
+void caseComputerKeyboardTailFreezesToo()
+{
+    std::printf ("[63] a note from the machine's own keyboard freezes when its key comes up\n");
+
+    Rig r;
+    r.proc.beginComputerKeyboardNote (60, 0.8f);
+    r.flush();
+    r.polyPressure (1, 60, 110);
+    r.flush();
+    const auto* v = r.heldVoiceForNote (60);
+    check (v != nullptr, "the note sounds");
+    if (v == nullptr) return;
+    checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f, "and is leaned into");
+
+    r.proc.endComputerKeyboardNote (60);
+    r.flush();
+    r.cc (1, 1, 127);
+    r.flush();
+    checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "the wheel does not raise its tail");
+    r.cc (1, 1, 0);
+    r.flush();
+    checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "and does not cut it either");
+
+    // Still a gate: while that key is DOWN it follows the wheel like any hand.
+    Rig h;
+    h.proc.beginComputerKeyboardNote (72, 0.8f);
+    h.flush();
+    h.cc (1, 1, 127);
+    h.flush();
+    const auto* held = h.heldVoiceForNote (72);
+    check (held != nullptr, "a key still down on it sounds");
+    if (held != nullptr)
+        checkNear (held->getAftertouch(), 1.0f, 1e-3f,
+                   "and follows the wheel while it is down");
+}
+
+
+// ── 64. The sostenuto pedal freezes what it caught ──────────────────────────
+//      isKeyHeldVoice names release, damper and sostenuto; the corpus tested
+//      the first two. Deleting the sostenuto clause left 249 green while a note
+//      CC66 was holding went 0.8661 -> 1.0000 on the wheel after its key came
+//      up.
+void caseSostenutoTailFreezesToo()
+{
+    std::printf ("[64] a note the sostenuto pedal holds freezes when its key comes up\n");
+
+    Rig r;
+    r.noteOn (2, 60);
+    r.flush();
+    r.pressure (2, 110);
+    r.flush();
+    r.cc (1, 66, 127);              // sostenuto catches what is down right now
+    r.flush();
+    const auto* caught = r.heldVoiceForNote (60);
+    check (caught != nullptr, "the caught note sounds");
+    if (caught == nullptr) return;
+
+    r.noteOff (2, 60);
+    r.flush();
+    // The re-press clears the note's latch, so only the guard is left holding it.
+    r.noteOn (2, 60, 1);
+    r.flush();
+    r.cc (1, 1, 127);
+    r.flush();
+    checkNear (caught->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "the wheel does not raise what the sostenuto is holding");
+    r.cc (1, 1, 0);
+    r.flush();
+    checkNear (caught->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "and does not cut it either");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2816,6 +2994,9 @@ int main()
     caseMonoSlideOntoANewChannelIsANewFinger();
     caseTheWheelDrivesNotesWithNoFingerOnThem();
     casePolyAftertouchDoesNotReachAReleasedNote();
+    casePanicDoesNotHandTheTailsBackToTheWheel();
+    caseComputerKeyboardTailFreezesToo();
+    caseSostenutoTailFreezesToo();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

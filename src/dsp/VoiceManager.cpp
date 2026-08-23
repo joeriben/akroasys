@@ -81,6 +81,7 @@ void VoiceManager::prepare(double sampleRate, int samplesPerBlock)
     voicePan.fill(0.0f);
     voiceSourceId.fill(-1);
     voiceMidiChannel_.fill(0);
+    voiceStartedByHand_.fill(false);
     voiceExprChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
     sustainedVoice.fill(false);
@@ -126,6 +127,7 @@ void VoiceManager::reset()
     voicePan.fill(0.0f);
     voiceSourceId.fill(-1);
     voiceMidiChannel_.fill(0);
+    voiceStartedByHand_.fill(false);
     voiceExprChannel_.fill(0);
     voiceMpePressure_.fill(0.0f);
     channelTimbre_.fill(SynthVoice::kTimbreRest);
@@ -192,6 +194,8 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             voiceSourceId[0] = sourceId;
             voicePan[0] = pan;
             voiceMidiChannel_[0] = effectiveMidiChannel;
+            voiceStartedByHand_[0] = effectiveMidiChannel > 0
+                                || sourceId == kComputerKeyboardSourceId;
             claimExprChannel(0, effectiveMidiChannel);
             voiceMpePressure_[0] = 0.0f;
             // Y's origin is NOT re-captured for a slide under one finger: this
@@ -259,6 +263,8 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         voiceSourceId[0] = sourceId;
         voicePan[0] = pan;
         voiceMidiChannel_[0] = effectiveMidiChannel;
+        voiceStartedByHand_[0] = effectiveMidiChannel > 0
+                            || sourceId == kComputerKeyboardSourceId;
         claimExprChannel(0, effectiveMidiChannel);
         voiceMpePressure_[0] = 0.0f;
         v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
@@ -325,6 +331,8 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             v.setPerVoicePitchBend(0.0f);
             voiceSourceId[static_cast<size_t>(newest)] = sourceId;
             voiceMidiChannel_[static_cast<size_t>(newest)] = effectiveMidiChannel;
+            voiceStartedByHand_[static_cast<size_t>(newest)] = effectiveMidiChannel > 0
+                                || sourceId == kComputerKeyboardSourceId;
             claimExprChannel(newest, effectiveMidiChannel);
             voiceMpePressure_[static_cast<size_t>(newest)] = 0.0f;
             // No beginTimbre: same reason as the mono legato branch above --
@@ -398,6 +406,8 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     voiceSourceId[static_cast<size_t>(idx)] = sourceId;
     voicePan[static_cast<size_t>(idx)] = pan;
     voiceMidiChannel_[static_cast<size_t>(idx)] = effectiveMidiChannel;
+    voiceStartedByHand_[static_cast<size_t>(idx)] = effectiveMidiChannel > 0
+                        || sourceId == kComputerKeyboardSourceId;
     claimExprChannel(idx, effectiveMidiChannel);
     voiceMpePressure_[static_cast<size_t>(idx)] = 0.0f;
     v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
@@ -528,9 +538,33 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
     // Cleared here rather than inside the loop above because the same note
     // number can be sounding on more than one voice, and the drone is scanned
     // too: a drone holding this pitch is still a reason to keep the latch.
-    // No refreshPerformancePressure(): a releasing voice keeps the pressure its
-    // own finger left, exactly as it does when it loses its expression channel.
     clearPolyPressureIfReleased(note);
+    // And then a refresh, which this deliberately did NOT do while the guard
+    // above was still "skip anything releasing". followsLivePressure draws the
+    // line by ORIGIN now, so this can no longer disturb a hand's note: a key
+    // that came up is skipped whatever else happens. What it does reach is the
+    // voices that have no hand -- the drone's, the sequencers', the
+    // arpeggiator's -- whose stored pressure was left standing on the latch
+    // this line just cleared. Without it, a drone sharing a pitch with a key
+    // kept that key's 0.87 for the rest of its life while pressureForVoice
+    // recomputed 0, and in Csound/LRO mode, which publishes the stored value,
+    // a drone that should have fallen back to nothing under aftertouch -> DCA
+    // rang on at most of full level.
+    //
+    // Restricted to voices that are still SOUNDING, and the restriction is the
+    // whole of it: a plain refreshPerformancePressure() here also reached the
+    // arpeggiator's and the sequencers' RELEASE TAILS, which have no hand
+    // either, and cut every one of them from 0.9449 to zero in the block the
+    // last finger left -- measured, three at once. Following a control you can
+    // still hear is the rule; re-deciding the level of a tail already on its
+    // way out is a click.
+    for (int i = 0; i < MAX_VOICES; ++i)
+    {
+        auto& sounding = voices[static_cast<size_t>(i)];
+        if (! sounding.isActive() || sounding.isReleasing() || ! followsLivePressure(i))
+            continue;
+        sounding.setAftertouch(pressureForVoice(i));
+    }
 
     // Update gain: held voice count decreased (releasing voices don't count).
     updateGainTarget();
@@ -711,6 +745,7 @@ void VoiceManager::resetPerformanceControllers()
         if (! voices[static_cast<size_t>(i)].isActive())
         {
             voiceMidiChannel_[static_cast<size_t>(i)] = 0;
+            voiceStartedByHand_[static_cast<size_t>(i)] = false;
             voiceExprChannel_[static_cast<size_t>(i)] = 0;
         }
     voiceMpePressure_.fill(0.0f);
@@ -1022,6 +1057,7 @@ VoiceManager::VoiceOutput VoiceManager::renderBlock(
             voiceSourceId[static_cast<size_t>(vi)] = -1;
             voicePan[static_cast<size_t>(vi)] = 0.0f;
             voiceMidiChannel_[static_cast<size_t>(vi)] = 0;
+            voiceStartedByHand_[static_cast<size_t>(vi)] = false;
             voiceExprChannel_[static_cast<size_t>(vi)] = 0;
             voiceMpePressure_[static_cast<size_t>(vi)] = 0.0f;
             v.setPerVoicePitchBend(0.0f);
@@ -1670,6 +1706,7 @@ void VoiceManager::setDroneNote(int note, float velocity, bool lfo1TrigMode, boo
         voiceSourceId[static_cast<size_t>(idx)] = -1;
         voicePan[static_cast<size_t>(idx)] = 0.0f;
         voiceMidiChannel_[static_cast<size_t>(idx)] = 0;  // drone is not an MPE note
+        voiceStartedByHand_[static_cast<size_t>(idx)] = false;
         claimExprChannel(idx, 0);
         voiceMpePressure_[static_cast<size_t>(idx)] = 0.0f;
         v.setPerVoicePitchBend(0.0f);
