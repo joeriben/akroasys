@@ -200,6 +200,60 @@ a comment. What is certain is the direction: 2.1 % of the wheel becomes 100 % of
 the axis. The MPE settings tab owns the value in force; the constant is only its
 default. Corpus [26].
 
+## 4b. The MPE tab (2026-08-23)
+
+Not parity either. It exists because of what §4a and capability 8 keep running
+into: **the numbers in MPE are negotiated exactly once.** A controller announces
+its zone with an MPE Configuration Message and its bend range with RPN 0, both
+at power-on or when its MPE mode is selected. A plugin instantiated after that
+moment never hears either, and MIDI has no read-back to ask with. So a receiver
+falls back to a default and cannot know whether the default is what the device
+meant — which is exactly how `kMpePerNoteBendRange` sat at 24 for a fortnight
+with a comment asserting the opposite of the truth, and how the Osmose's 120 s
+capture came to contain no RPN 0 at all.
+
+Two halves, and the lower one is the reason for the upper one:
+
+- **Three settings**, machine-wide and never in a preset: per-note bend range,
+  master bend range, and `mpeXFullScaleSemitones`. Machine-wide is what answers
+  "can one preset drive different MPE controllers" — the preset carries the
+  DEPTHS, this carries what a full gesture is worth on this instrument, so a
+  depth of 0.6 on X is the same lean on both and moving keyboards does not
+  re-tune the patch.
+- **A live read-out** of what the controller is sending: note channels, whether
+  a range and a zone were transmitted, the widest lean seen and what fraction of
+  the X axis it fills, CC74's observed span and which channels carry it, and
+  which kinds of pressure arrive. `T5ynthProcessor::MpeObservation` — atomics
+  written from the audio thread as MIDI arrives, polled at 4 Hz by the page and
+  only while it is visible.
+
+Whoever wrote LAST wins on the two ranges: the player's setting and the device's
+RPN 0 are the same authority over the same number, and the read-out is what says
+which one spoke. A transmitted range therefore moves the control with it, and a
+value the drop-down does not list (a device may send any of 1..96) is added as
+it is rather than rounded to a listed one.
+
+The two in-force ranges became `std::atomic<int>` for this: they had one writer
+on the audio thread and now have a second on the message thread.
+
+**What this cost the gate, and how it was paid.** The moment those three numbers
+became machine-wide user settings, the corpus stopped being hermetic: it built a
+real `T5ynthProcessor` per case and asserted the literal 48, so the first player
+who set their own instrument to 24 would have turned the capability guard red —
+and correctly, which is worse than incorrectly. The split now is: the DEFAULTS
+are pinned at compile time (`static_assert` against
+`T5ynthProcessor::kMpePerNoteBendRange` and its two siblings, which is why those
+constants are public), and every behavioural case asserts the RELATIONSHIP
+against the value in force, read back off the processor. Case 26 declares its
+own ranges by RPN rather than leaning on the fallback at all. Verified by
+injecting 24 / 12 / 2.0 into the settings file and re-running: 90 checks, 0
+failures, unchanged.
+
+`tools/render_mpe_tab.cpp` renders the page offline at the settings overlay's
+floor and ceiling (400×300 and 600×500) for four device situations, so its
+layout can be judged without opening the synth. The floor is the one that
+decides: the read-out is the element that has to give.
+
 ## 5. The gate
 
 `tools/test_mpe_parity.cpp` is the frozen corpus: 90 assertions driven as raw

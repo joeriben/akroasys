@@ -1139,57 +1139,10 @@ private:
     // members is what every host defaults to, it makes channel 16 a MEMBER
     // structurally, and it keeps a plain keyboard on channel 1 playing.
     static constexpr int kMpeDefaultMemberChannels = 15;
-    // The FALLBACK ranges: what applies until a controller transmits RPN 0.
-    // 48 and 2 are the MPE spec's own defaults, and the MPE settings tab lets a
-    // player override the per-note one for a device that transmits nothing.
-    //
-    // It was 24 here, with the comment "not the spec's 48: over-bends a
-    // LinnStrument". That is backwards, and it under-ranged every device that
-    // relied on the default. Roger Linn Design's panel-settings page: the four
-    // values on the panel ("+/- 2, 3, 12 or 24 semitones") belong to ONE CHANNEL
-    // mode, while ChPerNote -- the LinnStrument's MPE mode -- reads "Bend Range:
-    // 48 (This uses the hidden setting 'Any Bend Range')", and that hidden
-    // setting reaches 96. So 48 is not a range the reference controller cannot
-    // do; 48 is the range it ships in.
-    //
-    // Under-ranging is the quieter fault of the two, which is why it survived: a
-    // device that means 48 and is read at 24 plays every bend at half the
-    // interval it intends, in tune with itself and wrong against everything else.
-    static constexpr int kMpePerNoteBendRange = 48;
-    static constexpr int kMpeMasterBendRange  = 2;
+    // kMpePerNoteBendRange / kMpeMasterBendRange are PUBLIC (see above): the
+    // frozen corpus pins them at compile time.
 
-    // How much lateral lean fills the X axis as a MODULATION source, in
-    // semitones. The bend itself is untouched by this -- it stays the wheel
-    // travel times the range in force, as the spec says. This is only about
-    // what X means when a target is routed to it.
-    //
-    // It has to be a musical interval and not the wheel travel, because the
-    // wheel travel is not comparable between instruments. Measured on an Osmose
-    // (tools/midi_monitor.cpp, 120 s of ordinary playing): pitch bend never left
-    // 8021..8363, i.e. +/-171 of +/-8192 -- 2.1% of the wheel. Routed as a raw
-    // wheel fraction, a target on X moved by two percent with the bar pulled all
-    // the way over, while a LinnStrument sliding across pads would have covered
-    // the same range many times.
-    //
-    // ONE SEMITONE, because that is the smallest interval that is unambiguously
-    // a musical gesture rather than intonation.
-    //
-    // What that gives on the measured Osmose, stated rather than guessed: +/-171
-    // of the wheel against the fallback range of 48 is +/-1.00 semitones, so a
-    // full lean fills the axis exactly. Whether the device intends that is not
-    // knowable from the capture -- it transmitted no RPN 0 in 120 s, so its own
-    // assumed receiver range is unrecorded, and the MPE tab's diagnosis is what
-    // will say. What is certain is the direction: 2.1% of the wheel becomes
-    // 100% of the axis.
-    //
-    // This is the DEFAULT now, not the number: the MPE settings tab owns the
-    // value in force (mpeXFullScaleSemitonesInForce_).
-    static constexpr float kMpeXFullScaleSemitones = 1.0f;
-    // Divided by, so it can never be zero -- the settings tab clamps its own
-    // range for the same reason: jlimit passes a NaN straight through both
-    // clamps and into the expression matrix.
-    static_assert (kMpeXFullScaleSemitones > 0.0f,
-                   "kMpeXFullScaleSemitones is a divisor -- zero would make X NaN.");
+    // kMpeXFullScaleSemitones is PUBLIC (see above), same reason.
 
     // Only the channel count is read back out of this: the two ranges are
     // seeded so the zone is not silently inconsistent with the pair below, but
@@ -1215,8 +1168,64 @@ private:
     //     why it is not 24), and the MPE settings tab can move it for a device
     //     that transmits no RPN 0. SynthVoice still clamps to ±48, so a
     //     controller that transmits more is honoured up to that.
-    int mpePerNoteBendRangeInForce_ = kMpePerNoteBendRange;
-    int mpeMasterBendRangeInForce_  = kMpeMasterBendRange;
+    //   - ATOMIC, because the MPE settings tab writes them from the message
+    //     thread while the audio thread reads them. Relaxed: they are two
+    //     independent scalars that carry no ordering for anything else, and a
+    //     block rendered with the old range is simply the block before the
+    //     change. Whoever wrote LAST wins -- the player's setting and the
+    //     device's RPN 0 are the same authority over the same number, and the
+    //     tab's diagnosis is what shows which one spoke.
+    std::atomic<int> mpePerNoteBendRangeInForce_ { kMpePerNoteBendRange };
+    std::atomic<int> mpeMasterBendRangeInForce_  { kMpeMasterBendRange };
+    // What a full lateral lean is worth as a MODULATION source, in semitones.
+    // No device ever transmits this -- it is not in the spec -- so unlike the
+    // two above it has one writer, the settings tab.
+    std::atomic<float> mpeXFullScaleInForce_ { kMpeXFullScaleSemitones };
+
+    // ── What the connected controller is actually sending ────────────────────
+    // Written by the audio thread as MIDI arrives (plain relaxed stores, no
+    // allocation, no branch that can grow), read by the MPE tab's timer while
+    // that tab is on screen. The reason it exists: every range and normalisation
+    // above is negotiated ONCE, by an MCM and an RPN 0 the device sends at
+    // power-on or mode-select. A plugin loaded after that moment never hears
+    // them and cannot ask -- MIDI has no read-back. So the choice is between
+    // guessing and looking, and this is looking.
+    //
+    // The audio thread is the only writer of NEW observations, so the min/max
+    // pairs need no compare-exchange. clearMpeObservation() is a second writer
+    // and its interleaving IS reachable: a reset landing between the audio
+    // thread's load and its store leaves min at its empty sentinel with max
+    // already set. The reader therefore tests min <= max rather than max >= 0,
+    // and an inverted pair reads as "nothing observed" for one tick.
+    struct MpeObservation
+    {
+        std::atomic<int>          messages { 0 };
+        std::atomic<juce::uint32> noteChannels { 0 };
+        std::atomic<juce::uint32> bendChannels { 0 };
+        std::atomic<juce::uint32> timbreChannels { 0 };
+        std::atomic<juce::uint32> memberPressureChannels { 0 };
+        std::atomic<bool>         masterPressure { false };
+        std::atomic<bool>         polyPressure { false };
+        std::atomic<int>          rpnRange { 0 };        // 0 = never transmitted
+        std::atomic<int>          rpnChannel { 0 };
+        std::atomic<bool>         mcmSeen { false };
+        // The zone, MIRRORED here rather than read out of mpeZones_ from the
+        // message thread. juce::MPEZone is four plain ints and getLowerZone()
+        // returns it by value, so reading it across threads is a formal data
+        // race for no gain -- the audio thread already holds the answer at the
+        // one instant it can change, so it publishes it.
+        std::atomic<int>          memberChannels { kMpeDefaultMemberChannels };
+        std::atomic<bool>         upperZone { false };
+        std::atomic<int>          cc74Min { 128 };       // empty range: min > max
+        std::atomic<int>          cc74Max { -1 };
+        std::atomic<int>          bendMin { 16384 };
+        std::atomic<int>          bendMax { -1 };
+    };
+    MpeObservation mpeObs_;
+
+    /** One MIDI message, seen for the diagnosis only -- it decides nothing and
+        consumes nothing. Audio thread. */
+    void observeMpeMessage (const juce::MidiMessage& msg, int channel) noexcept;
 
     // The RPN parameter-select bytes, and ONLY those. CC6 is deliberately
     // absent: one that completes no RPN we act on must still reach a user
@@ -1707,6 +1716,112 @@ public:
     // ── Event Log (.t5evt) — global (machine-wide) on/off, mirrors filterOsQuality ──
     void setEventLogEnabled(bool enabled);
     bool getEventLogEnabled() const;
+
+    // ── MPE device calibration (machine-wide, NOT part of a preset) ──────────
+    // The split answers "can one preset drive different MPE controllers":
+    // a preset carries DEPTHS, this carries what a full gesture is worth on
+    // THIS device. A depth of 0.6 on X then means the same lean on an Osmose
+    // and on a LinnStrument, and moving the instrument does not re-tune the
+    // patch. Message thread; each stores to the settings file and publishes
+    // the value the audio thread reads.
+    void  setMpePerNoteBendRange (int semitones);
+    int   getMpePerNoteBendRange() const;
+    void  setMpeMasterBendRange (int semitones);
+    int   getMpeMasterBendRange() const;
+    void  setMpeXFullScaleSemitones (float semitones);
+    float getMpeXFullScaleSemitones() const;
+
+    // ── The fallbacks the instrument starts from ─────────────────────────
+    // Public, and that is deliberate: what is actually in force is a
+    // machine-wide user setting, so the frozen MPE corpus pins these
+    // COMPILE-TIME defaults instead. A capability guard a preference can
+    // turn red is no longer a guard (tools/test_mpe_parity.cpp).
+    // The FALLBACK ranges: what applies until a controller transmits RPN 0.
+    // 48 and 2 are the MPE spec's own defaults, and the MPE settings tab lets a
+    // player override the per-note one for a device that transmits nothing.
+    //
+    // It was 24 here, with the comment "not the spec's 48: over-bends a
+    // LinnStrument". That is backwards, and it under-ranged every device that
+    // relied on the default. Roger Linn Design's panel-settings page: the four
+    // values on the panel ("+/- 2, 3, 12 or 24 semitones") belong to ONE CHANNEL
+    // mode, while ChPerNote -- the LinnStrument's MPE mode -- reads "Bend Range:
+    // 48 (This uses the hidden setting 'Any Bend Range')", and that hidden
+    // setting reaches 96. So 48 is not a range the reference controller cannot
+    // do; 48 is the range it ships in.
+    //
+    // Under-ranging is the quieter fault of the two, which is why it survived: a
+    // device that means 48 and is read at 24 plays every bend at half the
+    // interval it intends, in tune with itself and wrong against everything else.
+    static constexpr int kMpePerNoteBendRange = 48;
+    static constexpr int kMpeMasterBendRange  = 2;
+
+    // How much lateral lean fills the X axis as a MODULATION source, in
+    // semitones. The bend itself is untouched by this -- it stays the wheel
+    // travel times the range in force, as the spec says. This is only about
+    // what X means when a target is routed to it.
+    //
+    // It has to be a musical interval and not the wheel travel, because the
+    // wheel travel is not comparable between instruments. Measured on an Osmose
+    // (tools/midi_monitor.cpp, 120 s of ordinary playing): pitch bend never left
+    // 8021..8363, i.e. +/-171 of +/-8192 -- 2.1% of the wheel. Routed as a raw
+    // wheel fraction, a target on X moved by two percent with the bar pulled all
+    // the way over, while a LinnStrument sliding across pads would have covered
+    // the same range many times.
+    //
+    // ONE SEMITONE, because that is the smallest interval that is unambiguously
+    // a musical gesture rather than intonation.
+    //
+    // What that gives on the measured Osmose, stated rather than guessed: +/-171
+    // of the wheel against the fallback range of 48 is +/-1.00 semitones, so a
+    // full lean fills the axis exactly. Whether the device intends that is not
+    // knowable from the capture -- it transmitted no RPN 0 in 120 s, so its own
+    // assumed receiver range is unrecorded, and the MPE tab's diagnosis is what
+    // will say. What is certain is the direction: 2.1% of the wheel becomes
+    // 100% of the axis.
+    //
+    // This is the DEFAULT now, not the number: the MPE settings tab owns the
+    // value in force (mpeXFullScaleSemitonesInForce_).
+    static constexpr float kMpeXFullScaleSemitones = 1.0f;
+    // Divided by, so it can never be zero -- the settings tab clamps its own
+    // range for the same reason: jlimit passes a NaN straight through both
+    // clamps and into the expression matrix.
+    static_assert (kMpeXFullScaleSemitones > 0.0f,
+                   "kMpeXFullScaleSemitones is a divisor -- zero would make X NaN.");
+
+    /** MPE's own bounds: RPN 0 is a 7-bit value and MPEZoneLayout clamps to
+        0..96 wherever it owns one (juce_MPEZoneLayout.cpp:74-76). 1 rather than
+        0 for the floor because 0 means "no bend" on the wire and honouring it
+        would silently disable pitch bend -- the same floor handleMpeRpnByte
+        applies to a transmitted range. */
+    static constexpr int kMpeBendRangeMin = 1;
+    static constexpr int kMpeBendRangeMax = 96;
+
+    /** A flat, copyable read-out of what the controller is sending plus what is
+        currently in force. Message thread. */
+    struct MpeStatus
+    {
+        int           messages = 0;
+        juce::uint32  noteChannels = 0;            // bit n-1 set = channel n
+        juce::uint32  bendChannels = 0;
+        juce::uint32  timbreChannels = 0;
+        juce::uint32  memberPressureChannels = 0;
+        bool          masterPressure = false;
+        bool          polyPressure = false;
+        int           rpnRange = 0;                // 0 = the device transmitted none
+        int           rpnChannel = 0;
+        bool          mcmSeen = false;
+        int           cc74Min = 128, cc74Max = -1; // empty range: min > max
+        int           bendMin = 16384, bendMax = -1;
+        int           perNoteBendRange = 0;        // in force, not the default
+        int           masterBendRange = 0;
+        float         xFullScale = 1.0f;
+        int           memberChannels = 0;
+        bool          upperZoneActive = false;
+    };
+    MpeStatus getMpeStatus() const;
+
+    /** Forget what has been seen so far and watch again from now. */
+    void clearMpeObservation();
     /** The .t5evt file being recorded this session, or empty if nothing has been
      *  recorded yet. Message thread — used to offer "Save Session Log". */
     juce::File getEventLogCurrentFile() const

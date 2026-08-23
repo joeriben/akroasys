@@ -724,6 +724,8 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     settingsTabs.addTab("Sound Models",   kBg, &settingsPage,          false);
     settingsTabs.addTab("Language Model", kBg, &lroAuthorSettingsPage, false);
     settingsTabs.addTab("Settings",       kBg, &generalSettingsPage,   false);
+    // MPE last, so the update-badge jump to index 2 ("Settings") is unaffected.
+    settingsTabs.addTab("MPE",            kBg, &mpeSettingsPage,       false);
     settingsTabs.setCurrentTabIndex(0);
     settingsTabs.setOutline(0);
     addChildComponent(settingsTabs);
@@ -738,6 +740,45 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
 
     generalSettingsPage.onEventLogEnabledChanged = [this](bool enabled) { processorRef.setEventLogEnabled(enabled); };
     generalSettingsPage.setEventLogEnabled(processorRef.getEventLogEnabled());
+
+    // ── MPE tab ──
+    // Machine-wide device calibration, plus a live read-out of what the
+    // controller is actually sending. The read-out is the reason the settings
+    // are settable at all: a zone message and a bend range are announced once,
+    // when the device powers on or its MPE mode is selected, so a plugin opened
+    // afterwards never hears them and MIDI gives it no way to ask.
+    mpeSettingsPage.onPerNoteBendRangeChanged = [this](int st)   { processorRef.setMpePerNoteBendRange(st); };
+    mpeSettingsPage.onMasterBendRangeChanged  = [this](int st)   { processorRef.setMpeMasterBendRange(st); };
+    mpeSettingsPage.onXFullScaleChanged       = [this](float st) { processorRef.setMpeXFullScaleSemitones(st); };
+    mpeSettingsPage.onClearObservation        = [this]           { processorRef.clearMpeObservation(); };
+    mpeSettingsPage.statusSource = [this]
+    {
+        const auto p = processorRef.getMpeStatus();
+        MpeSettingsPage::Status s;
+        s.messages               = p.messages;
+        s.noteChannels           = p.noteChannels;
+        s.bendChannels           = p.bendChannels;
+        s.timbreChannels         = p.timbreChannels;
+        s.memberPressureChannels = p.memberPressureChannels;
+        s.masterPressure         = p.masterPressure;
+        s.polyPressure           = p.polyPressure;
+        s.rpnRange               = p.rpnRange;
+        s.rpnChannel             = p.rpnChannel;
+        s.mcmSeen                = p.mcmSeen;
+        s.cc74Min                = p.cc74Min;
+        s.cc74Max                = p.cc74Max;
+        s.bendMin                = p.bendMin;
+        s.bendMax                = p.bendMax;
+        s.perNoteBendRange       = p.perNoteBendRange;
+        s.masterBendRange        = p.masterBendRange;
+        s.xFullScale             = p.xFullScale;
+        s.memberChannels         = p.memberChannels;
+        s.upperZoneActive        = p.upperZoneActive;
+        return s;
+    };
+    mpeSettingsPage.setRanges(processorRef.getMpePerNoteBendRange(),
+                              processorRef.getMpeMasterBendRange(),
+                              processorRef.getMpeXFullScaleSemitones());
 
     settingsPage.onModelReady = [this]
     {
@@ -2909,6 +2950,7 @@ void MainPanel::showSettings()
     // without this the number would freeze at whatever it was when the tab was
     // last switched to.
     lroAuthorSettingsPage.refreshApiSpend();
+    mpeSettingsPage.updateWatch();
     resized();
 }
 
@@ -2917,6 +2959,10 @@ void MainPanel::hideSettings()
     settingsVisible = false;
     settingsScrim.setVisible(false);
     settingsTabs.setVisible(false);
+    // Hiding the tab strip does NOT reach its tab contents: Component::setVisible
+    // fires visibilityChanged() on that component alone. Without this the MPE
+    // page's 4 Hz watch would keep running behind a closed overlay.
+    mpeSettingsPage.updateWatch();
     resized();
 }
 

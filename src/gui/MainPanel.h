@@ -10,6 +10,7 @@
 #include "StatusBar.h"
 #include "ReplayOverlay.h"
 #include "SetupWizard.h"
+#include "MpeSettingsPage.h"
 #include "PresetManagerPanel.h"
 #include "SequenceLibraryPanel.h"
 #include "../dsp/BlockParams.h"
@@ -377,9 +378,10 @@ private:
     SettingsPage settingsPage;
     GeneralSettingsPage generalSettingsPage;
     LroAuthorSettingsPage lroAuthorSettingsPage;
+    MpeSettingsPage mpeSettingsPage;
     // Tabbed settings overlay: "Models" (model manager, default) + "Settings" +
-    // "LRO Author". Declared AFTER its tab contents → destroyed FIRST (it
-    // references them).
+    // "LRO Author" + "MPE". Declared AFTER its tab contents → destroyed FIRST
+    // (it references them).
     juce::TabbedComponent settingsTabs { juce::TabbedButtonBar::TabsAtTop };
     Scrim settingsScrim;
     bool settingsVisible = false;

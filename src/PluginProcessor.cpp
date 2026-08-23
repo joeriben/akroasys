@@ -389,6 +389,34 @@ T5ynthProcessor::T5ynthProcessor()
         const int lroIdx = appProperties_.getUserSettings()->getIntValue("lroOsQuality", 2);
         lroOsFactor_.store(osFactorFromQualityIndex(lroIdx), std::memory_order_relaxed);
 
+        // MPE device calibration. Machine-wide on purpose: it describes the
+        // CONTROLLER, not the patch, so a preset stays playable on every
+        // instrument and moving to another keyboard does not re-tune it. The
+        // defaults are the MPE spec's own; a device that transmits RPN 0 will
+        // overwrite the two ranges on its own, whichever spoke last.
+        mpePerNoteBendRangeInForce_.store (
+            juce::jlimit (kMpeBendRangeMin, kMpeBendRangeMax,
+                          appProperties_.getUserSettings()
+                              ->getIntValue ("mpePerNoteBendRange", kMpePerNoteBendRange)),
+            std::memory_order_relaxed);
+        mpeMasterBendRangeInForce_.store (
+            juce::jlimit (kMpeBendRangeMin, kMpeBendRangeMax,
+                          appProperties_.getUserSettings()
+                              ->getIntValue ("mpeMasterBendRange", kMpeMasterBendRange)),
+            std::memory_order_relaxed);
+        // isfinite BEFORE jlimit, and that order is the whole point: juce::jlimit
+        // compares with < in both directions, so a NaN fails both tests and is
+        // returned unchanged -- and juce::String::getDoubleValue really does
+        // return quiet_NaN() for the text "nan" (juce_CharacterFunctions.h,
+        // readDoubleValue). It would divide into X on the audio thread.
+        {
+            const float x = (float) appProperties_.getUserSettings()
+                                        ->getDoubleValue ("mpeXFullScale", kMpeXFullScaleSemitones);
+            mpeXFullScaleInForce_.store (std::isfinite (x) ? juce::jlimit (0.25f, 96.0f, x)
+                                                           : kMpeXFullScaleSemitones,
+                                         std::memory_order_relaxed);
+        }
+
         // LRO AUTHOR provider (external API alternative to the local GGUF) —
         // load once here so the very first translate/interpret/csound call
         // already knows about it, not just calls after the Settings UI is opened.
@@ -1086,6 +1114,161 @@ void T5ynthProcessor::setEventLogEnabled(bool enabled)
 bool T5ynthProcessor::getEventLogEnabled() const
 {
     return eventLogEnabled_.load(std::memory_order_relaxed);
+}
+
+// ── MPE device calibration ───────────────────────────────────────────────────
+
+void T5ynthProcessor::setMpePerNoteBendRange (int semitones)
+{
+    semitones = juce::jlimit (kMpeBendRangeMin, kMpeBendRangeMax, semitones);
+    mpePerNoteBendRangeInForce_.store (semitones, std::memory_order_relaxed);
+    if (auto* st = appProperties_.getUserSettings())
+    {
+        st->setValue ("mpePerNoteBendRange", semitones);
+        st->saveIfNeeded();
+    }
+}
+
+int T5ynthProcessor::getMpePerNoteBendRange() const
+{
+    return mpePerNoteBendRangeInForce_.load (std::memory_order_relaxed);
+}
+
+void T5ynthProcessor::setMpeMasterBendRange (int semitones)
+{
+    semitones = juce::jlimit (kMpeBendRangeMin, kMpeBendRangeMax, semitones);
+    mpeMasterBendRangeInForce_.store (semitones, std::memory_order_relaxed);
+    if (auto* st = appProperties_.getUserSettings())
+    {
+        st->setValue ("mpeMasterBendRange", semitones);
+        st->saveIfNeeded();
+    }
+}
+
+int T5ynthProcessor::getMpeMasterBendRange() const
+{
+    return mpeMasterBendRangeInForce_.load (std::memory_order_relaxed);
+}
+
+void T5ynthProcessor::setMpeXFullScaleSemitones (float semitones)
+{
+    // Divided by on the audio thread, so the clamp is the guarantee that it can
+    // never be zero -- and the floor is generous rather than epsilon, because a
+    // hundredth of a semitone would make X full-scale on intonation noise.
+    semitones = std::isfinite (semitones) ? juce::jlimit (0.25f, 96.0f, semitones)
+                                          : kMpeXFullScaleSemitones;   // jlimit passes NaN through
+    mpeXFullScaleInForce_.store (semitones, std::memory_order_relaxed);
+    if (auto* st = appProperties_.getUserSettings())
+    {
+        st->setValue ("mpeXFullScale", (double) semitones);
+        st->saveIfNeeded();
+    }
+}
+
+float T5ynthProcessor::getMpeXFullScaleSemitones() const
+{
+    return mpeXFullScaleInForce_.load (std::memory_order_relaxed);
+}
+
+void T5ynthProcessor::observeMpeMessage (const juce::MidiMessage& msg, int channel) noexcept
+{
+    // Audio thread. Diagnosis only: nothing here decides or consumes anything,
+    // and every branch is a relaxed store on a fixed member.
+    auto& o = mpeObs_;
+    const juce::uint32 bit = (channel >= 1 && channel <= 16)
+                           ? (juce::uint32) 1u << (channel - 1) : 0u;
+
+    if (msg.isNoteOn())
+    {
+        o.noteChannels.fetch_or (bit, std::memory_order_relaxed);
+    }
+    else if (msg.isPitchWheel())
+    {
+        o.bendChannels.fetch_or (bit, std::memory_order_relaxed);
+        // The EXTENT is per-note lean only. Channel 1 is the master wheel: it is
+        // scaled by the master range and never reaches X, so counting it made a
+        // plain keyboard with no MPE at all report a full-scale lean in the same
+        // read-out that said "MPE is off". Mirrors the split in processBlock.
+        if (channel != 1)
+        {
+            const int w = msg.getPitchWheelValue();
+            if (w < o.bendMin.load (std::memory_order_relaxed)) o.bendMin.store (w, std::memory_order_relaxed);
+            if (w > o.bendMax.load (std::memory_order_relaxed)) o.bendMax.store (w, std::memory_order_relaxed);
+        }
+    }
+    else if (msg.isChannelPressure())
+    {
+        if (isMpeMasterChannel (channel)) o.masterPressure.store (true, std::memory_order_relaxed);
+        else                              o.memberPressureChannels.fetch_or (bit, std::memory_order_relaxed);
+    }
+    else if (msg.isAftertouch())
+    {
+        o.polyPressure.store (true, std::memory_order_relaxed);
+    }
+    else if (msg.isController() && msg.getControllerNumber() == 74)
+    {
+        // Every CC74, master channel included: which channels it arrives on is
+        // exactly what distinguishes an MPE slide from a ch1 control knob, and
+        // hiding the ch1 case would hide the commonest misconfiguration.
+        o.timbreChannels.fetch_or (bit, std::memory_order_relaxed);
+        const int v = msg.getControllerValue();
+        if (v < o.cc74Min.load (std::memory_order_relaxed)) o.cc74Min.store (v, std::memory_order_relaxed);
+        if (v > o.cc74Max.load (std::memory_order_relaxed)) o.cc74Max.store (v, std::memory_order_relaxed);
+    }
+    else
+    {
+        return;   // counted below only if it was one of the kinds above
+    }
+
+    o.messages.fetch_add (1, std::memory_order_relaxed);
+}
+
+T5ynthProcessor::MpeStatus T5ynthProcessor::getMpeStatus() const
+{
+    const auto& o = mpeObs_;
+    MpeStatus s;
+    s.messages               = o.messages.load (std::memory_order_relaxed);
+    s.noteChannels           = o.noteChannels.load (std::memory_order_relaxed);
+    s.bendChannels           = o.bendChannels.load (std::memory_order_relaxed);
+    s.timbreChannels         = o.timbreChannels.load (std::memory_order_relaxed);
+    s.memberPressureChannels = o.memberPressureChannels.load (std::memory_order_relaxed);
+    s.masterPressure         = o.masterPressure.load (std::memory_order_relaxed);
+    s.polyPressure           = o.polyPressure.load (std::memory_order_relaxed);
+    s.rpnRange               = o.rpnRange.load (std::memory_order_relaxed);
+    s.rpnChannel             = o.rpnChannel.load (std::memory_order_relaxed);
+    s.mcmSeen                = o.mcmSeen.load (std::memory_order_relaxed);
+    s.cc74Min                = o.cc74Min.load (std::memory_order_relaxed);
+    s.cc74Max                = o.cc74Max.load (std::memory_order_relaxed);
+    s.bendMin                = o.bendMin.load (std::memory_order_relaxed);
+    s.bendMax                = o.bendMax.load (std::memory_order_relaxed);
+    s.perNoteBendRange       = mpePerNoteBendRangeInForce_.load (std::memory_order_relaxed);
+    s.masterBendRange        = mpeMasterBendRangeInForce_.load (std::memory_order_relaxed);
+    s.xFullScale             = mpeXFullScaleInForce_.load (std::memory_order_relaxed);
+    s.memberChannels         = o.memberChannels.load (std::memory_order_relaxed);
+    s.upperZoneActive        = o.upperZone.load (std::memory_order_relaxed);
+    return s;
+}
+
+void T5ynthProcessor::clearMpeObservation()
+{
+    auto& o = mpeObs_;
+    o.messages.store (0, std::memory_order_relaxed);
+    o.noteChannels.store (0, std::memory_order_relaxed);
+    o.bendChannels.store (0, std::memory_order_relaxed);
+    o.timbreChannels.store (0, std::memory_order_relaxed);
+    o.memberPressureChannels.store (0, std::memory_order_relaxed);
+    o.masterPressure.store (false, std::memory_order_relaxed);
+    o.polyPressure.store (false, std::memory_order_relaxed);
+    o.rpnRange.store (0, std::memory_order_relaxed);
+    o.rpnChannel.store (0, std::memory_order_relaxed);
+    o.mcmSeen.store (false, std::memory_order_relaxed);
+    // memberChannels/upperZone are NOT reset: they mirror the layout that is
+    // actually in force, which "watch again" does not undo. Only the claim that
+    // the DEVICE declared it is forgotten, because that is an observation.
+    o.cc74Min.store (128, std::memory_order_relaxed);
+    o.cc74Max.store (-1, std::memory_order_relaxed);
+    o.bendMin.store (16384, std::memory_order_relaxed);
+    o.bendMax.store (-1, std::memory_order_relaxed);
 }
 
 // ── R2: Replay Transport ──────────────────────────────────────────────────────
@@ -5106,6 +5289,11 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     const auto msg = (*midiIter).getMessage();
                     ++midiIter;
                     const int channel = msg.getChannel();
+                    // Watched before anything acts on it, so the MPE tab reports
+                    // what ARRIVED rather than what survived the routing -- a CC74
+                    // that this synth declines on channel 1 is exactly the case the
+                    // read-out has to be able to show.
+                    observeMpeMessage (msg, channel);
                     if (msg.isNoteOn()
                         // XL DAW-mode ch16 is the encoder/fader channel and never sends
                         // musical Note Ons. Without this guard the DAW-mode-enable message
@@ -5178,7 +5366,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         {
                             voiceManager.setPitchBendSemitones(
                                 juce::jlimit(-1.0f, 1.0f, centered)
-                                * static_cast<float>(mpeMasterBendRangeInForce_));
+                                * static_cast<float>(mpeMasterBendRangeInForce_
+                                                         .load (std::memory_order_relaxed)));
                         }
                         else
                         {
@@ -5193,10 +5382,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                             // times it -- and a preset's depth has to mean the
                             // same gesture on both.
                             const float bendSemis =
-                                centered * static_cast<float>(mpePerNoteBendRangeInForce_);
+                                centered * static_cast<float>(mpePerNoteBendRangeInForce_
+                                                                  .load (std::memory_order_relaxed));
                             voiceManager.setPerVoicePitchBend(pbChannel, bendSemis,
                                 juce::jlimit(-1.0f, 1.0f,
-                                             bendSemis / kMpeXFullScaleSemitones));
+                                             bendSemis / mpeXFullScaleInForce_
+                                                             .load (std::memory_order_relaxed)));
                         }
                     }
                     else if (msg.isAllNotesOff() || msg.isAllSoundOff())
@@ -6191,12 +6382,28 @@ bool T5ynthProcessor::handleMpeRpnByte(int channel, int cc, int value7) noexcept
         // one semitone, not none. Value 0 is what a controller sends to mean
         // "no bend", and honouring that would silently disable pitch bend.
         const int range = std::max(1, value7);
-        mpePerNoteBendRangeInForce_ = range;
+        mpePerNoteBendRangeInForce_.store (range, std::memory_order_relaxed);
         if (isMpeMasterChannel(channel))
-            mpeMasterBendRangeInForce_ = range;
+            mpeMasterBendRangeInForce_.store (range, std::memory_order_relaxed);
+
+        // For the MPE tab: that a range was transmitted AT ALL is the answer to
+        // the question the settings under it exist for.
+        mpeObs_.rpnRange.store (range, std::memory_order_relaxed);
+        mpeObs_.rpnChannel.store (channel, std::memory_order_relaxed);
+        mpeObs_.messages.fetch_add (1, std::memory_order_relaxed);
     }
     else if (actedOn)
     {
+        // The layout has ALREADY consumed this event above, so the zone it
+        // describes is the one to publish. Audio thread, where the layout lives.
+        const auto lower = mpeZones_.getLowerZone();
+        const auto upper = mpeZones_.getUpperZone();
+        mpeObs_.memberChannels.store (lower.isActive() ? lower.numMemberChannels : 0,
+                                      std::memory_order_relaxed);
+        mpeObs_.upperZone.store (upper.isActive(), std::memory_order_relaxed);
+        mpeObs_.mcmSeen.store (true, std::memory_order_relaxed);
+        mpeObs_.messages.fetch_add (1, std::memory_order_relaxed);
+
         // The MPE Configuration Message is a one-shot declaration, but
         // MidiRPNDetector keeps the selected parameter latched per channel --
         // so the NEXT CC6 on this channel, a bound fader included, would be

@@ -411,13 +411,29 @@ without whom AI4ArtsEd would not have come into being.
 The <strong>T5 Oscillator</strong> requires at least one diffusion model; the <strong>LRO</strong> requires none — it needs <a href="#setup-lm">the language model</a> and Csound (see <a href="#lro">its chapter</a>). Model weights are <strong>not bundled</strong> — they are downloaded separately. The Stable Audio Open engines (1.0 and Small) also need the auxiliary <strong>T5-Base</strong> text encoder (ungated, Apache-2.0), which installs automatically with the engine; Stable Audio 3 instead uses its own t5gemma encoder, fetched at install.
 </p>
 <p>
-Open the <strong>Settings</strong> panel from the status bar. It has three tabs. <strong>Sound Models</strong> (the default) downloads the diffusion models the <a href="#gen">T5 Oscillator</a> needs and shows per-model instructions. <strong>Language Model</strong> is the one subject the <a href="#lro">LRO</a> depends on, installed or configured on its own page — see <a href="#setup-lm">The Language Model</a> below. <strong>Settings</strong> holds the machine-wide options that are not saved per preset:</p>
+Open the <strong>Settings</strong> panel from the status bar. It has four tabs. <strong>Sound Models</strong> (the default) downloads the diffusion models the <a href="#gen">T5 Oscillator</a> needs and shows per-model instructions. <strong>Language Model</strong> is the one subject the <a href="#lro">LRO</a> depends on, installed or configured on its own page — see <a href="#setup-lm">The Language Model</a> below. <strong>Settings</strong> holds the machine-wide options that are not saved per preset:</p>
 <ul>
   <li><strong>Filter Oversampling</strong> (Off / 2× / 4×, default 2×) — applies to the Ladder and Warp nonlinear filter stages; does not affect SVF.</li>
   <li><strong>LRO Oversampling</strong> (Off / 2× / 4×, default 4×) — the rate the authored Csound runs at, relative to the host. Changing it recompiles the running orchestra.</li>
   <li><strong>Check for updates on startup</strong> — when a newer release exists, a banner with a Download button appears.</li>
   <li><strong>Record Event Log (.t5evt)</strong> — off by default; see <a href="#sessionlog">Session Log</a>.</li>
 </ul>
+<p>
+<strong>MPE</strong> is the fourth tab, and it describes the <em>controller</em> rather
+than the patch &mdash; also machine-wide, so a preset stays playable on whatever
+instrument you plug in. Its upper half is three numbers (per-note bend range, master
+bend range, and what a full sideways lean is worth as a modulation source); its lower
+half is a live read-out of what your controller is actually sending: which channels
+carry notes, whether it transmitted a bend range and a zone at all, how far it leans,
+what CC74 does, and which kind of pressure arrives.
+</p>
+<p>
+The read-out is there because the numbers above it are normally negotiated once, when
+the controller powers on or its MPE mode is selected. A plugin opened after that
+moment never hears the announcement and MIDI gives it no way to ask &mdash; so either
+reconnect the instrument with this window already open, or read what it is doing and
+set the values by hand.
+</p>
 <p>Pick a model from Sound Models; the summary below tells you which to choose.
 </p>
 
@@ -1894,11 +1910,30 @@ the tabs above this area belong to the envelopes.
 
 <h3>Aftertouch (AT)</h3>
 <p>
-The <strong>AT</strong> panel routes held-phase pressure to fourteen independent
-modulation targets simultaneously. Each target has its own signed depth bar — there is no single
-global Amount or shared dropdown. Sources: polyphonic key pressure (per-note), channel
-pressure, Mod Wheel (CC1), and Breath (CC2); akróasys resolves each voice's pressure as
-the maximum of all applicable sources.
+The <strong>AT</strong> panel routes held-phase expression to sixteen independent
+modulation targets simultaneously. Each target has its own signed depth bar &mdash; there is no single
+global Amount or shared dropdown &mdash; and, at the right-hand end of each bar, its own
+<strong>Expression</strong> switch saying <em>which</em> gesture drives it.
+</p>
+
+<h4>The Expression column</h4>
+<p>
+Click the small box beside a bar to step through the axes a player has:
+</p>
+<table>
+  <tr><th>Switch</th><th>Axis</th><th>What it is</th></tr>
+  <tr><td><strong>V</strong></td><td>Velocity</td><td>How hard the note was struck. Fixed for the life of the note.</td></tr>
+  <tr><td><strong>X</strong></td><td>Lateral</td><td>Sideways lean or slide &mdash; per-note pitch bend, measured as a musical interval rather than as wheel travel, so the same depth means the same gesture on different controllers. Bipolar: left is negative, right positive.</td></tr>
+  <tr><td><strong>Y</strong></td><td>Slide / timbre</td><td>CC74. Measured as <em>travel from where the note began</em>, not as an absolute position, so it fits both schemes the MPE specification allows and needs no per-device setting. Bipolar around the point the finger landed.</td></tr>
+  <tr><td><strong>Z</strong></td><td>Pressure</td><td>How hard the note is being held: channel pressure, poly key pressure, Mod Wheel (CC1) or Breath (CC2), resolved as the maximum of whichever apply.</td></tr>
+  <tr><td><strong>&Oslash;</strong></td><td>&mdash;</td><td>Nothing drives this target. The quiet state, and the only grey one, so a glance down the column shows what is wired.</td></tr>
+</table>
+<p>
+&Oslash; is the default on most rows. Three rows start wired, because they are what
+pressure and slide are <em>for</em>: <strong>DCA</strong> on&nbsp;Z, <strong>Cutoff</strong> and
+<strong>Scan</strong> on&nbsp;Y. X, Y and per-note Z need an MPE controller; V and channel-wide
+Z work on any keyboard. What a full X or Y gesture is worth on your particular
+instrument is set once in <strong>Settings &rarr; MPE</strong>, not per preset.
 </p>
 <p>
 <strong>Interaction:</strong> drag a bar left or right to set its magnitude (0 … 1.0);
@@ -2298,7 +2333,7 @@ one-shot voices switched under a running Step Sequencer pattern.
   <tr><td><strong>1 / 2 / 3 / 4</strong></td><td>Recall snapshot slots 1–4. <strong>Shift+1</strong> … <strong>Shift+4</strong> stores the current state into a slot.</td></tr>
   <tr><td><strong>Kbd</strong> in the status bar or <strong>Ctrl/Cmd+K</strong></td><td>Enable computer-keyboard note input: twenty keys, C4 to G5 — an octave and a fifth, laid out like a piano across the two letter rows (<code>a w s e d f t g y h u j k o l p</code> …). The keys are read by physical position, so the layout works on any national keyboard. <strong>y</strong> / <strong>x</strong> shift the octave, over a range of −5 to +4. Input is ignored automatically while a text field or overlay is active.</td></tr>
   <tr><td><strong>MIDI Pitch Bend</strong></td><td>±2 semitones by default, and settable by the standard RPN&nbsp;0 message (CC101/100/6) if your controller sends one.</td></tr>
-  <tr><td><strong>MPE</strong></td><td>Fully supported. Per-note pitch bend is read on channels 2–16 (±24 semitones by default); per-note pressure and CC74 use 2–15. Their own pressure as MPE Loudness, and their own timbre on CC74; the master channel's pressure applies to the whole zone. An MPE controller therefore plays this instrument per note, not per keyboard.</td></tr>
+  <tr><td><strong>MPE</strong></td><td>Fully supported. Per-note pitch bend, pressure and CC74 are read on channels 2–16, at ±48 semitones until your controller transmits its own range (RPN&nbsp;0). It announces that range once, when its MPE mode is selected, so a plugin opened afterwards never hears it — <strong>Settings → MPE</strong> shows what actually arrived and lets you set the range by hand. Pressure on a member channel is that note's alone; pressure on the zone master applies to the whole zone. An MPE controller therefore plays this instrument per note, not per keyboard.</td></tr>
   <tr><td><strong>CC1 / CC2</strong></td><td>Mod Wheel and Breath feed the same performance-pressure route as aftertouch, using the <strong>AT</strong> target and amount.</td></tr>
   <tr><td><strong>CC7 / CC11</strong></td><td>Channel Volume and Expression scale the live voice output.</td></tr>
   <tr><td><strong>MIDI CC64</strong></td><td>Sustain pedal. Notes released while the pedal is down keep sounding until CC64 returns below 64.</td></tr>

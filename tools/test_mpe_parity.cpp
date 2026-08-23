@@ -62,19 +62,26 @@ namespace
     constexpr double kSampleRate = 44100.0;
     constexpr int    kBlockSize  = 256;
 
-    // MPE defaults the hand-written path starts from (PluginProcessor.h:947/954).
-    constexpr float kDefaultMasterBendRange = 2.0f;
-    // 48, the spec's own default, and the corpus is not allowed to be
-    // regenerated from the implementation, so the accounting belongs here:
-    // this was 24 until 2026-08-23, on the belief that "48 over-bends a
-    // LinnStrument". Roger Linn Design's panel-settings page says the opposite
-    // -- the panel values "+/- 2, 3, 12 or 24 semitones" are ONE CHANNEL mode,
-    // and ChPerNote (its MPE mode) reads "Bend Range: 48 (This uses the hidden
-    // setting 'Any Bend Range')", reaching 96. So the reference controller
-    // ships at 48 and every device relying on the default was played at half
-    // the interval it meant. Deliberate change of default, BJ 2026-08-23; the
-    // MPE settings tab now owns the value for devices that transmit no RPN 0.
-    constexpr float kDefaultNoteBendRange   = 48.0f;
+    // ── The MPE fallbacks ────────────────────────────────────────────────────
+    // Pinned at COMPILE time against the constants themselves, and read at RUN
+    // time off the processor everywhere else. The split is not pedantry: since
+    // the MPE settings tab exists, the values actually in force are machine-wide
+    // USER SETTINGS loaded from ~/Library/Application Support/T5ynth. A corpus
+    // that asserted the literal 48 would start failing the day a player set the
+    // range to 24 for their own instrument -- and it would fail correctly, which
+    // is worse than failing wrongly: a capability guard a preference can turn
+    // red is no longer a guard. What is frozen is the DEFAULT, and that is a
+    // constant; what the behavioural cases below assert is the RELATIONSHIP
+    // between the range in force and the bend, which is the capability.
+    static_assert (T5ynthProcessor::kMpePerNoteBendRange == 48,
+                   "The per-note fallback is the MPE spec's 48. It was 24 until 2026-08-23, on a "
+                   "belief about the LinnStrument that its own documentation contradicts -- see "
+                   "docs/MPE_MIGRATION_PARITY.md capability 8.");
+    static_assert (T5ynthProcessor::kMpeMasterBendRange == 2,
+                   "The master fallback is the MPE spec's 2.");
+    static_assert (T5ynthProcessor::kMpeXFullScaleSemitones == 1.0f,
+                   "One semitone of lean is a full X axis by default -- the smallest interval "
+                   "that is unambiguously a musical gesture rather than intonation.");
     // Zero travel -- what a voice reports before its Y has moved.
     //
     // This number moved twice, and the corpus is not allowed to be regenerated
@@ -146,6 +153,12 @@ namespace
         }
 
         void send (const juce::MidiMessage& m) { midi.addEvent (m, 0); }
+
+        // What is ACTUALLY in force on this machine: the compile-time fallback
+        // unless the player's settings file or a transmitted RPN 0 moved it.
+        float noteBendRange()   const { return (float) proc.getMpePerNoteBendRange(); }
+        float masterBendRange() const { return (float) proc.getMpeMasterBendRange(); }
+        float xFullScale()      const { return proc.getMpeXFullScaleSemitones(); }
 
         void run (int blocks = 1)
         {
@@ -244,7 +257,7 @@ namespace
         check (member != nullptr && master != nullptr, "both voices still alive");
         if (member == nullptr || master == nullptr) return;
 
-        checkNear (member->getPerVoicePitchBend(), fullUpBend (kDefaultNoteBendRange), 0.01f,
+        checkNear (member->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                    "channel 5's note bends by the default per-note range");
         checkNear (master->getPerVoicePitchBend(), 0.0f, 1e-6f,
                    "channel 1's note is untouched by channel 5's wheel");
@@ -266,7 +279,7 @@ namespace
 
         checkNear (v->getPerVoicePitchBend(), 0.0f, 1e-6f,
                    "channel 1's wheel writes no PER-VOICE bend");
-        checkNear (r.globalBendSemitones(), fullUpBend (kDefaultMasterBendRange), 0.01f,
+        checkNear (r.globalBendSemitones(), fullUpBend (r.masterBendRange()), 0.01f,
                    "channel 1's wheel writes the global bend, which every voice reads");
     }
 
@@ -583,7 +596,7 @@ namespace
         // wheel AFTER the note-off still reaches it -- that is today's
         // behaviour and it is what is frozen here. What must NOT happen is the
         // reverse: the bend arriving before the note-off was dispatched.
-        checkNear (maxBend, fullUpBend (kDefaultNoteBendRange), 0.01f,
+        checkNear (maxBend, fullUpBend (r.noteBendRange()), 0.01f,
                    "a releasing voice still follows its channel's wheel");
     }
 
@@ -893,7 +906,7 @@ namespace
 
         r.wheel (5, 16383);
         r.flush();
-        checkNear (maxPerVoiceBend (r), fullUpBend (kDefaultNoteBendRange), 0.01f,
+        checkNear (maxPerVoiceBend (r), fullUpBend (r.noteBendRange()), 0.01f,
                    "the handed-back key kept its MPE channel and follows its wheel");
     }
 
@@ -1017,24 +1030,32 @@ namespace
     void caseXIsScaledInSemitones()
     {
         std::printf ("[26] X as a source is semitones of bend, not wheel travel\n");
+        // Both rigs DECLARE their range instead of leaning on the fallback, and
+        // X is asserted against the full scale in force rather than a literal 1
+        // semitone: since the MPE tab exists, both of those are machine-wide
+        // user settings. What is on test is the RELATIONSHIP -- X is the bend
+        // interval measured against the full-scale lean -- not either number.
+        constexpr float kNarrow = 24.0f, kWide = 48.0f;
+        const int halfSemitoneUp = 8192 + (int) (8191.0 / (2.0 * kNarrow));
+
         Rig r;
+        r.rpn (5, 0, 0, (int) kNarrow);
         r.noteOn (5, 60);
         r.flush();
-
-        // A wheel value worth HALF a semitone at the default per-note range.
-        const int halfSemitoneUp = 8192 + (int) (8191.0 / (2.0 * kDefaultNoteBendRange));
         r.wheel (5, halfSemitoneUp);
         r.flush();
         const auto* v = r.voiceForNote (60);
         check (v != nullptr, "the voice is alive");
         if (v == nullptr) return;
         checkNear (v->getPerVoicePitchBend(), 0.5f, 0.01f, "the bend is half a semitone");
-        checkNear (v->getPerVoicePitchBendNorm(), 0.5f, 0.01f, "and X is half the axis");
+        checkNear (v->getPerVoicePitchBendNorm(),
+                   juce::jlimit (-1.0f, 1.0f, 0.5f / r.xFullScale()), 0.01f,
+                   "and X is that half-semitone measured against the full-scale lean");
 
         // The SAME wheel value under a wider declared range is a bigger
         // interval, and X follows the interval rather than the wheel.
         Rig r2;
-        r2.rpn (5, 0, 0, (int) (2.0f * kDefaultNoteBendRange));
+        r2.rpn (5, 0, 0, (int) kWide);
         r2.noteOn (5, 60);
         r2.flush();
         r2.wheel (5, halfSemitoneUp);
@@ -1044,12 +1065,16 @@ namespace
         if (v2 == nullptr) return;
         checkNear (v2->getPerVoicePitchBend(), 1.0f, 0.01f,
                    "the same wheel is now a whole semitone of bend");
-        checkNear (v2->getPerVoicePitchBendNorm(), 1.0f, 0.01f,
+        checkNear (v2->getPerVoicePitchBendNorm(),
+                   juce::jlimit (-1.0f, 1.0f, 1.0f / r2.xFullScale()), 0.01f,
                    "and X has doubled with it -- the interval, not the wheel");
 
         // Downward is symmetric, and past full scale it clamps rather than
-        // running away: a target on X can be driven to -1 and no further.
+        // running away: a target on X can be driven to -1 and no further. The
+        // range is declared at MPE's maximum so the assertion holds whatever the
+        // full-scale setting is -- 96 semitones of bend saturate any of them.
         Rig r3;
+        r3.rpn (5, 0, 0, 96);
         r3.noteOn (5, 60);
         r3.flush();
         r3.wheel (5, 0);
