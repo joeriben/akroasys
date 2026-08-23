@@ -195,6 +195,22 @@ namespace
             cc (ch, 6, dataMsb);
         }
 
+        // The note is HELD, i.e. not the one still ringing out. voiceForNote
+        // returns the first ACTIVE voice of that pitch, which after a re-strike
+        // can be the releasing one -- and a case that reads the wrong voice
+        // passes for the wrong reason.
+        const SynthVoice* heldVoiceForNote (int note) const
+        {
+            const auto& vm = proc.getVoiceManager();
+            for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+            {
+                const auto& v = vm.getVoice (i);
+                if (v.isActive() && ! v.isReleasing() && v.getCurrentNote() == note)
+                    return &v;
+            }
+            return nullptr;
+        }
+
         const SynthVoice* voiceForNote (int note) const
         {
             const auto& vm = proc.getVoiceManager();
@@ -1175,6 +1191,44 @@ namespace
     }
 
 
+    // ── 30. Poly key pressure stops being a permanent floor ─────────────────
+    //      polyPressureByNote is indexed by note NUMBER and pressureForNote
+    //      takes the max, so a value left standing is a floor under that note's
+    //      MPE Z for the rest of the session. Nothing lowered it but a panic.
+    //      Play in the controller's Poly-AT mode, switch it to MPE, and every
+    //      note number pressed hard stayed pressed.
+    void casePolyPressureIsNotAPermanentFloor()
+    {
+        std::printf ("[30] poly key pressure ends with the key, not with the session\n");
+        Rig r;
+        r.noteOn (1, 60);
+        r.flush();
+        r.polyPressure (1, 60, 100);
+        r.flush();
+        const auto* first = r.heldVoiceForNote (60);
+        check (first != nullptr, "the note is sounding");
+        if (first == nullptr) return;
+        checkNear (first->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                   "and it followed the poly pressure");
+
+        r.noteOff (1, 60);
+        r.flush();
+
+        // The same pitch again, now as an MPE note with a LIGHT touch.
+        r.noteOn (5, 60);
+        r.flush();
+        r.pressure (5, 10);
+        r.flush();
+
+        const auto* fresh = r.heldVoiceForNote (60);
+        check (fresh != nullptr, "the second note is sounding");
+        if (fresh == nullptr) return;
+        checkNear (fresh->getAftertouch(), 10.0f / 127.0f, 1e-3f,
+                   "the new note reads its own light pressure, not the hard one "
+                   "the same note number was left at");
+    }
+
+
 }
 
 int main()
@@ -1212,6 +1266,7 @@ int main()
     caseXIsScaledInSemitones();
     caseMemberChannelHandsOver();
     caseMemberChannelHandsOverUnderSustain();
+    casePolyPressureIsNotAPermanentFloor();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

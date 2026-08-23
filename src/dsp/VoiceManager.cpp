@@ -397,6 +397,30 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease)
             sostenutoReleasedVoice[static_cast<size_t>(i)] = false;
         }
     }
+    // Poly key pressure is a LATCH indexed by note number, and pressureForNote
+    // takes the max -- so it is a FLOOR under everything else that note's voice
+    // can receive, MPE Z included. Nothing ever lowered it except a panic, so it
+    // outlived the key that set it: press hard in Poly-AT mode, switch the
+    // controller to MPE, and that note number stayed pinned at the old pressure
+    // for the rest of the session while the finger on it did nothing.
+    //
+    // Cleared here rather than inside the loop above because the same note
+    // number can be sounding on more than one voice, and the drone is scanned
+    // too: a drone holding this pitch is still a reason to keep the latch.
+    // No refreshPerformancePressure(): a releasing voice keeps the pressure its
+    // own finger left, exactly as it does when it loses its expression channel.
+    if (note >= 0 && note < 128)
+    {
+        bool stillHeld = false;
+        for (int i = 0; i < MAX_VOICES && ! stillHeld; ++i)
+        {
+            const auto& v = voices[static_cast<size_t>(i)];
+            stillHeld = v.isActive() && ! v.isReleasing() && v.getCurrentNote() == note;
+        }
+        if (! stillHeld)
+            polyPressureByNote[static_cast<size_t>(note)] = 0.0f;
+    }
+
     // Update gain: held voice count decreased (releasing voices don't count).
     updateGainTarget();
 }
