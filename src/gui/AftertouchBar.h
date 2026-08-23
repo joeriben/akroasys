@@ -8,7 +8,18 @@
 //
 // Interaction:
 //   • drag horizontally → set the target's depth (magnitude), filling from left
-//   • plain click (no drag) → toggle the sign (positive ↔ negative)
+//   • plain click (no drag) → toggle the sign (positive ↔ negative), and only on
+//     a bar that already has depth: negating zero is zero
+//
+// Drag or click is decided ONCE, by our own kDragSlopPx, and both handlers read
+// that one answer. It used to be juce::MouseEvent::mouseWasDraggedSinceMouseDown,
+// which is `movedSignificantly || held longer than 300 ms` (juce_MouseInputSourceImpl.h:423)
+// -- two thresholds, one of them a CLOCK. A quick short pull moved less than
+// JUCE's 4 px and lasted under 300 ms, so the drag set a positive depth and the
+// release then read the same gesture as a click and flipped it: the bar went
+// negative, and every later drag inherited that sign, which is what "the first
+// slide gives a negative value" was. The mirror image was just as wrong -- a slow
+// deliberate click sat past 300 ms and toggled nothing at all.
 //   • double-click → off (0)
 //   • right-click → MIDI-learn menu (onRightClick)
 //   • the numeric value shows ONLY while the mouse is held
@@ -47,7 +58,8 @@ public:
             return;
         }
 
-        held_ = true;
+        held_    = true;
+        dragged_ = false;
         if (onDragStart) onDragStart();
 
         if (e.getNumberOfClicks() >= 2)
@@ -67,6 +79,12 @@ public:
     {
         if (! held_ || doubleClick_)
             return;
+
+        // Below the slop this is still a click, and mouseUp owns it. Latched,
+        // so a drag that wanders back over the start point stays a drag.
+        if (! dragged_ && e.getDistanceFromDragStart() < kDragSlopPx)
+            return;
+        dragged_ = true;
 
         const float w = (float) juce::jmax(1, getWidth());
         const double pos = juce::jlimit(0.0, 1.0, (double) e.position.x / w);
@@ -88,9 +106,11 @@ public:
         if (! held_)
             return;
 
-        // A click with no drag toggles the sign of the current depth.
-        if (! doubleClick_ && e.getNumberOfClicks() == 1
-            && ! e.mouseWasDraggedSinceMouseDown())
+        // A click with no drag toggles the sign of the current depth. Not of a
+        // bar at rest: -0 is 0, so the only thing that gesture could do is leave
+        // a negative zero behind for the next drag to inherit.
+        if (! doubleClick_ && ! dragged_ && e.getNumberOfClicks() == 1
+            && getValue() != 0.0)
             setValue(-getValue(), juce::sendNotificationSync);
 
         held_ = false;
@@ -141,9 +161,14 @@ public:
     }
 
 private:
+    // Ours, and deliberately smaller than JUCE's 4: this bar is a single row a
+    // few pixels high, and a pull along it is a short gesture.
+    static constexpr int kDragSlopPx = 2;
+
     juce::String label_;
     double dragSign_    = 1.0;
     bool   held_        = false;
+    bool   dragged_     = false;
     bool   doubleClick_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AftertouchBar)
