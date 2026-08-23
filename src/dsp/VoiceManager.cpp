@@ -465,6 +465,26 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
         {
             if (hasCurrentBlockParams_)
                 v.configureForBlock(applyPerformanceControllers(currentBlockParams_));
+            // The key is up, so this voice stops answering its member channel --
+            // here, at the key event, and not at the next note-on. claimExprChannel
+            // is a hand-off and only runs from noteOn, but a controller resets its
+            // member channel BEFORE the note-on it is preparing: this project's own
+            // Osmose capture has CC74 = 0 immediately ahead of 201 of 203 note-ons
+            // (section 4a). So the reset burst arrived while the previous note still
+            // owned the tag, and every release tail was yanked back to rest a few
+            // milliseconds after the key came up -- Y and Z to zero, and the bend
+            // in the burst snapping the tail back through the whole per-note
+            // range, two octaves at the shipped default of 24 either way.
+            //
+            // Only at the OWN key-up, which is what keeps a chord held on one
+            // channel together: each voice keeps the channel until its own key
+            // lifts -- corpus case 33's second half, which fails on the obvious
+            // over-broad version of this line (strip every voice carrying the
+            // channel) with two keys still down. And never on a voice whose key
+            // is still down: no setter reaches expression channel 0 and the idle
+            // clear cannot run on a sounding voice, so nothing would ever end
+            // that freeze.
+            voiceExprChannel_[static_cast<size_t>(i)] = 0;
             const bool heldBySostenuto = ! forceRelease
                                       && sourceId < 0
                                       && sostenutoPedalDown
@@ -814,6 +834,11 @@ void VoiceManager::claimExprChannel(int voiceIndex, int8_t channel) noexcept
     //   - An MPE zone with fewer member channels than fingers, where the
     //     controller doubles two live notes onto one channel. MPE's own rule
     //     there is that the channel's expression applies to every note on it.
+    //
+    // Since the key-up in noteOff clears the tag itself, every voice this loop
+    // could strip now arrives with it already zero -- it is a backstop, kept
+    // because it is the only thing that would catch a voice holding a live tag
+    // with no finger on it by some other route.
     //
     // It is also what bounds the freeze. A voice that loses the channel keeps
     // the expression its own finger left, which ends with its release or with

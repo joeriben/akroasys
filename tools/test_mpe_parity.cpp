@@ -24,6 +24,16 @@
 //     test. What IS tested here is the other half: with DAW mode inactive,
 //     channel 16 behaves as an ordinary MPE channel.
 //
+//   * Capability 26 -- expression applied at the event's SAMPLE POSITION rather
+//     than at block start. Voice state cannot show it: only a note-on resets
+//     bend, pressure and timbre, so the values at the end of a block are the
+//     same whether the buffer was walked in time order or applied as one batch
+//     at sample 0. The AUDIO would show it, and this harness has none -- with no
+//     engine data loaded every voice renders silence (measured: peak 0.0 for
+//     twelve blocks after a note-on). What the walk IS pinned by is the ledger,
+//     which is kept at each event's own instant: cases 43, 47 and 51 all fail
+//     when the key events move back into the block-top pass.
+//
 //   * A channel-0 voice under a channel-1 pitch wheel (capability 10). Making
 //     one needs a running sequencer. The mechanism -- VoiceManager's GLOBAL
 //     pitchBendSemitones, which every voice reads regardless of MPE tag -- is
@@ -604,10 +614,7 @@ namespace
         r.noteOn (5, 64);
         r.flush();
 
-        // note-off at 0, wheel at the end of the same block. The note is gone by
-        // the time the wheel is dispatched, so the wheel finds no voice to bend
-        // -- which is only true if events are walked in time order rather than
-        // applied as a batch.
+        // note-off at 0, wheel at the end of the same block.
         r.midi.addEvent (juce::MidiMessage::noteOff (5, 64), 0);
         r.midi.addEvent (juce::MidiMessage::pitchWheel (5, 16383), kBlockSize - 1);
         r.run (1);
@@ -618,12 +625,14 @@ namespace
             if (vm.getVoice (i).isActive())
                 maxBend = juce::jmax (maxBend, std::fabs (vm.getVoice (i).getPerVoicePitchBend()));
 
-        // The releasing voice keeps its channel tag until it goes idle, so a
-        // wheel AFTER the note-off still reaches it -- that is today's
-        // behaviour and it is what is frozen here. What must NOT happen is the
-        // reverse: the bend arriving before the note-off was dispatched.
-        checkNear (maxBend, fullUpBend (r.noteBendRange()), 0.01f,
-                   "a releasing voice still follows its channel's wheel");
+        // The key came up before the wheel arrived, so the wheel reaches nothing.
+        // Until 2026-08-23 this assertion said the opposite of the case's own
+        // title -- it recorded that a releasing voice still followed its
+        // channel -- and that was the defect: a controller resets its member
+        // channel just BEFORE the next note-on, so the burst landed on the tail
+        // of the note before it and snapped it back to rest.
+        checkNear (maxBend, 0.0f, 0.01f,
+                   "a wheel after the key-up does not reach the note that ended");
     }
 
     // ── 18. An ARPEGGIATED note is internal; the key handed BACK is not ──────
@@ -1218,10 +1227,15 @@ namespace
     {
         std::printf ("[33] a chord held on one channel bends together, it does not tear apart\n");
         Rig r;
+        // A slide rest away from both ends, so a Y reading of 0 means "deaf"
+        // rather than "at rest" -- with rest 0 the two are the same number and
+        // nothing below could tell them apart.
+        r.cc (2, 74, 64);
         r.noteOn (2, 60);
         r.noteOn (2, 64);
         r.noteOn (2, 67);            // three fingers, one channel
         r.flush();
+        const float rest = 64.0f / 127.0f;
 
         const auto* a = r.heldVoiceForNote (60);
         const auto* b = r.heldVoiceForNote (64);
@@ -1240,7 +1254,32 @@ namespace
         checkNear (c->getPerVoicePitchBend(), bend, 0.01f, "and so does the third");
         checkNear (a->getAftertouch(), 100.0f / 127.0f, 1e-3f,
                    "the oldest held note still follows the channel's pressure");
-        checkNear (a->getTimbre(), 1.0f, 1e-3f, "and its slide");
+        checkNear (a->getTimbre(), 1.0f - rest, 1e-3f, "and its slide");
+
+        // And it stays together when one finger leaves. Since 2026-08-23 a voice
+        // drops its expression channel at its OWN key-up (row 25a), and the
+        // obvious over-broad way to write that -- clear every voice carrying the
+        // channel -- makes the whole chord go deaf to bend, slide and pressure
+        // the instant the first key lifts, with two keys still down. The suite
+        // was green on that variant: every other case has one key down at a
+        // time. This is the half that separates them.
+        r.noteOff (2, 60);           // the lowest finger leaves
+        r.flush();
+        r.wheel (2, 0);              // full DOWN, so this cannot read as "unchanged"
+        r.pressure (2, 40);
+        r.cc (2, 74, 0);
+        r.flush();
+
+        checkNear (b->getPerVoicePitchBend(), -r.noteBendRange(), 0.01f,
+                   "the two keys still down follow the wheel after the third lifts");
+        checkNear (c->getPerVoicePitchBend(), -r.noteBendRange(), 0.01f,
+                   "-- both of them");
+        checkNear (b->getAftertouch(), 40.0f / 127.0f, 1e-3f,
+                   "-- and the channel's pressure");
+        checkNear (c->getTimbre(), -rest, 1e-3f,
+                   "-- and its slide, which reads below rest and so cannot be deafness");
+        checkNear (a->getPerVoicePitchBend(), bend, 0.01f,
+                   "while the finger that left keeps what it had");
     }
 
     // ── 30. Poly key pressure stops being a permanent floor ─────────────────
@@ -2394,6 +2433,103 @@ void caseTwoFingersOnOneKeyAreTwoKeysToTheArp()
 }
 
 
+// ── 58. The controller's between-note reset does not land on the last tail ──
+//      Section 4a's own capture: the Osmose sends CC74 = 0 immediately before
+//      201 of 203 note-ons. That reset belongs to the note about to be struck,
+//      and it arrives while the PREVIOUS note on that channel is still ringing.
+//      The hand-off in claimExprChannel cannot help -- it runs from noteOn, and
+//      by then the burst has already been applied. So every release tail was
+//      pulled back to rest a few milliseconds after the key came up: Y and Z to
+//      zero, and with the wheel in the burst a downward snap through the whole
+//      per-note range -- two octaves at the shipped default of 24 either way. A voice stops answering its member channel at its OWN
+//      key-up.
+void caseTheResetBurstDoesNotLandOnTheTail()
+{
+    std::printf ("[58] the controller's between-note reset misses the tail it follows\n");
+    Rig r;
+    r.cc (5, 74, 0);              // the slide's rest, as the note is struck
+    r.noteOn (5, 60);
+    r.flush();
+    r.cc (5, 74, 110);            // the finger leans in on all three axes
+    r.wheel (5, 8192 + 4096);
+    r.pressure (5, 100);
+    r.flush();
+
+    const auto* v = r.heldVoiceForNote (60);
+    check (v != nullptr, "the note sounds");
+    if (v == nullptr) return;
+    const float y = v->getTimbre();
+    const float x = v->getPerVoicePitchBend();
+    const float z = v->getAftertouch();
+    check (std::fabs (y) > 0.5f && std::fabs (x) > 1.0f && z > 0.5f,
+           "and is leaned into on X, Y and Z");
+
+    r.noteOff (5, 60);            // the key comes up; the tail rings on
+    r.flush();
+    checkNear (v->getTimbre(),             y, 1e-3f, "the tail keeps its slide");
+    checkNear (v->getPerVoicePitchBend(),  x, 1e-2f, "-- its bend");
+    checkNear (v->getAftertouch(),         z, 1e-3f, "-- and its pressure");
+
+    // The reset sweep for the NEXT note, on the same member channel, while this
+    // tail is still sounding. This is the order a real controller sends.
+    r.cc (5, 74, 0);
+    r.wheel (5, 8192);
+    r.pressure (5, 0);
+    r.flush();
+    checkNear (v->getTimbre(),            y, 1e-3f,
+               "and the reset meant for the next note does not reach it");
+    checkNear (v->getPerVoicePitchBend(), x, 1e-2f,
+               "-- no snap through the whole per-note range in an audible tail");
+    checkNear (v->getAftertouch(),        z, 1e-3f,
+               "-- and no collapse of its pressure");
+
+    // The same with the damper down: the pedal holds the note, but the FINGER is
+    // gone, and that is what decides. Stated because it is a behaviour change --
+    // before, a pedalled note went on following its member channel until the
+    // next note-on took the channel from it.
+    {
+        Rig d;
+        d.cc (5, 64, 127);            // damper down
+        d.cc (5, 74, 0);
+        d.noteOn (5, 62);
+        d.flush();
+        d.cc (5, 74, 110);
+        d.pressure (5, 100);
+        d.flush();
+        const auto* p = d.heldVoiceForNote (62);
+        check (p != nullptr, "the pedalled note sounds");
+        if (p != nullptr)
+        {
+            const float py = p->getTimbre();
+            const float pz = p->getAftertouch();
+            d.noteOff (5, 62);        // key up; the damper keeps it singing
+            d.flush();
+            d.cc (5, 74, 0);          // the reset for whatever comes next
+            d.pressure (5, 0);
+            d.flush();
+            checkNear (p->getTimbre(),     py, 1e-3f,
+                       "a note the damper holds keeps its slide once the key is up");
+            checkNear (p->getAftertouch(), pz, 1e-3f,
+                       "-- and its pressure: the pedal holds it, the finger decides it");
+        }
+    }
+
+    // The counter-check: the note struck AFTER the burst reads the burst, and a
+    // key still down goes on following its channel as it always did.
+    r.noteOn (5, 67);
+    r.flush();
+    const auto* n = r.heldVoiceForNote (67);
+    check (n != nullptr, "the next note sounds");
+    if (n != nullptr)
+    {
+        r.cc (5, 74, 127);
+        r.flush();
+        checkNear (n->getTimbre(), 1.0f, 1e-3f,
+                   "while the key now down follows the channel as it always did");
+    }
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2458,6 +2594,7 @@ int main()
     caseTheWheelDoesNotReachAReleasedNote();
     caseSeqNoteOffDoesNotEndAHeldKey();
     caseTwoFingersOnOneKeyAreTwoKeysToTheArp();
+    caseTheResetBurstDoesNotLandOnTheTail();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
