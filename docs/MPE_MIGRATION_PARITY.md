@@ -279,10 +279,10 @@ and 6; moving the per-note default off ±48 fails 2, 17, 19 and 26;
 putting the three expression setters back on `voiceMidiChannel_` fails 28 and
 29 with four assertions, and dropping the hand-off's held-key guard fails 33
 with four more — the chord on one channel tears apart, only the last-struck
-note still bending; leaving `polyPressureByNote` uncleared fails 30, and clearing it only on the
-note-off message fails 34;
-dropping the channel from the external note-off fails 31 and 32 — all four
-mutations measured, not argued;
+note still bending; leaving `polyPressureByNote` uncleared fails 30, and
+clearing it only on the note-off message fails 34; dropping the channel from
+the external note-off fails 31 and 32 — every one of these run, measured, and
+reverted, not argued;
 dropping the master-to-member mirror fails 9; dropping the RPN deselect fails 7.
 
 Writing it corrected this enumeration twice. Row 23, where the arpeggiator
