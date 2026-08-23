@@ -1820,6 +1820,39 @@ void caseResetAllControllersIsNotTheHandLeaving()
 }
 
 
+// ── 47. Aftertouch BEFORE the press in one buffer does not seed it ──────────
+//      The mirror of [43], from the same hoisting. If the ledger is kept in a
+//      pass that reads the whole buffer first, an aftertouch arriving before a
+//      note-on is judged against a key the pass has already recorded as down --
+//      so it writes a reading the press is then seeded from, and the lightest
+//      possible re-strike enters at the last press's peak. In a part with
+//      back-to-back notes of one pitch and a pressure lane, that is every
+//      repeat.
+void caseAftertouchBeforeThePressDoesNotSeedIt()
+{
+    std::printf ("[47] aftertouch before a press, in one buffer, does not seed it\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+
+    // One buffer, in the order a repeated note actually arrives.
+    r.polyPressure (1, 60, 127);
+    r.noteOff (1, 60);
+    r.noteOn (1, 60, 1);          // the lightest touch there is
+    r.flush();
+
+    const auto* fresh = r.heldVoiceForNote (60);
+    check (fresh != nullptr, "the re-struck note is sounding");
+    if (fresh == nullptr) return;
+    checkNear (fresh->getAftertouch(), 0.0f, 1e-3f,
+               "and it starts at its own pressure, not the last press's peak");
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 0.0f, 1e-3f,
+               "with nothing left over for the next one either");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1872,6 +1905,7 @@ int main()
     casePanicUnderAHeldChordLeavesNothingStanding();
     caseKeyUpOnAnUnheldChannelTakesNothing();
     caseResetAllControllersIsNotTheHandLeaving();
+    caseAftertouchBeforeThePressDoesNotSeedIt();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

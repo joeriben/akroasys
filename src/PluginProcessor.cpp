@@ -4748,11 +4748,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             {
                 if (ch16Encoder)
                     continue;
-                // This loop and its twin in the arp-off branch are the only
-                // places a raw external key event is seen in BOTH arp states,
-                // so they are where the key ledger is kept -- noteOff cannot
-                // do it, because an arp step note-off carries sourceId -1
-                // exactly like a key-up does.
+                // With the arp ON the note events are filtered out of the
+                // stream and never reach the walk, so this is the only place
+                // the key ledger can be kept -- noteOff cannot do it either,
+                // because an arp step note-off carries sourceId -1 exactly
+                // like a key-up. It is therefore buffer-granular here, which
+                // costs nothing that matters: the arp plays at its own step
+                // times, not at the offsets these events carry.
                 voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
                 arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                    /*sourceId=*/-1, ch);
@@ -4846,21 +4848,21 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 // this guard a ch16 note-off evicts a real held key of that number.
                 if (dawModeActive_.load(std::memory_order_relaxed) && ch == 16)
                     continue;
+                // No key ledger here. This loop runs over the WHOLE buffer
+                // before a sample of it is walked, and the ledger decides what
+                // an aftertouch message may write -- so keeping it here answers
+                // with the state at the END of the buffer for messages that
+                // arrive in the middle of it. Wrong in both directions: a key
+                // already up accepts (the release-buffer case), and a key not
+                // yet down accepts into a reading the press is about to be
+                // seeded from. With the arp off the note events reach the
+                // sample-accurate walk below, so the walk keeps the ledger and
+                // every message is judged against the state at its own instant.
                 if (msg.isNoteOn())
-                {
-                    // Same ledger as in the arp-on branch above. This loop only
-                    // observes -- the note itself reaches the voices later in
-                    // the block and reads the latch when it is seeded, so the
-                    // order here is the one that matters.
-                    voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
                     arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                        /*sourceId=*/-1, ch);
-                }
                 else if (msg.isNoteOff())
-                {
                     arpeggiator.noteOff(msg.getNoteNumber());
-                    voiceManager.noteKeyUp(msg.getNoteNumber(), ch);
-                }
             }
         }
     }
@@ -5334,6 +5336,10 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     {
                         const int note = msg.getNoteNumber();
                         const float velocity = msg.getFloatVelocity();
+                        // Before the note is built: noteKeyDown starts this
+                        // pitch's pressure reading over, and noteOn is seeded
+                        // from it two lines down.
+                        voiceManager.noteKeyDown(note, channel);
                         lastMidiNote.store(note, std::memory_order_relaxed);
                         lastMidiVelocity.store(juce::roundToInt(velocity * 127.0f),
                                                std::memory_order_relaxed);
@@ -5352,6 +5358,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     }
                     else if (msg.isNoteOff())
                     {
+                        // Before the release: the reading closes with the key,
+                        // and noteOff's own scan is the second half of the test.
+                        voiceManager.noteKeyUp(msg.getNoteNumber(), channel);
                         voiceManager.noteOff(msg.getNoteNumber(), -1,
                                              /*forceRelease=*/false, /*mpeChannel=*/channel);
                         if (!voiceManager.hasActiveVoices())
