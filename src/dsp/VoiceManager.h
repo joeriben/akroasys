@@ -270,6 +270,33 @@ public:
      *  chord it is playing has to be readable all the same. */
     float pressureForHeldNote(int note) const { return pressureForNote(note); }
 
+    /** May a LIVE performance control -- the wheel, the breath, zone-wide or
+        poly pressure -- still move this voice's stored pressure?
+
+        Two kinds of voice, and the answer is different for each:
+          - a voice a HAND started follows only while that hand's key is down.
+            Once the key comes up the pressure is frozen at what the key left,
+            through release, damper and sostenuto alike.
+          - a voice with no hand behind it -- the sequencers', the arpeggiator's,
+            the drone's -- follows for its whole sounding life. Those notes never
+            had a finger to lose, and the wheel is the only thing that drives
+            them at all.
+
+        Written as ONE question because the previous form asked three proxies
+        (isReleasing, sustainedVoice, sostenutoReleasedVoice) that stand for "a
+        key came up" only when a key existed. sustainedVoice is set for every
+        caller with sourceId < 0 -- which is the step sequencer and the
+        arpeggiator as much as it is external MIDI -- so under the damper an
+        arpeggio froze at whatever the wheel last held, and with aftertouch ->
+        DCA the whole pedalled stack sat at full level with the wheel down. */
+    bool followsLivePressure(int i) const
+    {
+        const bool startedByAHand =
+            voiceMidiChannel_[static_cast<size_t>(i)] > 0
+            || voiceSourceId[static_cast<size_t>(i)] == kComputerKeyboardSourceId;
+        return ! startedByAHand || isKeyHeldVoice(i);
+    }
+
     /** Set voice limit at runtime (1=mono, 4/6/8/12/16). */
     void setVoiceLimit(int limit) { voiceLimit = juce::jlimit(1, MAX_VOICES, limit); }
     int getVoiceLimit() const { return voiceLimit; }

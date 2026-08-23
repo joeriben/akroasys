@@ -655,7 +655,15 @@ void VoiceManager::setPolyPressure(int note, float pressure, int sourceId)
         auto& v = voices[static_cast<size_t>(i)];
         const bool sourceMatches = sourceId < 0
                                 || voiceSourceId[static_cast<size_t>(i)] == sourceId;
-        if (v.isActive() && v.getCurrentNote() == note && sourceMatches)
+        // The same boundary refreshPerformancePressure draws, and it has to be
+        // drawn here too: poly aftertouch is a live performance control like the
+        // wheel, and this loop reached voices whose key was long up. Press hard,
+        // let go, press the same key again and lean on it lightly, and the first
+        // note's decaying tail dropped to the new light value in a single block
+        // -- a click, not a fade. Under the damper the pedalled voice did the
+        // same. The wheel path was closed and this one was not.
+        if (v.isActive() && v.getCurrentNote() == note && sourceMatches
+            && followsLivePressure(i))
             v.setAftertouch(pressureForVoice(i));
     }
 }
@@ -1184,7 +1192,14 @@ void VoiceManager::writeCsoundControls(CsoundEngine* const* engines, int numEngi
                         ? v.pitchBusRatioFromRawLfo(*modParams, lfo1Raw, lfo2Raw, lfo3Raw)
                         : 1.0f);
         c.velocity = v.getCurrentVelocity();
-        c.pressure = pressureForVoice(vi);
+        // The STORED pressure, not a fresh pressureForVoice(): every writer
+        // already stores through setAftertouch, so this is the same number the
+        // four internal engines read -- and recomputing it here re-opened the
+        // door the guard above closes. An orchestra saw a released note swell
+        // with the wheel and get cut off by a reset burst while the internal
+        // engines held it frozen: the same gesture behaving differently
+        // depending on which engine happened to be selected.
+        c.pressure = v.getAftertouch();
         // The `timb` channel a body reads is 0..1 and means "how far the player
         // has pushed Y", so it takes the UPWARD half of the signed travel. On a
         // controller whose Y rests at the bottom -- the Osmose, and every
@@ -1505,11 +1520,7 @@ void VoiceManager::refreshPerformancePressure()
     // thing that drives them. They follow it for their whole sounding life.
     for (int i = 0; i < MAX_VOICES; ++i)
     {
-        const auto& v = voices[static_cast<size_t>(i)];
-        if (! v.isActive() || v.isReleasing())
-            continue;
-        if (sustainedVoice[static_cast<size_t>(i)]
-            || sostenutoReleasedVoice[static_cast<size_t>(i)])
+        if (! voices[static_cast<size_t>(i)].isActive() || ! followsLivePressure(i))
             continue;
         voices[static_cast<size_t>(i)].setAftertouch(pressureForVoice(i));
     }

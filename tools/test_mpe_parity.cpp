@@ -2588,6 +2588,166 @@ void caseMonoSlideOntoANewChannelIsANewFinger()
 }
 
 
+
+// ── 60. The wheel drives notes nobody's finger is on ────────────────────────
+//      The release guard added in ff622065 asked three proxies -- isReleasing,
+//      sustainedVoice, sostenutoReleasedVoice -- for the one question "did a key
+//      come up". For a voice a hand started, those proxies answer it. For the
+//      sequencers', the arpeggiator's and the drone's notes there was never a
+//      key, and sustainedVoice is set for EVERY caller with sourceId < 0 -- the
+//      step sequencer and the arpeggiator as much as external MIDI. So with the
+//      damper down an arpeggio froze at whatever the wheel last held, and with
+//      aftertouch -> DCA the whole pedalled stack stood at full level while the
+//      wheel sat at zero. The commit's own rule said the opposite: those notes
+//      "follow it for their whole sounding life".
+void caseTheWheelDrivesNotesWithNoFingerOnThem()
+{
+    std::printf ("[60] the wheel drives notes nobody's finger is on\n");
+
+    auto arpUnderTheDamper = [] (Rig& r)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+            p->setValueNotifyingHost (p->convertTo0to1 (1.0f));    // Up
+        r.cc (1, 64, 127);                       // damper down
+        r.flush();
+        r.noteOn (2, 60); r.noteOn (3, 64); r.noteOn (4, 67);
+        r.run (60);                              // let the arpeggio churn
+    };
+
+    Rig r;
+    arpUnderTheDamper (r);
+
+    auto lowestSounding = [] (Rig& rig)
+    {
+        const auto& vm = rig.proc.getVoiceManager();
+        float lowest = 2.0f;
+        int   seen   = 0;
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+        {
+            const auto& v = vm.getVoice (i);
+            if (! v.isActive()) continue;
+            lowest = std::min (lowest, v.getAftertouch());
+            ++seen;
+        }
+        return seen == 0 ? std::make_pair (-1.0f, 0) : std::make_pair (lowest, seen);
+    };
+
+    r.cc (1, 1, 127);
+    r.flush();
+    auto up = lowestSounding (r);
+    check (up.second > 1, "the arpeggio is sounding on more than one voice");
+    checkNear (up.first, 1.0f, 1e-3f,
+               "every one of them follows the wheel up");
+
+    r.cc (1, 1, 0);
+    r.flush();
+    auto down = lowestSounding (r);
+    // The MAXIMUM, this time: a single voice left standing at 1.0 is the defect.
+    const auto& vm = r.proc.getVoiceManager();
+    float highest = 0.0f;
+    for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+        if (vm.getVoice (i).isActive())
+            highest = std::max (highest, vm.getVoice (i).getAftertouch());
+    check (down.second > 1, "and they are still sounding");
+    checkNear (highest, 0.0f, 1e-3f,
+               "and every one of them follows it back down -- none frozen by the pedal");
+
+    // The other side of the same predicate, so this cannot be satisfied by
+    // simply letting everything follow again: a HAND's key, under the same
+    // damper, still keeps what the finger left it.
+    Rig h;
+    h.cc (1, 64, 127);
+    h.flush();
+    h.noteOn (2, 72);
+    h.flush();
+    h.cc (2, 74, 64);                            // Y at rest, so Z is the only mover
+    h.pressure (2, 110);
+    h.flush();
+    const auto* pedalled = h.heldVoiceForNote (72);
+    check (pedalled != nullptr, "the hand's pedalled note sounds");
+    h.noteOff (2, 72);
+    h.flush();
+    h.noteOn (2, 72, 1);                         // re-press, which clears the latch
+    h.flush();
+    h.cc (1, 1, 127);
+    h.flush();
+    if (pedalled != nullptr)
+        checkNear (pedalled->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                   "while the hand's own pedalled note keeps what the finger left");
+}
+
+
+// ── 61. Poly aftertouch is a live control too ───────────────────────────────
+//      ff622065 closed this door for the wheel, the breath and zone-wide
+//      pressure and left it open for poly key pressure: setPolyPressure's voice
+//      loop matched on pitch and source and wrote every voice it found,
+//      released and pedal-held ones included. Same gesture, same number, other
+//      message type -- press hard, let go, press the same key again lightly,
+//      and the first note's decaying tail jumped down to the light value in one
+//      block. That is a click, not a fade.
+void casePolyAftertouchDoesNotReachAReleasedNote()
+{
+    std::printf ("[61] poly aftertouch does not reach a note whose key is up\n");
+
+    // Without the pedal: a tail, and a fresh press of the same pitch over it.
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 110);
+    r.flush();
+    const auto* first = r.heldVoiceForNote (60);
+    check (first != nullptr, "the note sounds");
+    if (first == nullptr) return;
+    checkNear (first->getAftertouch(), 110.0f / 127.0f, 1e-3f, "and is leaned into");
+
+    r.noteOff (1, 60);
+    r.flush();
+    r.noteOn (1, 60, 1);                        // the same key again, lightly
+    r.flush();
+    r.polyPressure (1, 60, 1);                  // and barely leaned on
+    r.flush();
+    checkNear (first->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "the decaying tail keeps what its own finger left it");
+    const auto* second = r.heldVoiceForNote (60);
+    check (second != nullptr && second != first, "and the fresh press is its own voice");
+    if (second != nullptr && second != first)
+        checkNear (second->getAftertouch(), 1.0f / 127.0f, 1e-3f,
+                   "which follows the light finger that is actually on it");
+
+    // With the pedal: the key comes up, the note sings on, and a re-press clears
+    // the note's latch so only the guard is left holding the pedalled voice.
+    Rig p;
+    p.cc (1, 64, 127);
+    p.noteOn (1, 67);
+    p.flush();
+    p.polyPressure (1, 67, 110);
+    p.flush();
+    const auto* pedalled = p.heldVoiceForNote (67);
+    check (pedalled != nullptr, "the pedalled note sounds");
+    p.noteOff (1, 67);
+    p.flush();
+    p.noteOn (1, 67, 1);
+    p.flush();
+    p.polyPressure (1, 67, 1);
+    p.flush();
+    if (pedalled != nullptr)
+        checkNear (pedalled->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                   "and a note the pedal holds keeps it against a light new finger");
+
+    // Still a gate: the key that IS down follows its own poly aftertouch.
+    Rig h;
+    h.noteOn (1, 72);
+    h.flush();
+    h.polyPressure (1, 72, 120);
+    h.flush();
+    const auto* held = h.heldVoiceForNote (72);
+    check (held != nullptr, "the held note sounds");
+    if (held != nullptr)
+        checkNear (held->getAftertouch(), 120.0f / 127.0f, 1e-3f,
+                   "and a key still down follows poly aftertouch as it always did");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2654,6 +2814,8 @@ int main()
     caseTwoFingersOnOneKeyAreTwoKeysToTheArp();
     caseTheResetBurstDoesNotLandOnTheTail();
     caseMonoSlideOntoANewChannelIsANewFinger();
+    caseTheWheelDrivesNotesWithNoFingerOnThem();
+    casePolyAftertouchDoesNotReachAReleasedNote();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
