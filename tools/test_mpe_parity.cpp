@@ -186,6 +186,16 @@ namespace
         void cc (int ch, int number, int value)
         { send (juce::MidiMessage::controllerEvent (ch, number, value)); }
 
+        // Positioned variants. Everything above lands at sample 0, which cannot
+        // express the one thing a release actually looks like: three messages
+        // inside one buffer, in an order the ledger has to respect.
+        void noteOnAt  (int ch, int note, int vel, int pos)
+        { midi.addEvent (juce::MidiMessage::noteOn (ch, note, (juce::uint8) vel), pos); }
+        void noteOffAt (int ch, int note, int pos)
+        { midi.addEvent (juce::MidiMessage::noteOff (ch, note), pos); }
+        void polyPressureAt (int ch, int note, int v7, int pos)
+        { midi.addEvent (juce::MidiMessage::aftertouchChange (ch, note, v7), pos); }
+
         // RPN as a controller actually transmits it: parameter select, then
         // data entry MSB.
         void rpn (int ch, int msb, int lsb, int dataMsb)
@@ -1983,6 +1993,39 @@ void casePanicUnownsTheNotesItCutOff()
 }
 
 
+// ── 51. The same, under the arpeggiator ─────────────────────────────────────
+//      [47]'s other half. With the arp on the note events are filtered out of
+//      the stream before the sample-accurate walk, so the key ledger is kept in
+//      a pass that reads the whole buffer first -- and the aftertouch is NOT
+//      filtered: it reaches the walk at its own offset and is judged against a
+//      ledger that already knows about a press two hundred samples later. The
+//      re-strike then enters at the previous press's peak and stays there for
+//      as long as the key is held, filter wide open or wherever the aftertouch
+//      page sends it. Six milliseconds at 256 samples, which a controller
+//      streaming pressure hits on a fast repeat.
+void caseAftertouchBeforeThePressUnderTheArp()
+{
+    std::printf ("[51] aftertouch before a press, under the arpeggiator\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+
+    // One buffer, in the order a fast repeat actually arrives.
+    r.polyPressureAt (1, 60, 127, 10);    // the dying end of the old press
+    r.noteOffAt      (1, 60,      100);
+    r.noteOnAt       (1, 60, 1,   200);   // the lightest re-strike there is
+    r.run (80);
+
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 0.0f, 1e-3f,
+               "the re-struck key reads its own pressure, not the last press's peak");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2039,6 +2082,7 @@ int main()
     caseGlidingStepTakesTheReadingWithIt();
     caseResetAllControllersDoesNotUnownASoundingNote();
     casePanicUnownsTheNotesItCutOff();
+    caseAftertouchBeforeThePressUnderTheArp();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

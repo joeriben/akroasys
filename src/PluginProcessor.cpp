@@ -4755,7 +4755,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 // like a key-up. It is therefore buffer-granular here, which
                 // costs nothing that matters: the arp plays at its own step
                 // times, not at the offsets these events carry.
-                voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
+                // Held back until after the walk -- see pendingKeyDowns_. The
+                // key-UP below is applied at once: shutting the gate early only
+                // ever refuses, which is the harmless direction.
+                if (numPendingKeyDowns_ < static_cast<int>(pendingKeyDowns_.size()))
+                    pendingKeyDowns_[static_cast<size_t>(numPendingKeyDowns_++)] =
+                        { static_cast<int16_t>(msg.getNoteNumber()),
+                          static_cast<int8_t>(ch) };
+                else
+                    voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
                 arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                    /*sourceId=*/-1, ch);
                 if (stepRecordArmed.load(std::memory_order_relaxed))
@@ -5693,6 +5701,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // THIS block, into the next one's renderPos (spec §3/D2 worked example).
         if (csoundActive)
             csoundLastWritePos_ -= numSamples;
+
+        // The arp-on key-downs held back above, now that every message in this
+        // buffer has been judged against the ledger as it stood at its instant.
+        for (int i = 0; i < numPendingKeyDowns_; ++i)
+            voiceManager.noteKeyDown(pendingKeyDowns_[static_cast<size_t>(i)].note,
+                                     pendingKeyDowns_[static_cast<size_t>(i)].channel);
+        numPendingKeyDowns_ = 0;
 
         lastTriggeredNote = voiceOut.lastTriggeredNote;
 

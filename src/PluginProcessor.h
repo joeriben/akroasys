@@ -1266,6 +1266,22 @@ private:
         return upper.isActive() && channel == upper.getMasterChannel();
     }
 
+    // Key-DOWNs seen while the arpeggiator is on, applied after the sample-
+    // accurate walk. With the arp on the note events are filtered out of the
+    // stream before that walk, so the key ledger has to be kept in a pass that
+    // reads the whole buffer first -- and the ledger is what decides whether an
+    // aftertouch message may write a reading. Applying a key-down in that pass
+    // opens the gate for aftertouch that arrived EARLIER in the same buffer,
+    // which is the tail of the PREVIOUS press: a re-strike then enters at that
+    // press's peak and stays there for as long as the key is held. Held back
+    // until after the walk, the gate stays shut for anything ahead of the
+    // press. That is the safe direction -- a refused message costs one reading
+    // and the controller sends the next a few milliseconds later, where letting
+    // a stale one through costs the whole note.
+    struct PendingKeyDown { int16_t note; int8_t channel; };
+    std::array<PendingKeyDown, 64> pendingKeyDowns_ {};
+    int numPendingKeyDowns_ = 0;
+
     // Edge-detection for arp-toggle note-off cleanup. When arp transitions
     // false→true while a sequencer is running, the seq's currently-sounding
     // note must be flushed before arp's filter starts swallowing noteOffs.
