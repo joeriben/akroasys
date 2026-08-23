@@ -39,7 +39,13 @@ public:
     // TAKING AWAY rather than a key being lifted — the arpeggiator switching on
     // over a held chord, where "the pedal is down, keep ringing" would leave the
     // raw chord drone under the arpeggio. Ordinary key-lifts leave it false.
-    void noteOff(int note, int sourceId = -1, bool forceRelease = false);
+    /** @param mpeChannel  1-16 = release only voices struck on THAT member
+                            channel; 0 (the default) = any, which is what every
+                            internal caller wants. Only the external-MIDI branch
+                            passes one: two keys of the same pitch on two member
+                            channels are two notes, and one key-up must not end
+                            both. */
+    void noteOff(int note, int sourceId = -1, bool forceRelease = false, int mpeChannel = 0);
     void allNotesOff();
     void setSustainPedal(bool down);
     void setSostenutoPedal(bool down);

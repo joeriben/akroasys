@@ -73,6 +73,7 @@ the new code keeps the old behaviour deliberately, and the reason is given.
 | 23 | An **arpeggiated** note is an internal note: channel 0, never MPE-tracked, whatever channel the key arrived on (`dsp/VoiceEvent.h:32-38`) | Unchanged |
 | 23a | Switching the arpeggiator **off** hands the still-held keys back **with their MPE channel intact** (`PluginProcessor.cpp:3851-3862`) | Unchanged — and the reason note IDs would have been expensive: while the arp is on it *consumes* the note-ons, so a note tracker would have had to be fed from a second place |
 | 24 | `voiceMidiChannel_` also discriminates origin: a step-seq slide must not continue a held external note | Unchanged — this is not MPE routing and must not be replaced by a note ID |
+| 24a | **New, 2026-08-23.** A key-up names its member channel. `noteOff` matched by pitch alone, so the same pitch held on two member channels — a second finger on a key another finger already holds, or a repeat rotated onto a fresh channel while the first is down — was ended by whichever key came up first, and the finger still down pointed at a voice already releasing. `mpeChannel` defaults to 0 = any, which is every internal caller and all of the previous behaviour; only the external branch passes one, and it matches the ORIGIN tag, because the key being lifted is the key that struck the voice. Corpus [32] |
 | 25 | A voice's MPE tag is cleared when it goes idle | **Split, 2026-08-23.** There are now two tags. `voiceMidiChannel_` is ORIGIN (row 24) and still falls only when the voice goes idle. `voiceExprChannel_` is EXPRESSION routing, and it falls on idle **or on hand-off**: when a new note is struck on a member channel, `claimExprChannel` strips that channel from every other voice. Without it a releasing or pedal-held voice kept the tag, and because an MPE controller reuses its member channels, the next key's pressure, bend and slide also drove the old, dying note — a released note swelling back up under AT→DCA. Poly-AT never showed it because it matches by note NUMBER, which is exactly why PolyAT mode behaved and MPE mode did not. The voice that loses the channel keeps its last expression, frozen. Corpus [28], [29] |
 | 26 | Expression is applied at the event's sample position within the block, not at block start | Unchanged — the feed sits inside the existing sample-accurate walk |
 | 27 | A note does not JUMP on Y because of a CC74 that preceded it, and starts unpressed | Preserved, by a different mechanism since 2026-08-23, and the row title is narrower than it was for that reason. It used to read "ignoring values received on that channel before the note", and the note did ignore them: it started at a fixed value. It now *adopts* the preceding value as its ORIGIN and starts at zero travel from there. `MPEInstrument` would have applied it as the note's initial VALUE, which is the jump this has always refused. Corpus [14] asserts the no-jump; what the old title claimed beyond that is gone, and [25] carries what replaced it |
@@ -257,7 +258,7 @@ decides: the read-out is the element that has to give.
 
 ## 5. The gate
 
-`tools/test_mpe_parity.cpp` is the frozen corpus: 107 assertions driven as raw
+`tools/test_mpe_parity.cpp` is the frozen corpus: 114 assertions driven as raw
 MIDI through the real `T5ynthProcessor::processBlock`, reading the result off
 the voices. It was written against the hand-written code and was green on it
 before the library was introduced — that is what makes it a record of the old
@@ -268,8 +269,9 @@ It is mutation-checked in both directions, because a suite that cannot fail
 certifies nothing: reinstating the pre-`03286a97` channel-16 bug fails cases 4
 and 6; moving the per-note default off ±48 fails 2, 17, 19 and 26;
 putting the three expression setters back on `voiceMidiChannel_` fails 28 and
-29 with four assertions; leaving `polyPressureByNote` uncleared fails 30 --
-both mutations measured, not argued;
+29 with four assertions; leaving `polyPressureByNote` uncleared fails 30;
+dropping the channel from the external note-off fails 31 and 32 — all four
+mutations measured, not argued;
 dropping the master-to-member mirror fails 9; dropping the RPN deselect fails 7.
 
 Writing it corrected this enumeration twice. Row 23, where the arpeggiator

@@ -5323,7 +5323,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     }
                     else if (msg.isNoteOff())
                     {
-                        voiceManager.noteOff(msg.getNoteNumber(), -1);
+                        voiceManager.noteOff(msg.getNoteNumber(), -1,
+                                             /*forceRelease=*/false, /*mpeChannel=*/channel);
                         if (!voiceManager.hasActiveVoices())
                             lastMidiNoteOn.store(false, std::memory_order_relaxed);
                         if (eventLogRecordingActive())

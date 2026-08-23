@@ -364,16 +364,30 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     updateGainTarget();
 }
 
-void VoiceManager::noteOff(int note, int sourceId, bool forceRelease)
+void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeChannel)
 {
     sourceId = sourceId >= 0 ? juce::jlimit(0, 15, sourceId) : -1;
+    // 0 or out of range = "any channel", which is every internal caller and the
+    // whole of today's behaviour. An external note-off names its member channel:
+    // the same pitch held on two of them is two notes -- an MPE controller does
+    // exactly that when a second finger lands on a key another finger is already
+    // holding, or when a repeated note is rotated onto a fresh channel while the
+    // first is still down. Matching by pitch alone released BOTH, and the finger
+    // still on the key was then pointing at a dying voice.
+    const bool anyChannel = mpeChannel < 1 || mpeChannel > 16;
     for (int i = 0; i < MAX_VOICES; ++i)
     {
         if (i == droneVoiceIndex) continue; // drone holds independent of MIDI noteOff
         auto& v = voices[static_cast<size_t>(i)];
         const bool sourceMatches = sourceId < 0
                                 || voiceSourceId[static_cast<size_t>(i)] == sourceId;
-        if (v.isActive() && !v.isReleasing() && v.getCurrentNote() == note && sourceMatches)
+        // ORIGIN, not the expression tag: the key that is being lifted is the
+        // key that struck the voice, whatever has since taken the channel over.
+        const bool channelMatches = anyChannel
+                                 || voiceMidiChannel_[static_cast<size_t>(i)]
+                                        == static_cast<int8_t>(mpeChannel);
+        if (v.isActive() && !v.isReleasing() && v.getCurrentNote() == note && sourceMatches
+            && channelMatches)
         {
             if (hasCurrentBlockParams_)
                 v.configureForBlock(applyPerformanceControllers(currentBlockParams_));

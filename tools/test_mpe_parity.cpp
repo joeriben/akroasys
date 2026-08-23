@@ -1229,6 +1229,71 @@ namespace
     }
 
 
+    // ── 31. Poly pressure survives while another voice still holds the pitch ─
+    //      The other half of case 30, and it only became reachable with the
+    //      channel-aware note-off below: until then one key-up released every
+    //      voice of that pitch, so there was never a second one left holding it.
+    void casePolyPressureSurvivesAHeldUnison()
+    {
+        std::printf ("[31] releasing one of two notes of the same pitch keeps the latch\n");
+        Rig r;
+        r.noteOn (5, 60);
+        r.noteOn (6, 60);            // same pitch, two fingers, two member channels
+        r.flush();
+        r.polyPressure (1, 60, 100);
+        r.flush();
+
+        r.noteOff (5, 60);           // one of them goes
+        r.flush();
+
+        const auto* stillDown = r.heldVoiceForNote (60);
+        check (stillDown != nullptr, "the other note of that pitch is still held");
+        if (stillDown == nullptr) return;
+        checkNear (stillDown->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                   "and it keeps the poly pressure that names its note number");
+    }
+
+    // ── 32. A key-up names its member channel ───────────────────────────────
+    //      noteOff matched by pitch alone, so the same note held on two member
+    //      channels -- a second finger on a key another finger already holds,
+    //      or a repeat rotated onto a fresh channel while the first is down --
+    //      was ended by whichever key came up first. The finger still on the
+    //      other key then pointed at a voice already in its release.
+    void caseNoteOffNamesItsChannel()
+    {
+        std::printf ("[32] a key-up on one member channel does not end the same pitch on another\n");
+        Rig r;
+        r.noteOn (5, 60);
+        r.noteOn (6, 60);            // same pitch, second finger, second channel
+        r.flush();
+        check (r.activeVoiceCount() >= 2, "both notes took a voice of their own");
+
+        r.noteOff (5, 60);
+        r.flush();
+
+        const auto* held = r.heldVoiceForNote (60);
+        check (held != nullptr, "the key still down is still held, not releasing");
+        if (held == nullptr) return;
+
+        // And it is still the CHANNEL 6 voice that answers to channel 6.
+        r.pressure (6, 90);
+        r.flush();
+        checkNear (held->getAftertouch(), 90.0f / 127.0f, 1e-3f,
+                   "and it still follows its own channel");
+
+        // The counter-check that keeps this from over-matching: an ordinary
+        // keyboard sends note-on and note-off on the same channel, and must
+        // still be able to end its own note.
+        Rig r2;
+        r2.noteOn (1, 62);
+        r2.flush();
+        check (r2.heldVoiceForNote (62) != nullptr, "a plain keyboard note sounds");
+        r2.noteOff (1, 62);
+        r2.flush();
+        check (r2.heldVoiceForNote (62) == nullptr,
+               "and its own note-off still releases it");
+    }
+
 }
 
 int main()
@@ -1267,6 +1332,8 @@ int main()
     caseMemberChannelHandsOver();
     caseMemberChannelHandsOverUnderSustain();
     casePolyPressureIsNotAPermanentFloor();
+    casePolyPressureSurvivesAHeldUnison();
+    caseNoteOffNamesItsChannel();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
