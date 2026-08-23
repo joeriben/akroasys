@@ -1432,9 +1432,31 @@ void VoiceManager::releaseSostenutoVoices()
 
 void VoiceManager::refreshPerformancePressure()
 {
+    // A voice whose KEY came up keeps the pressure that key left -- the same
+    // boundary the poly latch (noteOff) and the expression hand-off
+    // (claimExprChannel) already draw, and for the same reason: nothing about
+    // that note is being played any more, so nothing about it may still move.
+    // Without this, a wheel, a breath or a channel-pressure message rewrote the
+    // stored pressure of every sounding voice, released and pedal-held ones
+    // included: with aftertouch -> DCA, moving the wheel while a chord decays
+    // brought the whole decayed chord back at full level, and moving it after a
+    // hard press cut the ringing tail to silence in one block -- a click, not a
+    // fade. The bind path was fixed for exactly this and the release paths were
+    // not.
+    //
+    // Not narrowed to isKeyHeldVoice: the sequencers', the arpeggiator's and
+    // the drone's notes never had a finger to lose, and the wheel is the only
+    // thing that drives them. They follow it for their whole sounding life.
     for (int i = 0; i < MAX_VOICES; ++i)
-        if (voices[static_cast<size_t>(i)].isActive())
-            voices[static_cast<size_t>(i)].setAftertouch(pressureForVoice(i));
+    {
+        const auto& v = voices[static_cast<size_t>(i)];
+        if (! v.isActive() || v.isReleasing())
+            continue;
+        if (sustainedVoice[static_cast<size_t>(i)]
+            || sostenutoReleasedVoice[static_cast<size_t>(i)])
+            continue;
+        voices[static_cast<size_t>(i)].setAftertouch(pressureForVoice(i));
+    }
 }
 
 float VoiceManager::pressureForNote(int note) const

@@ -2177,6 +2177,84 @@ void caseNoteShorterThanOneBufferLeavesNoFinger()
 }
 
 
+// ── 55. The wheel does not reach back into a note whose key is up ──────────
+//      pressureForNote maxes poly aftertouch together with the mod wheel, the
+//      breath controller and channel pressure, and every one of those three
+//      rewrote the STORED pressure of every sounding voice when it moved --
+//      releasing ones and pedal-held ones with the rest. So a decayed chord
+//      came back at full level the moment the wheel was touched, and a ringing
+//      tail was cut to silence in one block. The rule the file states three
+//      times is that a voice whose key came up keeps what that key left; it was
+//      applied on the bind path and on the latch, and not here.
+void caseTheWheelDoesNotReachAReleasedNote()
+{
+    std::printf ("[55] a global pressure controller does not reach a note whose key is up\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.noteOn (1, 64);
+    r.flush();
+    r.polyPressure (1, 60, 110);
+    r.polyPressure (1, 64, 110);
+    r.flush();
+    const auto* a = r.heldVoiceForNote (60);
+    const auto* b = r.heldVoiceForNote (64);
+    check (a != nullptr && b != nullptr, "both notes sound");
+    if (a == nullptr || b == nullptr) return;
+    checkNear (a->getAftertouch(), 110.0f / 127.0f, 1e-3f, "and are leaned into");
+
+    r.noteOff (1, 60);
+    r.noteOff (1, 64);
+    r.flush();
+    r.cc (1, 1, 127);             // the wheel, while the chord is decaying
+    r.flush();
+    checkNear (a->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "the decaying chord keeps what the fingers left it");
+    checkNear (b->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "-- both of it");
+
+    r.cc (1, 1, 0);
+    r.flush();
+    checkNear (a->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+               "and the wheel coming back down does not cut the tail either");
+
+    // The same gesture over the damper: key up, pedal still holding.
+    Rig p;
+    p.cc (1, 64, 127);
+    p.noteOn (1, 67);
+    p.flush();
+    p.polyPressure (1, 67, 110);
+    p.flush();
+    const auto* pedalled = p.heldVoiceForNote (67);
+    check (pedalled != nullptr, "the pedalled note sounds");
+    p.noteOff (1, 67);
+    p.flush();
+    // The re-press matters and the case is worthless without it: it resets the
+    // note's LATCH, and while the latch stands it holds the pedalled voice up
+    // on its own, so the assertion below would pass whatever this function
+    // does. With the latch gone, only the guard is left holding it.
+    p.noteOn (1, 67, 1);
+    p.flush();
+    p.cc (1, 1, 1);               // the smallest wheel move there is
+    p.flush();
+    if (pedalled != nullptr)
+        checkNear (pedalled->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                   "and a note the pedal holds after the key came up keeps it too");
+
+    // The gate is still a gate: a key that IS down follows the wheel, and so
+    // does a note nobody's finger ever held.
+    Rig h;
+    h.noteOn (1, 72);
+    h.flush();
+    h.cc (1, 1, 127);
+    h.flush();
+    const auto* held = h.heldVoiceForNote (72);
+    check (held != nullptr, "the held note sounds");
+    if (held != nullptr)
+        checkNear (held->getAftertouch(), 1.0f, 1e-3f,
+                   "while a key still down follows the wheel as it always did");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2238,6 +2316,7 @@ int main()
     caseLegatoKeepsItsTimbreOrigin();
     caseArpReStrikeDoesNotInheritTheOldPeak();
     caseNoteShorterThanOneBufferLeavesNoFinger();
+    caseTheWheelDoesNotReachAReleasedNote();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
