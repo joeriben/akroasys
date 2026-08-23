@@ -477,6 +477,15 @@ void VoiceManager::allNotesOff()
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);
     resetPerformanceControllers();
+    // The tags, unconditionally -- which resetPerformanceControllers cannot do
+    // for us, because it also runs for CC 121, where nothing was un-owned. Here
+    // everything was. The voices are all in their release tail at this point,
+    // so they are still "active" and would otherwise keep their member channel
+    // for the whole of it: a panic's own dying notes going on obeying the hand,
+    // swelling, changing timbre and sliding up to four octaves, because an MPE
+    // controller streams X/Y/Z for as long as a finger rests on a key.
+    voiceMidiChannel_.fill(0);
+    voiceExprChannel_.fill(0);
 }
 
 void VoiceManager::setSustainPedal(bool down)

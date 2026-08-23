@@ -1947,6 +1947,42 @@ void caseResetAllControllersDoesNotUnownASoundingNote()
 }
 
 
+// ── 50. A panic un-owns the notes it cut off ────────────────────────────────
+//      [49]'s boundary. Reset All Controllers owns nothing and must leave a
+//      sounding note attached to its member channel; a panic has just un-owned
+//      everything. The two go through the same function, and at the moment it
+//      runs every voice is in its release tail -- still "active", so an
+//      is-it-sounding test keeps the tag for exactly the window that matters.
+//      An MPE controller streams X/Y/Z for as long as a finger rests on a key,
+//      and a DAW sends the panic on transport stop and on locate, with the
+//      hands still down.
+void casePanicUnownsTheNotesItCutOff()
+{
+    std::printf ("[50] a panic un-owns the notes it cut off\n");
+    Rig r;
+    r.noteOn (3, 60);
+    r.flush();
+    r.pressure (3, 100);
+    r.flush();
+    const auto* v = r.voiceForNote (60);
+    check (v != nullptr, "the note is sounding on its member channel");
+    if (v == nullptr) return;
+
+    r.cc (1, 123, 0);             // all notes off
+    r.flush();
+    check (v->isActive(), "and is in its release tail after the panic");
+
+    r.pressure (3, 127);
+    r.wheel (3, 16383);
+    r.cc (3, 74, 127);
+    r.flush();
+    checkNear (v->getAftertouch(), 0.0f, 1e-3f,
+               "the tail does not swell to a hand still on the key");
+    checkNear (v->getPerVoicePitchBend(), 0.0f, 1e-4f, "does not slide");
+    checkNear (v->getTimbre(), 0.0f, 1e-4f, "and does not change its timbre");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2002,6 +2038,7 @@ int main()
     caseAftertouchBeforeThePressDoesNotSeedIt();
     caseGlidingStepTakesTheReadingWithIt();
     caseResetAllControllersDoesNotUnownASoundingNote();
+    casePanicUnownsTheNotesItCutOff();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
