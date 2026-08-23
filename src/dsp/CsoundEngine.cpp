@@ -972,7 +972,7 @@ bool CsoundEngine::prepare (double sampleRate, int maxBlockSize, const char* orc
         impl->setNamedChannel("freq", v, freq);
         impl->setNamedChannel("vel",  v, 0.8);
         impl->setNamedChannel("pres", v, 0.0);
-        impl->setNamedChannel("timb", v, 0.5);
+        impl->setNamedChannel("timb", v, 0.0);
         impl->setNamedChannel("trig", v, 1.0);
     }
     // Warm-up durations are in SECONDS, so the block counts follow the rate
@@ -1027,9 +1027,11 @@ bool CsoundEngine::prepare (double sampleRate, int maxBlockSize, const char* orc
         impl->setNamedChannel("freq", 1, kLevelMeasureFreqHz);
         impl->setNamedChannel("vel",  1, 1.0);
         impl->setNamedChannel("pres", 1, 0.0);
-        // 64/127, SynthVoice::kTimbreNeutral — what a note with no MPE timbre
-        // actually sends, so the measured level is the level of an ordinary note.
-        impl->setNamedChannel("timb", 1, 64.0 / 127.0);
+        // SynthVoice::kTimbreRest — what a note with no MPE timbre actually
+        // carries, so the measured level is the level of an ordinary note. It
+        // was 64/127 while CC 74 was read as a centre detent; CC 74 is now read
+        // absolute, so rest is 0.
+        impl->setNamedChannel("timb", 1, 0.0);
         impl->setNamedChannel("trig", 1, 1.0);
 
         const int  osF        = oversampleFactor;
@@ -1549,10 +1551,14 @@ std::vector<float> CsoundEngine::renderBareOscillator (const std::string& orches
         return {};
     }
 
-    // Neutral performance controls: mid velocity, no pressure, mid timbre — the
-    // probe asks what the ORCHESTRA sounds like, not what a performance does to it.
+    // Performance controls AT REST: mid velocity, no pressure, timbre at rest —
+    // the probe asks what the ORCHESTRA sounds like, not what a performance does
+    // to it. `timb` is 0.0 and not 0.5 because 0.0 is what an untouched note
+    // publishes: MPE's Y axis (CC74) rests at zero, measured on the Osmose, and
+    // the bridge sends SynthVoice::getTimbre() straight through. Half-scale here
+    // would probe a Y position no untouched note produces.
     *gate = (MYFLT) 1.0;  *freq = (MYFLT) freqHz;  *vel  = (MYFLT) 0.85;
-    *pres = (MYFLT) 0.0;  *timb = (MYFLT) 0.5;     *trig = (MYFLT) 1.0;
+    *pres = (MYFLT) 0.0;  *timb = (MYFLT) 0.0;     *trig = (MYFLT) 1.0;
 
     const long totalBlocks = (long) std::llround(seconds * sampleRate / (double) kKsmps);
     const long gateOffBlk  = (long) std::llround(gateOffSeconds * sampleRate / (double) kKsmps);

@@ -2886,8 +2886,17 @@ def perform_check(orchestra):
 # `kvel` are offered to the author under AVAILABLE IN SCOPE). At zero, `ktimb`
 # multiplies whatever it touches to nothing, and a knob behind it renders
 # identically at every position: measured, a `warble` scaled by `ktimb` was taken
-# off the panel while it worked perfectly in the plugin, where timbre RESTS at
-# 64/127 (`SynthVoice.h`, kTimbreNeutral) and never at 0.
+# off the panel while it worked perfectly in the plugin.
+#
+# That measurement was made when the plugin's timbre rested at 64/127. It does
+# not any more: MPE's Y axis is an absolute travel from rest, measured 0 at rest
+# on the Osmose, so `SynthVoice::kTimbreRest` is 0.0 and the first point follows
+# it (2026-08-23). Which puts point one back on the value that makes a
+# ktimb-scaled knob look dead — deliberately, because that IS where the player
+# finds the instrument before touching anything, and because the rule below is
+# BOTH points: point two sits at the top of the timbre travel and catches every
+# knob of that kind. What would be wrong is probing a Y position no untouched
+# note produces and calling the result the plugin's behaviour.
 #
 # So: the plugin's own resting values, and then a SECOND point, because one
 # operating point can only ever say "dead here". The second is a different
@@ -2903,7 +2912,7 @@ def perform_check(orchestra):
 # for an axis that takes its time (`ring` runs to 5.5 s).
 _KNOB_POINTS = (
     {"secs": 4.0, "freq": 220.0, "vel": 0.80, "pres": 0.0,
-     "timb": 64.0 / 127.0, "voice": 1},
+     "timb": 0.0, "voice": 1},
     {"secs": 8.0, "freq": 880.0, "vel": 0.35, "pres": 0.7,
      "timb": 1.0, "voice": 5},
 )
