@@ -423,25 +423,43 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
 void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeChannel)
 {
     sourceId = sourceId >= 0 ? juce::jlimit(0, 15, sourceId) : -1;
-    // 0 or out of range = "any channel", which is every internal caller and the
-    // whole of today's behaviour. An external note-off names its member channel:
-    // the same pitch held on two of them is two notes -- an MPE controller does
-    // exactly that when a second finger lands on a key another finger is already
-    // holding, or when a repeated note is rotated onto a fresh channel while the
-    // first is still down. Matching by pitch alone released BOTH, and the finger
-    // still on the key was then pointing at a dying voice.
-    const bool anyChannel = mpeChannel < 1 || mpeChannel > 16;
+    // An external note-off names its member channel: the same pitch held on two
+    // of them is two notes -- an MPE controller does exactly that when a second
+    // finger lands on a key another finger is already holding, or when a
+    // repeated note is rotated onto a fresh channel while the first is still
+    // down. Matching by pitch alone released BOTH, and the finger still on the
+    // key was then pointing at a dying voice. 0 is not a wildcard: it is the
+    // origin every internal note carries.
+    // Origin, filed exactly as noteOn files it: 0 for everything a sequencer or
+    // the arpeggiator plays, 1-16 for a note an external key struck.
+    const int8_t effectiveMidiChannel =
+        (mpeChannel >= 1 && mpeChannel <= 16) ? static_cast<int8_t>(mpeChannel) : 0;
     for (int i = 0; i < MAX_VOICES; ++i)
     {
         if (i == droneVoiceIndex) continue; // drone holds independent of MIDI noteOff
         auto& v = voices[static_cast<size_t>(i)];
-        const bool sourceMatches = sourceId < 0
-                                || voiceSourceId[static_cast<size_t>(i)] == sourceId;
+        // Same form as the bind branch, which says why: the sourceId<0 bucket
+        // conflates the step sequencer and the arpeggiator with external MIDI,
+        // because all three pass -1. `sourceId < 0` as a WILDCARD matched every
+        // voice instead -- so a step or arp note-off ended any voice of that
+        // pitch, including a key the player was holding. Measured: hold C4,
+        // start the sequencer, and the note is cut the first time the pattern
+        // reaches that pitch, 0.05 s at 240 BPM, with the finger still down.
+        // With the damper down it did not cut the voice but marked it sustained,
+        // which is worse: isKeyHeldVoice then reads false under a hand that
+        // never moved, claimExprChannel is free to strip that voice's member
+        // channel, and lifting the pedal releases a key that was never lifted.
+        const bool sourceMatches = sourceId >= 0
+            ? voiceSourceId[static_cast<size_t>(i)] == sourceId
+            : voiceSourceId[static_cast<size_t>(i)] < 0;
         // ORIGIN, not the expression tag: the key that is being lifted is the
         // key that struck the voice, whatever has since taken the channel over.
-        const bool channelMatches = anyChannel
-                                 || voiceMidiChannel_[static_cast<size_t>(i)]
-                                        == static_cast<int8_t>(mpeChannel);
+        // It is what separates the two halves of that -1 bucket, and it is now
+        // required in both directions -- an internal note-off ends internal
+        // notes and nothing else. Every caller that means an external key
+        // therefore has to name its channel, and all of them do.
+        const bool channelMatches = voiceMidiChannel_[static_cast<size_t>(i)]
+                                        == effectiveMidiChannel;
         if (v.isActive() && !v.isReleasing() && v.getCurrentNote() == note && sourceMatches
             && channelMatches)
         {

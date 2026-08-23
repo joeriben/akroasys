@@ -2255,6 +2255,145 @@ void caseTheWheelDoesNotReachAReleasedNote()
 }
 
 
+// ── 56. A step-sequencer note-off does not end a key the player is holding ──
+//      Every internal note event -- the step sequencer's and the arpeggiator's
+//      -- carries sourceId -1, and so does external MIDI. noteOff read that -1
+//      as a WILDCARD, matching every voice of the pitch whatever struck it. So
+//      holding a note and starting the sequencer cut that note the first time
+//      the pattern reached its pitch, with the finger still down. Under the
+//      damper it did not cut the voice but marked it sustained, which is worse:
+//      isKeyHeldVoice then reads false under a hand that never moved, the
+//      Cache/Snap travellers stop seeing the hand, claimExprChannel is free to
+//      strip that voice's member channel, and lifting the pedal releases a key
+//      nobody lifted. Origin is what separates the two halves of that bucket.
+void caseSeqNoteOffDoesNotEndAHeldKey()
+{
+    std::printf ("[56] a sequencer note-off does not end a key the player is holding\n");
+    auto fixture = [] (Rig& r, float bpm)
+    {
+        auto set = [&r] (const char* pid, float v)
+        {
+            if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        set (PID::genSeqRunning, 0.0f);
+        r.run (2);
+        auto& seq = r.proc.getStepSequencer();
+        seq.setNumSteps (2);
+        seq.setStepNote (0, 60);          // the pattern walks over the held pitch
+        seq.setStepNote (1, 67);
+        seq.setStepEnabled (0, true);
+        seq.setStepEnabled (1, true);
+        seq.setStepBindMode (0, T5ynthStepSequencer::BindMode::Off);
+        seq.setStepBindMode (1, T5ynthStepSequencer::BindMode::Off);
+        set (PID::seqSteps, 2.0f);
+        set (PID::seqBpm, bpm);
+        set (PID::seqRunning, 1.0f);
+    };
+
+    {
+        Rig r;
+        r.noteOn (2, 60);                 // the hand, on a member channel
+        r.flush();
+        const auto* key = r.heldVoiceForNote (60);
+        check (key != nullptr, "the key sounds");
+        fixture (r, 200.0f);
+        r.run (400);                      // several passes over that pitch
+        // The pitch as well as the slot: a stolen and re-struck voice would
+        // satisfy isActive() && !isReleasing() while being the sequencer's.
+        if (key != nullptr)
+            check (key->isActive() && ! key->isReleasing() && key->getCurrentNote() == 60,
+                   "and is still held after the pattern has walked over it");
+        // And it is still the player's note, not merely a sounding one: it must
+        // still answer the channel its own key arrived on. That is what the
+        // sustained-marking version took away -- isKeyHeldVoice read false, and
+        // the next note on that channel was then free to take it over.
+        r.pressure (2, 100);
+        r.flush();
+        if (key != nullptr)
+            checkNear (key->getAftertouch(), 100.0f / 127.0f, 1e-3f,
+                       "-- and still answers its own member channel");
+    }
+
+    {
+        Rig r;
+        r.cc (1, 64, 127);                // damper down
+        r.noteOn (2, 60);
+        r.flush();
+        check (r.proc.getVoiceManager().getKeyHeldVoiceCount() == 1,
+               "with the damper down the key still reads as a key");
+        // Slow, and only two passes: with the damper down a sequencer note-off
+        // marks its OWN voice sustained rather than releasing it, so a long run
+        // fills the pool with held sequencer notes and steals the key's voice.
+        // That is the damper working, not this defect, and a case that let it
+        // happen would be measuring the wrong thing.
+        fixture (r, 40.0f);
+        r.run (160);
+        check (r.proc.getVoiceManager().getKeyHeldVoiceCount() >= 1,
+               "and it keeps reading as one while the pattern passes over it");
+    }
+
+    // The counter-check, so this cannot be bought by refusing everything: the
+    // sequencer's OWN note-offs must still end the sequencer's own notes.
+    {
+        Rig r;
+        fixture (r, 200.0f);
+        r.run (60);
+        const int sounding = r.activeVoiceCount();
+        check (sounding > 0, "the sequencer is sounding");
+        if (auto* p = r.proc.getValueTreeState().getParameter (PID::seqRunning))
+            p->setValueNotifyingHost (p->convertTo0to1 (0.0f));
+        r.run (400);
+        check (r.activeVoiceCount() == 0,
+               "and everything it played ends when it stops");
+    }
+}
+
+
+// ── 57. Two fingers on one key are two keys to the arpeggiator too ─────────
+//      Its held-key set was keyed by pitch alone, so the second finger never
+//      got an entry and the first key-up took the shared one away. Switching
+//      the arp off then handed back nothing for a key that was still pressed --
+//      silence under it until it was released and pressed again -- and
+//      switching the arp ON released only one of the two voices, leaving the
+//      other droning under the arpeggio.
+void caseTwoFingersOnOneKeyAreTwoKeysToTheArp()
+{
+    std::printf ("[57] two fingers on one key are two keys to the arpeggiator\n");
+    Rig r;
+    r.noteOn (2, 60);
+    r.noteOn (3, 60);             // the same key, a second finger, its own channel
+    r.flush();
+    check (r.activeVoiceCount() == 2, "two fingers, two voices");
+
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+    // The arp's on-edge releases the voices the keys were sounding, one per
+    // held key. Keyed by pitch alone it saw ONE key here and released one voice,
+    // and the other went on sounding under the arpeggio for as long as the key
+    // was down. Checked before the hand-back, because a drone left standing
+    // here would satisfy the hand-back assertion below all by itself.
+    check (r.proc.getVoiceManager().getKeyHeldVoiceCount() == 0,
+           "the arp takes over both of them -- neither drones under the arpeggio");
+
+    r.noteOff (2, 60);            // the first finger lifts; the second stays
+    r.run (40);
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // arp off again
+    r.run (40);
+
+    const auto* handed = r.heldVoiceForNote (60);
+    check (handed != nullptr,
+           "the key still down is handed back to the voices, not left silent");
+
+    r.noteOff (3, 60);
+    r.run (200);
+    check (r.heldVoiceForNote (60) == nullptr,
+           "and it ends when that finger finally lifts");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2317,6 +2456,8 @@ int main()
     caseArpReStrikeDoesNotInheritTheOldPeak();
     caseNoteShorterThanOneBufferLeavesNoFinger();
     caseTheWheelDoesNotReachAReleasedNote();
+    caseSeqNoteOffDoesNotEndAHeldKey();
+    caseTwoFingersOnOneKeyAreTwoKeysToTheArp();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

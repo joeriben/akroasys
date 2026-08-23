@@ -799,7 +799,7 @@ void T5ynthProcessor::endComputerKeyboardNote(int midiNote)
     const juce::ScopedLock sl(getCallbackLock());
 
     const int note = juce::jlimit(0, 127, midiNote);
-    arpeggiator.noteOff(note);
+    arpeggiator.noteOff(note, /*mpeChannel=*/0);
     voiceManager.noteKeyUp(note, /*midiChannel=*/0);
     // Unconditional: a no-op unless this key really started a direct voice (arp
     // off when it went down, or switched off while it was held).
@@ -4309,7 +4309,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // the sustain pedal down only MARKS the voice sustained and leaves it
         // ringing, which is exactly the drone this edge exists to prevent.
         for (const auto& heldKey : arpeggiator.getHeldKeys())
-            voiceManager.noteOff(heldKey.note, heldKey.sourceId, /*forceRelease=*/true);
+            voiceManager.noteOff(heldKey.note, heldKey.sourceId, /*forceRelease=*/true,
+                                 heldKey.mpeChannel);
     }
 
     // Arp true→false edge: the mirror image. Keys still down were feeding the arp
@@ -4321,11 +4322,14 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     //
     // Queued as internal events at offset 0, NOT called on voiceManager directly:
     // the arp still owes a note-off for its own sounding note, and the arp-off
-    // branch below pushes it at offset 0 too. That note-off carries strandId -1,
-    // which matches a voice of that pitch from ANY source — and with Octaves 1 the
-    // arp's note IS the held key, so a direct hand-back would be killed by it
-    // inside this same block. Going through the stream puts both under the sort's
-    // NoteOff-before-NoteOn tiebreak, which is exactly the order needed. The key's
+    // branch below pushes it at offset 0 too. That note-off is INTERNAL (strandId
+    // -1, channel 0) and with Octaves 1 the arp's note IS the held key, so the
+    // hand-back has to survive it inside this same block. Going through the
+    // stream puts both under the sort's NoteOff-before-NoteOn tiebreak, which is
+    // exactly the order needed — and since 2026-08-23 the origin test in noteOff
+    // holds it a second time, the handed-back key carrying its own channel while
+    // the arp's note-off names channel 0. It used to be the tiebreak alone: that
+    // note-off matched a voice of that pitch from ANY source. The key's
     // MPE channel rides along (VoiceEvent::mpeChannel) so an external key keeps its
     // per-note expression AND stays out of the internal channel-0 bucket that a
     // step-seq slide may hijack.
@@ -4777,7 +4781,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             {
                 if (ch16Encoder)
                     continue;
-                arpeggiator.noteOff(msg.getNoteNumber());
+                arpeggiator.noteOff(msg.getNoteNumber(), ch);
                 // The finger leaving is the ONLY thing that ends this note's
                 // pressure reading while the arp is on. The arp drops a lifted
                 // key from the pattern and never plays it again, so no note-off
@@ -4874,7 +4878,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                        /*sourceId=*/-1, ch);
                 else if (msg.isNoteOff())
-                    arpeggiator.noteOff(msg.getNoteNumber());
+                    arpeggiator.noteOff(msg.getNoteNumber(), ch);
             }
         }
     }
@@ -5321,7 +5325,11 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         }
                         else
                         {
-                            voiceManager.noteOff(ev.note, ev.strandId);
+                            // The channel rides along: it is what tells an
+                            // internal note-off from an external key's, and
+                            // both arrive here carrying strandId -1.
+                            voiceManager.noteOff(ev.note, ev.strandId,
+                                                 /*forceRelease=*/false, ev.mpeChannel);
                             if (!voiceManager.hasActiveVoices())
                                 lastMidiNoteOn.store(false, std::memory_order_relaxed);
                         }

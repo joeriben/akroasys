@@ -36,7 +36,7 @@ static void scenario(const char* label, int voiceLimit, float sustain,
     const int BETW=6; // blocks between events (~70ms)
     for (auto& e: evs){
         if (e.on) vm.noteOn(e.note,0.8f,e.bind,0.f,false,false,false,e.src,0.f,e.ch);
-        else      vm.noteOff(e.note,e.src);
+        else      vm.noteOff(e.note,e.src,false,e.ch);   // origin, not a wildcard
         render(vm,bp,BETW);
     }
     // Everything that was turned on has now been turned off. Let releases finish.

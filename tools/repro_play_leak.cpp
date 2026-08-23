@@ -74,7 +74,7 @@ static void playTest(const char* who, int chordSrc, bool extChannels)
     runBlocks(20);
 
     // Release every manual key the user pressed.
-    for(int k=0;k<4;++k){ vm.noteOff(chord[k],chordSrc); runBlocks(2); }
+    for(int k=0;k<4;++k){ vm.noteOff(chord[k],chordSrc,false,chCh(k)); runBlocks(2); }
     dump("chord released", vm);
     runBlocks(40);
     printf("   -> held after releasing all manual keys (seq still running): %d\n", heldCount(vm));

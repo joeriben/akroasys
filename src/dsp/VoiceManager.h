@@ -39,12 +39,17 @@ public:
     // TAKING AWAY rather than a key being lifted — the arpeggiator switching on
     // over a held chord, where "the pedal is down, keep ringing" would leave the
     // raw chord drone under the arpeggio. Ordinary key-lifts leave it false.
-    /** @param mpeChannel  1-16 = release only voices struck on THAT member
-                            channel; 0 (the default) = any, which is what every
-                            internal caller wants. Only the external-MIDI branch
-                            passes one: two keys of the same pitch on two member
-                            channels are two notes, and one key-up must not end
-                            both. */
+    /** @param mpeChannel  ORIGIN, filed exactly as noteOn files it: 1-16 = a note
+                            an external key struck on that member channel, and 0
+                            (the default) = an INTERNAL note, the sequencers' and
+                            the arpeggiator's. It is not a wildcard and 0 does not
+                            mean "any" -- a note-off ends a voice of its own origin
+                            and no other. Two keys of the same pitch on two member
+                            channels are two notes and one key-up must not end
+                            both; and a sequencer step reaching a pitch a hand is
+                            holding must not end the hand's note, which is what
+                            "any" used to do. Every caller that means an external
+                            key therefore has to name its channel. */
     void noteOff(int note, int sourceId = -1, bool forceRelease = false, int mpeChannel = 0);
     void allNotesOff();
     void setSustainPedal(bool down);

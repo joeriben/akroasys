@@ -62,11 +62,18 @@ public:
         int mpeChannel = 0;     // external MIDI channel (0 for internal sources)
     };
 
-    /** A key went down. Re-pressing a key that is already down only refreshes
-        its velocity — the pattern (and the running clock) stay put. */
+    /** A key went down. Identity is the pitch AND the channel it arrived on --
+        the same distinction the pressure ledger draws, and for the same reason:
+        two fingers on one key are two keys, while the same key re-sent on one
+        channel is one. Re-pressing a key that is already down only refreshes its
+        velocity — the pattern (and the running clock) stay put. */
     void noteOn(int midiNote, float velocity, int sourceId, int mpeChannel = 0);
-    /** A key came up. The arp stops when the last one lifts. */
-    void noteOff(int midiNote);
+    /** A key came up, named by pitch and channel. The arp stops when the last
+        one lifts. Keyed by pitch alone, the first of two fingers sharing a key
+        took the entry with it, and the arp then handed nothing back for a key
+        that was still down: silence under a pressed key until it was released
+        and pressed again. */
+    void noteOff(int midiNote, int mpeChannel);
     /** Every key up — panic, editor focus loss, replay takeover. */
     void allKeysUp();
     bool hasHeldKeys() const { return ! heldNotes.empty(); }
@@ -100,7 +107,9 @@ private:
 
     // Upper bounds so every rebuild stays inside reserved capacity: the audio
     // thread rebuilds the pattern and must never allocate.
-    static constexpr int MAX_HELD = 128;                 // one per MIDI note
+    // One per MIDI note was the old identity; the channel is part of it now, so
+    // this is a cap on fingers rather than on pitches. Far above ten either way.
+    static constexpr int MAX_HELD = 128;
     static constexpr int MAX_PATTERN = MAX_HELD * 4 * 2; // × octave range, × UpDown
 
     Mode mode = Mode::Up;

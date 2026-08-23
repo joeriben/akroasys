@@ -34,9 +34,12 @@ void T5ynthArpeggiator::noteOn(int midiNote, float velocity, int sourceId, int m
     const float v = juce::jlimit(0.0f, 1.0f, velocity);
 
     // Already down (key repeat, or a controller that re-sends note-on): refresh
-    // the velocity but leave the pattern and the running clock alone.
+    // the velocity but leave the pattern and the running clock alone. The
+    // channel is part of the test -- a second finger landing on a key another
+    // finger already holds arrives on its own member channel and is its own
+    // key, and only its own key-up may take it away.
     for (auto& h : heldNotes)
-        if (h.note == n)
+        if (h.note == n && h.mpeChannel == mpeChannel)
         {
             h.velocity = v;
             return;
@@ -52,12 +55,12 @@ void T5ynthArpeggiator::noteOn(int midiNote, float velocity, int sourceId, int m
     patternDirty = true;
 }
 
-void T5ynthArpeggiator::noteOff(int midiNote)
+void T5ynthArpeggiator::noteOff(int midiNote, int mpeChannel)
 {
     const int n = juce::jlimit(0, 127, midiNote);
     for (size_t i = 0; i < heldNotes.size(); ++i)
     {
-        if (heldNotes[i].note != n)
+        if (heldNotes[i].note != n || heldNotes[i].mpeChannel != mpeChannel)
             continue;
 
         heldNotes.erase(heldNotes.begin() + static_cast<std::ptrdiff_t>(i));
@@ -121,9 +124,14 @@ void T5ynthArpeggiator::rebuildPattern()
         srcCount = 1;
     }
 
+    // Two fingers on one key are two held keys and one PITCH: the arp plays the
+    // pattern, not the fingers, so a shared pitch appears once. heldNotes is
+    // sorted by note, so the duplicates are adjacent.
     for (int oct = 0; oct < octaveRange; ++oct)
         for (size_t i = 0; i < srcCount; ++i)
         {
+            if (i > 0 && src[i].note == src[i - 1].note)
+                continue;
             const int n = src[i].note + oct * 12;
             if (n > 127)
                 continue;                       // octave stack runs off the top
