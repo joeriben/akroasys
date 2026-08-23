@@ -64,7 +64,17 @@ namespace
 
     // MPE defaults the hand-written path starts from (PluginProcessor.h:947/954).
     constexpr float kDefaultMasterBendRange = 2.0f;
-    constexpr float kDefaultNoteBendRange   = 24.0f;
+    // 48, the spec's own default, and the corpus is not allowed to be
+    // regenerated from the implementation, so the accounting belongs here:
+    // this was 24 until 2026-08-23, on the belief that "48 over-bends a
+    // LinnStrument". Roger Linn Design's panel-settings page says the opposite
+    // -- the panel values "+/- 2, 3, 12 or 24 semitones" are ONE CHANNEL mode,
+    // and ChPerNote (its MPE mode) reads "Bend Range: 48 (This uses the hidden
+    // setting 'Any Bend Range')", reaching 96. So the reference controller
+    // ships at 48 and every device relying on the default was played at half
+    // the interval it meant. Deliberate change of default, BJ 2026-08-23; the
+    // MPE settings tab now owns the value for devices that transmit no RPN 0.
+    constexpr float kDefaultNoteBendRange   = 48.0f;
     // Zero travel -- what a voice reports before its Y has moved.
     //
     // This number moved twice, and the corpus is not allowed to be regenerated
@@ -218,10 +228,10 @@ namespace
         check (r.voiceForNote (64) != nullptr, "a note on channel 5 sounds");
     }
 
-    // ── 2. Per-note bend on a member channel, and the ±24 default ────────────
+    // ── 2. Per-note bend on a member channel, and the ±48 default ────────────
     void casePerNoteBend()
     {
-        std::printf ("[2] a member channel's wheel bends only its own note, at +-24 by default\n");
+        std::printf ("[2] a member channel's wheel bends only its own note, at +-48 by default\n");
         Rig r;
         r.noteOn (1, 60);
         r.noteOn (5, 64);

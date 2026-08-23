@@ -1139,7 +1139,23 @@ private:
     // members is what every host defaults to, it makes channel 16 a MEMBER
     // structurally, and it keeps a plain keyboard on channel 1 playing.
     static constexpr int kMpeDefaultMemberChannels = 15;
-    static constexpr int kMpePerNoteBendRange = 24;   // not the spec's 48: over-bends a LinnStrument
+    // The FALLBACK ranges: what applies until a controller transmits RPN 0.
+    // 48 and 2 are the MPE spec's own defaults, and the MPE settings tab lets a
+    // player override the per-note one for a device that transmits nothing.
+    //
+    // It was 24 here, with the comment "not the spec's 48: over-bends a
+    // LinnStrument". That is backwards, and it under-ranged every device that
+    // relied on the default. Roger Linn Design's panel-settings page: the four
+    // values on the panel ("+/- 2, 3, 12 or 24 semitones") belong to ONE CHANNEL
+    // mode, while ChPerNote -- the LinnStrument's MPE mode -- reads "Bend Range:
+    // 48 (This uses the hidden setting 'Any Bend Range')", and that hidden
+    // setting reaches 96. So 48 is not a range the reference controller cannot
+    // do; 48 is the range it ships in.
+    //
+    // Under-ranging is the quieter fault of the two, which is why it survived: a
+    // device that means 48 and is read at 24 plays every bend at half the
+    // interval it intends, in tune with itself and wrong against everything else.
+    static constexpr int kMpePerNoteBendRange = 48;
     static constexpr int kMpeMasterBendRange  = 2;
 
     // How much lateral lean fills the X axis as a MODULATION source, in
@@ -1159,19 +1175,19 @@ private:
     // a musical gesture rather than intonation.
     //
     // What that gives on the measured Osmose, stated rather than guessed: +/-171
-    // of the wheel against THIS synth's kMpePerNoteBendRange of 24 is +/-0.50
-    // semitones, so a full lean fills HALF the axis. Whether the device intends
-    // more is not knowable from the capture -- it transmitted no RPN 0 in 120 s,
-    // so its own assumed receiver range is unrecorded (at the MPE default of 48
-    // the same lean would be a full semitone and would fill the axis exactly).
-    // What is certain is the direction: 2.1% of the wheel became 50% of the
-    // axis. The MPE settings overlay will own this number; a constant until it
-    // exists, so that it exists in one place when it does.
-    static_assert (true, "");   // (kMpeXFullScaleSemitones is checked below)
+    // of the wheel against the fallback range of 48 is +/-1.00 semitones, so a
+    // full lean fills the axis exactly. Whether the device intends that is not
+    // knowable from the capture -- it transmitted no RPN 0 in 120 s, so its own
+    // assumed receiver range is unrecorded, and the MPE tab's diagnosis is what
+    // will say. What is certain is the direction: 2.1% of the wheel becomes
+    // 100% of the axis.
+    //
+    // This is the DEFAULT now, not the number: the MPE settings tab owns the
+    // value in force (mpeXFullScaleSemitonesInForce_).
     static constexpr float kMpeXFullScaleSemitones = 1.0f;
-    // Divided by, so it can never be zero. When the overlay makes it a
-    // parameter, the parameter's range takes this job: jlimit passes a NaN
-    // straight through both clamps and into the expression matrix.
+    // Divided by, so it can never be zero -- the settings tab clamps its own
+    // range for the same reason: jlimit passes a NaN straight through both
+    // clamps and into the expression matrix.
     static_assert (kMpeXFullScaleSemitones > 0.0f,
                    "kMpeXFullScaleSemitones is a divisor -- zero would make X NaN.");
 
@@ -1195,10 +1211,10 @@ private:
     //     assumes that, and a zone declaration would otherwise reset the range
     //     a player had already dialled in: an MCM carries no range of its own,
     //     but MPEZoneLayout writes the spec's defaults whenever one arrives.
-    //   - The per-note default is 24, not the spec's 48, because 48 over-bends
-    //     the reference controller -- a LinnStrument maxes at 24 even on
-    //     current firmware. SynthVoice still clamps to ±48, so a controller
-    //     that transmits more is honoured.
+    //   - The per-note default is the spec's 48 (see kMpePerNoteBendRange for
+    //     why it is not 24), and the MPE settings tab can move it for a device
+    //     that transmits no RPN 0. SynthVoice still clamps to ±48, so a
+    //     controller that transmits more is honoured up to that.
     int mpePerNoteBendRangeInForce_ = kMpePerNoteBendRange;
     int mpeMasterBendRangeInForce_  = kMpeMasterBendRange;
 

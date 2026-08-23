@@ -50,7 +50,7 @@ the new code keeps the old behaviour deliberately, and the reason is given.
 | 5 | A layout survives `prepareToPlay`, preset load, panic and Reset All Controllers | Preserve — the layout is a member and nothing resets it; it stays out of the preset |
 | 6 | RPN 0 on a member channel sets the per-note bend range | **Preserve** — the library *parses* it (`MidiRPNDetector`), the synth *stores* it. `MPEZoneLayout::processPitchbendRangeRpnMessage` would write it into the zone, where nothing here reads it, so the data byte that completes RPN 0 is not fed to the layout at all. That also keeps `updateMasterPitchbend`'s assertion (it range-checks the value already in the zone while assigning the new one unchecked, `juce_MPEZoneLayout.cpp:150-168`) off the audio thread. Not Release-observable — `jassert` compiles out — so no corpus case pins it; it is a debug-build hazard and a dead write, removed for both reasons |
 | 7 | RPN 0 on a **master** channel sets the master range **and mirrors it to the per-note range** (a LinnStrument transmits Bend Range only there) | **Preserve** — JUCE would set the master range alone. Without the mirror, a LinnStrument's member notes bend at the zone default instead of the range the player set |
-| 8 | The per-note range starts at ±24, not the spec's ±48 (a LinnStrument maxes at ±24, so ±48 over-bends it) | **Preserve** |
+| 8 | There is a per-note range in force before any controller transmits one | **Preserve** — but the NUMBER changed on 2026-08-23, deliberately. It was ±24, on the belief recorded here that "a LinnStrument maxes at ±24, so ±48 over-bends it". Roger Linn Design's panel-settings page says the reverse: the panel values ("+/- 2, 3, 12 or 24 semitones") are ONE CHANNEL mode, while ChPerNote — its MPE mode — reads "Bend Range: 48 (This uses the hidden setting 'Any Bend Range')" and reaches 96. The default is now the spec's ±48, and the MPE settings tab owns it for devices that transmit no RPN 0 |
 | 8a | There is ONE range pair for the whole instrument, and a zone declaration does not disturb it | **Preserve** — and this is where the library and the synth genuinely part company. `MPEZoneLayout` keeps a pair per zone and resets both to the spec's defaults on every zone declaration, because an MCM carries no range of its own. Reading the ranges back out of it would therefore reset a range the player had already dialled in, so the pair stays this synth's (`mpePerNoteBendRangeInForce_`, `mpeMasterBendRangeInForce_`) and only the layout and the parsing are the library's |
 | 9 | Master bend range starts at ±2 | **Preserve** — `kMpeMasterBendRange`, which is JUCE's default too, but the constant is this synth's for the reason in 8a |
 | 10 | Pitch wheel on ch1 is a **global** bend: it moves sequencer and arp voices as well, which have no MPE note at all | Unchanged |
@@ -192,13 +192,13 @@ ordinary playing), while a LinnStrument's slide crosses it many times over. So
 a target routed to X reads `bend semitones / kMpeXFullScaleSemitones`, clamped
 to ±1. One semitone, because it is the smallest unambiguously musical interval.
 What that gives on the measured Osmose, stated rather than guessed: ±171 of the
-wheel against this synth's `kMpePerNoteBendRange` of 24 is ±0.50 semitones, so a
-full lean fills HALF the axis. Whether the device intends more is not knowable
-from the capture — it transmitted no RPN 0 in 120 s, so its own assumed receiver
-range is unrecorded, and at the MPE default of 48 the same lean would be a whole
-semitone and would fill the axis exactly. What is certain is the direction:
-2.1 % of the wheel became 50 % of the axis. The MPE settings overlay will own
-that number. Corpus [26].
+wheel against the fallback range of 48 is ±1.00 semitones, so a full lean fills
+the axis exactly. Whether the device intends that is not knowable from the
+capture — it transmitted no RPN 0 in 120 s, so its own assumed receiver range is
+unrecorded, and the MPE tab's diagnosis is what says so on screen rather than in
+a comment. What is certain is the direction: 2.1 % of the wheel becomes 100 % of
+the axis. The MPE settings tab owns the value in force; the constant is only its
+default. Corpus [26].
 
 ## 5. The gate
 
@@ -211,7 +211,7 @@ could not simply be regenerated afterwards.
 
 It is mutation-checked in both directions, because a suite that cannot fail
 certifies nothing: reinstating the pre-`03286a97` channel-16 bug fails cases 4
-and 6; the spec's ±48 per-note range instead of ±24 fails 2, 17 and 19;
+and 6; moving the per-note default off ±48 fails 2, 17, 19 and 26;
 dropping the master-to-member mirror fails 9; dropping the RPN deselect fails 7.
 
 Writing it corrected this enumeration twice. Row 23, where the arpeggiator
