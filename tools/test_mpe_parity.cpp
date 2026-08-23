@@ -2026,6 +2026,61 @@ void caseAftertouchBeforeThePressUnderTheArp()
 }
 
 
+// ── 52. A gliding step's voice arrives at the pressure of its new pitch ─────
+//      [48] fixed the reading the line LEAVES behind. The voice itself kept the
+//      old pitch's value, frozen: the mono legato branch and the drone's glide
+//      both re-seed on arrival, the poly bind/glide branch did not. So the line
+//      stayed leaned-into for the rest of its life -- and then collapsed in one
+//      step the moment any wheel, breath or channel-pressure message moved and
+//      the pressure was recomputed. On aftertouch -> DCA that step is full
+//      level to silence.
+void caseGlidingStepArrivesAtItsNewPitchesPressure()
+{
+    std::printf ("[52] a gliding step's voice arrives at the pressure of its new pitch\n");
+    Rig r;
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    set (PID::genSeqRunning, 0.0f);
+    r.run (2);
+    auto& seq = r.proc.getStepSequencer();
+    seq.setNumSteps (2);
+    seq.setStepNote (0, 60);
+    seq.setStepNote (1, 67);
+    seq.setStepEnabled (0, true);
+    seq.setStepEnabled (1, true);
+    seq.setStepBindMode (0, T5ynthStepSequencer::BindMode::Glide);
+    seq.setStepBindMode (1, T5ynthStepSequencer::BindMode::Off);
+    set (PID::seqSteps, 2.0f);
+    set (PID::seqBpm, 40.0f);
+    set (PID::seqRunning, 1.0f);
+    r.run (10);
+
+    r.noteOn (1, 60);             // the hand touches the pitch the line is on
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    r.noteOff (1, 60);            // and lifts
+    r.flush();
+
+    r.run (100);                  // the line glides to 67
+    const auto* glided = r.heldVoiceForNote (67);
+    check (glided != nullptr, "the line is sounding its second note");
+    if (glided == nullptr) { set (PID::seqRunning, 0.0f); r.run (5); return; }
+    checkNear (glided->getAftertouch(), 0.0f, 1e-3f,
+               "and arrives at what the new pitch is carrying, which is nothing");
+
+    r.pressure (1, 0);            // anything that recomputes pressure...
+    r.flush();
+    checkNear (glided->getAftertouch(), 0.0f, 1e-3f,
+               "-- with no step to fall, because it was never above it");
+    set (PID::seqRunning, 0.0f);
+    r.run (5);
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2083,6 +2138,7 @@ int main()
     caseResetAllControllersDoesNotUnownASoundingNote();
     casePanicUnownsTheNotesItCutOff();
     caseAftertouchBeforeThePressUnderTheArp();
+    caseGlidingStepArrivesAtItsNewPitchesPressure();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

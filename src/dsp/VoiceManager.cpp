@@ -311,6 +311,14 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             // pitch; when the step glides away, nothing was asking any more.
             const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
             clearPolyPressureIfReleased(displacedNote, newest);
+            // And the voice takes the pressure of the pitch it ARRIVES on, the
+            // way the mono legato branch and the drone's glide both do. Without
+            // it the voice kept the reading of the pitch it left, frozen, while
+            // everything that computes its pressure said zero -- so it stayed
+            // leaned-into for the rest of its life and then collapsed in one
+            // step the moment any wheel, breath or channel-pressure message
+            // moved. On aftertouch->DCA that step is full level to silence.
+            v.setAftertouch(pressureForNote(note));
             v.glideToNote(note, glideMs);
             // Continued voice is now the newest: keeps it from becoming the steal
             // victim mid-slide, and makes the next same-source bind find it.
