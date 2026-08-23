@@ -53,6 +53,12 @@
     X(aftertouchAmtCache)       X(aftertouchAmtSnap) \
     X(aftertouchAmtCutoff)      X(aftertouchAmtResonance)   X(aftertouchAmtScan) \
     X(aftertouchAmtDca)         X(aftertouchAmtPitch)       X(aftertouchAmtNoiseLevel) \
+    X(exprSrcLfo1Depth)         X(exprSrcLfo2Depth)         X(exprSrcLfo3Depth) \
+    X(exprSrcEnv1Sustain)       X(exprSrcEnv2Sustain)       X(exprSrcEnv3Sustain) \
+    X(exprSrcEnv4Sustain)       X(exprSrcEnv5Sustain) \
+    X(exprSrcCache)             X(exprSrcSnap) \
+    X(exprSrcCutoff)            X(exprSrcResonance)         X(exprSrcScan) \
+    X(exprSrcDca)               X(exprSrcPitch)             X(exprSrcNoiseLevel) \
     X(driftEnabled)     X(driftRegen)     X(driftCrossfade) \
     X(drift1Rate)     X(drift1Depth)     X(drift1Target)     X(drift1Wave) \
     X(drift2Rate)     X(drift2Depth)     X(drift2Target)     X(drift2Wave) \

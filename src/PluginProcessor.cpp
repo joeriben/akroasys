@@ -79,6 +79,29 @@ const char* const kAftertouchAmtPid[AftertouchTarget::kCount] = {
     PID::aftertouchAmtSnap,               // Snap
 };
 
+// The matching expression-SOURCE param ids, same AftertouchTarget order and the
+// same [0]=None hole. Kept beside the amounts because the two are read together
+// everywhere: a routing is an amount AND a source.
+const char* const kExprSrcPid[AftertouchTarget::kCount] = {
+    nullptr,                              // None
+    PID::exprSrcLfo1Depth,                // LFO1Depth
+    PID::exprSrcLfo2Depth,                // LFO2Depth
+    PID::exprSrcLfo3Depth,                // LFO3Depth
+    PID::exprSrcEnv1Sustain,              // Env1Sustain
+    PID::exprSrcEnv2Sustain,              // Env2Sustain
+    PID::exprSrcEnv3Sustain,              // Env3Sustain
+    PID::exprSrcCutoff,                   // Cutoff
+    PID::exprSrcResonance,                // Resonance
+    PID::exprSrcScan,                     // Scan
+    PID::exprSrcDca,                      // DCA
+    PID::exprSrcPitch,                    // Pitch
+    PID::exprSrcNoiseLevel,               // NoiseLevel
+    PID::exprSrcEnv4Sustain,              // Env4Sustain
+    PID::exprSrcEnv5Sustain,              // Env5Sustain
+    PID::exprSrcCache,                    // Cache
+    PID::exprSrcSnap,                     // Snap
+};
+
 /** The authored instrument's twelve knob positions, and its three layer levels.
     Two lists, not one, because the two are owned by different people: a knob is
     the AUTHOR's — it means what the instrument says it means, and baking a new
@@ -1723,6 +1746,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout T5ynthProcessor::createParam
             params.push_back(std::make_unique<juce::AudioParameterFloat>(
                 juce::ParameterID{ a.pid, 1 }, a.name,
                 juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f), 0.0f));
+
+        // One source per target, beside its amount. Three rows start wired
+        // (ExprSource::defaultFor): DCA on Z, Cutoff and Scan on Y. The other
+        // thirteen start on None -- a fresh patch says what it is instead of
+        // arming fourteen depths at once, and the column reads at a glance.
+        // A default per row rather than one for the whole column because the
+        // column is sixteen different things, and "which axis should this be on"
+        // has sixteen answers, thirteen of them "none yet".
+        static_assert(sizeof(atTargets) / sizeof(atTargets[0])
+                          == AftertouchTarget::kCount - 1,
+                      "Every target but None needs an amount AND a source.");
+        for (int t = 1; t < AftertouchTarget::kCount; ++t)
+            params.push_back(std::make_unique<juce::AudioParameterChoice>(
+                juce::ParameterID{ kExprSrcPid[t], 1 },
+                juce::String("Expr Source ") + AftertouchTarget::kEntries[t].label,
+                toChoices(ExprSource::kEntries), ExprSource::defaultFor(t)));
     }
 
     // Drift LFO
@@ -3875,6 +3914,28 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         setAmt(paramCache.aftertouchAmtEnv5Sustain, AftertouchTarget::Env5Sustain);
         setAmt(paramCache.aftertouchAmtCache,        AftertouchTarget::Cache);
         setAmt(paramCache.aftertouchAmtSnap,         AftertouchTarget::Snap);
+
+        auto setSrc = [&](const std::atomic<float>* p, int target) {
+            bp.aftertouchTargetSrc[static_cast<size_t>(target)] =
+                juce::jlimit(0, ExprSource::kCount - 1,
+                             static_cast<int>(p->load()));
+        };
+        setSrc(paramCache.exprSrcLfo1Depth,   AftertouchTarget::LFO1Depth);
+        setSrc(paramCache.exprSrcLfo2Depth,   AftertouchTarget::LFO2Depth);
+        setSrc(paramCache.exprSrcLfo3Depth,   AftertouchTarget::LFO3Depth);
+        setSrc(paramCache.exprSrcEnv1Sustain, AftertouchTarget::Env1Sustain);
+        setSrc(paramCache.exprSrcEnv2Sustain, AftertouchTarget::Env2Sustain);
+        setSrc(paramCache.exprSrcEnv3Sustain, AftertouchTarget::Env3Sustain);
+        setSrc(paramCache.exprSrcCutoff,      AftertouchTarget::Cutoff);
+        setSrc(paramCache.exprSrcResonance,   AftertouchTarget::Resonance);
+        setSrc(paramCache.exprSrcScan,        AftertouchTarget::Scan);
+        setSrc(paramCache.exprSrcDca,         AftertouchTarget::DCA);
+        setSrc(paramCache.exprSrcPitch,       AftertouchTarget::Pitch);
+        setSrc(paramCache.exprSrcNoiseLevel,  AftertouchTarget::NoiseLevel);
+        setSrc(paramCache.exprSrcEnv4Sustain, AftertouchTarget::Env4Sustain);
+        setSrc(paramCache.exprSrcEnv5Sustain, AftertouchTarget::Env5Sustain);
+        setSrc(paramCache.exprSrcCache,       AftertouchTarget::Cache);
+        setSrc(paramCache.exprSrcSnap,        AftertouchTarget::Snap);
     }
 
     // The two targets that move the instrument rather than a voice. Resolved
@@ -5121,8 +5182,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         }
                         else
                         {
+                            // `centered` rides along untouched as MPE X's own
+                            // value: it is the wheel travel, independent of the
+                            // bend range, which is what a modulation target can
+                            // use. The semitones are that travel times the range.
                             voiceManager.setPerVoicePitchBend(pbChannel,
-                                centered * static_cast<float>(mpePerNoteBendRangeInForce_));
+                                centered * static_cast<float>(mpePerNoteBendRangeInForce_),
+                                centered);
                         }
                     }
                     else if (msg.isAllNotesOff() || msg.isAllSoundOff())
@@ -7115,7 +7181,13 @@ int traversalZone(float pressure, float amount, int zones, int currentZone)
     // The bar's amount is a DEPTH here as it is everywhere else in this module:
     // it says how far through the cache full pressure carries. Half a bar spans
     // half the entries, and its sign is read by the caller as the direction.
-    const float drive  = juce::jlimit(0.0f, 1.0f, pressure) * std::abs(amount);
+    // MAGNITUDE, because the reading is signed: maxHeldExpression returns the
+    // held voice furthest from rest and keeps the sign, since X leans both ways.
+    // Clamping instead of rectifying would make a down-bend read as rest — and
+    // one voice bent down would cancel another bent up, leaving the whole
+    // negative half of the axis inert for these two targets. Rest is still rest:
+    // |0| is 0. The sign of the AMOUNT stays the caller's direction, as before.
+    const float drive  = juce::jlimit(0.0f, 1.0f, std::abs(pressure)) * std::abs(amount);
     const float scaled = drive * static_cast<float>(zones);
 
     // EQUAL-WIDTH STEPS, and both ends always land. Rounding to the nearest
@@ -7273,19 +7345,61 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
     }
     if (! anyHeld)
         return;
-    // Same reason, for the reading itself: in an arpeggiator gap there is no
-    // voice to read the pressure off, and taking 0 there would walk the
-    // traveller back to the first position on every gap.
-    float pressure = voiceManager.maxHeldPressure();
-    for (const auto& k : arpeggiator.getHeldKeys())
-        pressure = juce::jmax(pressure, voiceManager.pressureForHeldNote(k.note));
+    // Each bar reads its OWN axis: these two are targets in the expression
+    // matrix like the rest, so which of V/X/Y/Z moves them is the player's
+    // choice, not a constant.
+    //
+    // Same reason as above for the reading itself: in an arpeggiator gap there
+    // is no voice to read the pressure off, and taking 0 there would walk the
+    // traveller back to the first position on every gap. That repair is Z's
+    // alone - an arpeggiated note is internal, carries no MIDI channel and so
+    // has no MPE X or Y at all, and there is no per-held-key velocity to read
+    // either. A bar on one of those axes is simply not armed during a gap,
+    // which is the truth rather than a hole.
+    auto axisReading = [this] (int src)
+    {
+        float value = voiceManager.maxHeldExpression(src);
+        if (src == ExprSource::Z)
+            for (const auto& k : arpeggiator.getHeldKeys())
+                value = juce::jmax(value, voiceManager.pressureForHeldNote(k.note));
+        return value;
+    };
+    const int   snapSrc       = bp.aftertouchTargetSrc[AftertouchTarget::Snap];
+    const int   cacheSrc      = bp.aftertouchTargetSrc[AftertouchTarget::Cache];
+    const float snapPressure  = axisReading(snapSrc);
+    const float cachePressure = axisReading(cacheSrc);
+
+    // Changing which axis a bar rides is not the hand moving, and without this
+    // it looks exactly like it: the reading jumps from wherever the old axis was
+    // to wherever the new one is, in one block, under a finger that has not
+    // stirred. An engaged bar would post a landing on the spot - and on the
+    // cache bar in the LRO a landing is a Csound recompile. Same re-arm as the
+    // cache's own oscillator change further down, and for the same reason: a
+    // re-arm PERMITS the next landing, it does not fire one. Travel one step and
+    // the bar is back.
+    if (snapSrc != atSnapSrc_)
+    {
+        atSnapSrc_       = snapSrc;
+        atSnapZone_      = -1;
+        atSnapActedSlot_ = -1;
+        atSnapEngaged_   = false;
+        atSnapBaseZone_  = -1;
+    }
+    if (cacheSrc != atCacheSrc_)
+    {
+        atCacheSrc_       = cacheSrc;
+        atCacheZone_      = -1;
+        atCacheActedIdx_  = -1;
+        atCacheEngaged_   = false;
+        atCacheBaseZone_  = -1;
+    }
 
     // REST IS NOT A DESTINATION - see where each bar engages, below.
 
     if (snapAmt != 0.0f)
     {
         constexpr int kSnapSlots = 4;
-        const int zone = traversalZone(pressure, snapAmt, kSnapSlots, atSnapZone_);
+        const int zone = traversalZone(snapPressure, snapAmt, kSnapSlots, atSnapZone_);
         if (zone >= 0)
         {
             atSnapZone_ = zone;
@@ -7395,7 +7509,7 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
             atCacheEngaged_  = false;   // permits, does not fire - see below
             atCacheBaseZone_ = -1;
         }
-        const int zone = traversalZone(pressure, cacheAmt, zones, atCacheZone_);
+        const int zone = traversalZone(cachePressure, cacheAmt, zones, atCacheZone_);
         if (zone >= 0)
         {
             atCacheZone_ = zone;
@@ -7828,6 +7942,38 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
         patchToLayoutDefault(PID::lcoSetsParams);
         patchToLayoutDefault(PID::aftertouchAmtEnv4Sustain);
         patchToLayoutDefault(PID::aftertouchAmtEnv5Sustain);
+
+        // Expression sources (2026-08-23). The layout default is NOT the right
+        // answer here, and this is the one place in this block where that is
+        // true. defaultFor leaves thirteen rows on None, so a session written
+        // before sources existed would come back with its aftertouch amounts
+        // intact and nothing driving them - the bars still orange, the pressure
+        // dead - and with Cutoff and Scan quietly moved onto CC 74.
+        //
+        // The test is the GROUP, not the id: a session that carries even one of
+        // these keys was written by a build that had them, and every value in it
+        // is deliberate, including a None. A session that carries none of them
+        // predates the whole idea, and every amount in it was written to mean
+        // pressure. Same rule as importJsonPreset, which asks the same question
+        // of the file's exprSource block.
+        {
+            bool sessionKnowsSources = false;
+            for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
+                sessionKnowsSources = sessionKnowsSources || hasParam(kExprSrcPid[t]);
+
+            for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
+            {
+                if (sessionKnowsSources)
+                {
+                    patchToLayoutDefault(kExprSrcPid[t]);
+                    continue;
+                }
+                juce::ValueTree node("PARAM");
+                node.setProperty("id", kExprSrcPid[t], nullptr);
+                node.setProperty("value", (float) ExprSource::kLegacy, nullptr);
+                loadedTree.appendChild(node, nullptr);
+            }
+        }
 
         // Per-stage velocity sensitivity (continuous signed, A/D/R TIME only)
         // replaced the old global velSens + discrete A/D/R vel modes. Convert a
@@ -8318,7 +8464,13 @@ static const std::vector<const char*>& authorParamShelf()
             // withhold. The loop is why this needs saying out loud - it takes
             // whatever the enum grows, and it grew two things it must not take.
             if (! AftertouchTarget::movesTheInstrument(t))
+            {
                 v.push_back(kAftertouchAmtPid[t]);
+                // The source travels with its amount, for the same reason the
+                // amount is here at all: a depth on an axis nobody is touching
+                // is not the routing that was snapped.
+                v.push_back(kExprSrcPid[t]);
+            }
         return v;
     }();
     return shelf;
@@ -8966,6 +9118,21 @@ juce::String T5ynthProcessor::exportJsonPreset() const
     for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
         aftertouch->setProperty(AftertouchTarget::kEntries[t].key, get(kAftertouchAmtPid[t]));
     modObj->setProperty("aftertouch", aftertouch.get());
+
+    // Which axis drives each of those amounts (ExprSource) — a sibling block
+    // rather than a second field inside the one above, because that one is keyed
+    // by target and a target cannot carry two values. Stored as the source's KEY
+    // string, like every other choice in a .t5p, so the enum's order is free to
+    // grow without re-pointing a saved routing.
+    juce::DynamicObject::Ptr exprSrc = new juce::DynamicObject();
+    for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
+    {
+        const int src = juce::jlimit(0, ExprSource::kCount - 1,
+                                     juce::roundToInt(get(kExprSrcPid[t])));
+        exprSrc->setProperty(AftertouchTarget::kEntries[t].key,
+                             juce::String(ExprSource::kEntries[src].key));
+    }
+    modObj->setProperty("exprSource", exprSrc.get());
 
     root->setProperty("modulation", modObj.get());
 
@@ -9664,6 +9831,40 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
                                  at->hasProperty("amount") ? static_cast<float>(at->getProperty("amount")) : 0.0f,
                                  fileCalibEpoch));
             }
+
+            // The axis each of those amounts is driven by. Same rule as the
+            // amounts: the file's block fully determines the routing, and a
+            // target it does not name falls back rather than keeping what the
+            // last preset left there.
+            //
+            // WHERE it falls back to depends on whether the file knew about
+            // sources at all. A file with NO block predates them: every amount
+            // in it was written to mean pressure, so pressure is what it gets --
+            // ExprSource::kLegacy, not the fresh-patch default, which for most
+            // rows is None and would silence a routing the file plainly meant.
+            // A file that HAS the block and merely omits a key is hand-edited or
+            // newer; there the row's own default is the honest answer.
+            auto* es = mod->getProperty("exprSource").getDynamicObject();
+            for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
+            {
+                int src = (es != nullptr) ? ExprSource::defaultFor(t)
+                                          : ExprSource::kLegacy;
+                if (es != nullptr && es->hasProperty(AftertouchTarget::kEntries[t].key))
+                {
+                    // choiceFromKey returns 0 for "no match" as well as for a
+                    // real hit on entry 0, which every other table it serves can
+                    // live with because entry 0 is their none/off hole. This
+                    // table's entry 0 is VELOCITY — the one source that does not
+                    // move during a note — so an unknown key (a newer file, a
+                    // hand edit, a non-string value) would silently freeze that
+                    // target. Read the key back to tell the two apart.
+                    const juce::String key = es->getProperty(AftertouchTarget::kEntries[t].key).toString();
+                    const int k = choiceFromKey(key, ExprSource::kEntries);
+                    if (k >= 0 && k < ExprSource::kCount && key == ExprSource::kEntries[k].key)
+                        src = k;
+                }
+                setParam(parameters, kExprSrcPid[t], static_cast<float>(src));
+            }
         }
     }
 
@@ -9687,7 +9888,10 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
 
         if (! fileHasAftertouch)
             for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
+            {
                 setParam(parameters, kAftertouchAmtPid[t], 0.0f);
+                setParam(parameters, kExprSrcPid[t], static_cast<float>(ExprSource::defaultFor(t)));
+            }
     }
 
     // ── Drift LFOs ──

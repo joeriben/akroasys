@@ -515,14 +515,14 @@ void VoiceManager::resetPerformanceControllers()
     voiceMpePressure_.fill(0.0f);
 }
 
-void VoiceManager::setPerVoicePitchBend(int midiChannel, float semitones)
+void VoiceManager::setPerVoicePitchBend(int midiChannel, float semitones, float normalised)
 {
     if (midiChannel < 1 || midiChannel > 16)
         return;
     const auto ch = static_cast<int8_t>(midiChannel);
     for (int i = 0; i < MAX_VOICES; ++i)
         if (voiceMidiChannel_[static_cast<size_t>(i)] == ch)
-            voices[static_cast<size_t>(i)].setPerVoicePitchBend(semitones);
+            voices[static_cast<size_t>(i)].setPerVoicePitchBend(semitones, normalised);
 }
 
 void VoiceManager::setChannelPressureForChannel(int midiChannel, float pressure)
@@ -1169,13 +1169,33 @@ int VoiceManager::getKeyHeldVoiceCount() const
     return count;
 }
 
-float VoiceManager::maxHeldPressure() const
+float VoiceManager::maxHeldExpression(int src) const
 {
-    float highest = 0.0f;
+    // Furthest from rest, sign kept. For pressure, timbre and velocity that is
+    // the largest value, since none of them goes below zero; X is bipolar, and
+    // there "leaning hardest" has to be able to lean down.
+    // A target nobody wired reads rest, and says so before walking the pool.
+    if (src == ExprSource::None)
+        return 0.0f;
+
+    float furthest = 0.0f;
     for (int i = 0; i < MAX_VOICES; ++i)
-        if (isKeyHeldVoice(i))
-            highest = juce::jmax(highest, pressureForVoice(i));
-    return highest;
+    {
+        if (! isKeyHeldVoice(i))
+            continue;
+        const auto& v = voices[static_cast<size_t>(i)];
+        float value = 0.0f;
+        switch (src)
+        {
+            case ExprSource::Velocity: value = v.getCurrentVelocity();       break;
+            case ExprSource::X:        value = v.getPerVoicePitchBendNorm(); break;
+            case ExprSource::Y:        value = v.getTimbre();                break;
+            default:                   value = pressureForVoice(i);          break;
+        }
+        if (std::abs(value) > std::abs(furthest))
+            furthest = value;
+    }
+    return furthest;
 }
 
 float VoiceManager::performanceOutputGain() const

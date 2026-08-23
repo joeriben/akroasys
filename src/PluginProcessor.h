@@ -1940,6 +1940,10 @@ private:
     // amount to zero re-arms both from scratch.
     int                         atCacheZone_        { -1 };
     bool                        atCacheLro_         { false };  // which cache the claim belongs to
+    // Which axis each travelling bar last rode. A change re-arms it, so swapping
+    // the source cannot post a landing under a motionless finger.
+    int                         atCacheSrc_         { ExprSource::None };
+    int                         atSnapSrc_          { ExprSource::None };
     unsigned                    atCacheGenSeen_     { 0 };      // its generation when this bar last resolved
     bool                        atCacheGenValid_    { false };
     int                         atSnapZone_         { -1 };

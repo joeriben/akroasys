@@ -65,8 +65,22 @@ namespace
     // MPE defaults the hand-written path starts from (PluginProcessor.h:947/954).
     constexpr float kDefaultMasterBendRange = 2.0f;
     constexpr float kDefaultNoteBendRange   = 24.0f;
-    // SynthVoice::kTimbreNeutral -- a fresh voice's CC74 value.
-    constexpr float kTimbreNeutral = 64.0f / 127.0f;
+    // SynthVoice::kTimbreRest -- a fresh voice's CC74 value.
+    //
+    // This number moved, and the corpus is not allowed to be regenerated from
+    // the implementation, so the accounting belongs here. It was 64/127: CC74
+    // was read as a CENTRE DETENT, which is right for a LinnStrument (whose Y is
+    // a sideways travel) and was measured wrong for an Expressive E Osmose,
+    // whose Y rests at 0 and rises with forward key travel -- 201 of 203
+    // note-ons in a 120 s capture had CC 74 = 0 in force. CC74 is now read
+    // ABSOLUTE, so rest is 0.
+    //
+    // What did NOT change is any capability below. Cases 10, 11 and 14 each send
+    // a non-zero CC74 (127) and assert the voice stays AT REST; they still
+    // discriminate exactly what they always did -- that CC74 on a master channel
+    // is not timbre, that CC70/102/106 are not timbre, and that a note ignores
+    // what arrived on its channel before it. Only the value of "rest" moved.
+    constexpr float kTimbreRest = 0.0f;
 
     int gChecks = 0;
     int gFailures = 0;
@@ -397,7 +411,7 @@ namespace
 
         checkNear (member->getTimbre(), 1.0f, 1e-4f,
                    "CC74 on channel 5 is that note's timbre");
-        checkNear (master->getTimbre(), kTimbreNeutral, 1e-4f,
+        checkNear (master->getTimbre(), kTimbreRest, 1e-4f,
                    "CC74 on channel 1 stays the control-surface knob, not timbre");
     }
 
@@ -417,7 +431,7 @@ namespace
         check (v != nullptr, "the voice is alive");
         if (v == nullptr) return;
         checkNear (v->getAftertouch(), 0.0f, 1e-4f, "CC70/CC102 are not pressure");
-        checkNear (v->getTimbre(), kTimbreNeutral, 1e-4f, "CC106 is not timbre");
+        checkNear (v->getTimbre(), kTimbreRest, 1e-4f, "CC106 is not timbre");
     }
 
     // ── 12. Member and master pressure compose as a maximum ──────────────────
@@ -476,7 +490,7 @@ namespace
         const auto* v = r.voiceForNote (62);
         check (v != nullptr, "the voice is alive");
         if (v == nullptr) return;
-        checkNear (v->getTimbre(), kTimbreNeutral, 1e-4f,
+        checkNear (v->getTimbre(), kTimbreRest, 1e-4f,
                    "the note does not inherit the channel's last CC74");
         checkNear (v->getAftertouch(), 0.0f, 1e-4f, "and starts unpressed");
     }

@@ -4,6 +4,7 @@
 #include "WaveformDisplay.h"
 #include "GuiHelpers.h"
 #include "AftertouchBar.h"
+#include "ExprSourceSwitch.h"
 #include "VelocityBar.h"
 #include "../dsp/BlockParams.h"   // kNumModEnvs, PID, AftertouchTarget
 #include "../dsp/LroControls.h"   // the authored instrument's own knobs
@@ -314,6 +315,15 @@ private:
     static_assert(std::tuple_size<decltype(aftertouchBarA)>::value
                       == std::tuple_size<decltype(aftertouchBars)>::value,
                   "aftertouchBarA and aftertouchBars must be the same length.");
+    // The source switch that shares each bar's row: which of V/X/Y/Z drives that
+    // target, or Ø for none. Same length rule and same declaration order as the bars above —
+    // switches before their attachments, so the attachments destruct first.
+    std::array<std::unique_ptr<ExprSourceSwitch>, AftertouchTarget::kCount - 1> exprSrcSwitches;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>,
+               AftertouchTarget::kCount - 1> exprSrcSwitchA;
+    static_assert(std::tuple_size<decltype(exprSrcSwitchA)>::value
+                      == std::tuple_size<decltype(exprSrcSwitches)>::value,
+                  "exprSrcSwitchA and exprSrcSwitches must be the same length.");
 
     // ── Drift ──
     //   Same dual-control pattern as LFO, minus the F/T mode (Drift has

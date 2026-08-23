@@ -74,7 +74,7 @@ the new code keeps the old behaviour deliberately, and the reason is given.
 | 24 | `voiceMidiChannel_` also discriminates origin: a step-seq slide must not continue a held external note | Unchanged — this is not MPE routing and must not be replaced by a note ID |
 | 25 | A voice's MPE tag is cleared when it goes idle | Unchanged |
 | 26 | Expression is applied at the event's sample position within the block, not at block start | Unchanged — the feed sits inside the existing sample-accurate walk |
-| 27 | A note starts at the synth's neutral timbre (`64/127`) and zero pressure, ignoring values received on that channel before the note | Unchanged — `MPEInstrument` would apply the channel's last-received value as the note's initial value. Arguably better, and deliberately not adopted: it changes how the instrument sounds, which is not this task's licence |
+| 27 | A note starts at the synth's timbre REST and zero pressure, ignoring values received on that channel before the note | Unchanged as a rule; the rest position itself moved from `64/127` to `0` on 2026-08-23. Measured, not assumed: an Osmose in MPE mode sends CC74 from 0 and returns to 0 (26,939 messages, min 0, first and last 0 — `tools/midi_monitor.cpp`). Y is an absolute travel from rest, not a centred axis, so a note that nobody has touched sits at zero — `MPEInstrument` would apply the channel's last-received value as the note's initial value. Arguably better, and deliberately not adopted: it changes how the instrument sounds, which is not this task's licence |
 
 ## 2. What the library refuses that the old code allowed
 

@@ -1171,34 +1171,36 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
 
     // ── Easy-panel AT module: one bipolar drag-fill bar per target ──
     {
-        struct AtBar { const char* pid; const char* label; };
+        // A row is an AMOUNT and a SOURCE: how deep, and driven by which of the
+        // player's expression axes, or Ø. The two params travel together everywhere.
+        struct AtBar { const char* pid; const char* srcPid; const char* label; };
         // Order follows the canonical EnvTarget order (BlockParams.h): voice
         // destinations first (DCA, Filter=Cutoff+Reso, Scan, Pitch, Noise), then
         // the mod-source levels (LFO depths, then env sustains). "Amt" matches the
         // LFO module's own depth label in the easy panel.
         static const AtBar atBars[] = {
-            { PID::aftertouchAmtDca,         "DCA"      },
-            { PID::aftertouchAmtCutoff,      "Cutoff"   },
-            { PID::aftertouchAmtResonance,   "Reso"     },
-            { PID::aftertouchAmtScan,        "Scan"     },
-            { PID::aftertouchAmtPitch,       "Pitch"    },
-            { PID::aftertouchAmtNoiseLevel,  "Noise"    },
-            { PID::aftertouchAmtLfo1Depth,   "LFO1 Amt" },
-            { PID::aftertouchAmtLfo2Depth,   "LFO2 Amt" },
-            { PID::aftertouchAmtLfo3Depth,   "LFO3 Amt" },
-            { PID::aftertouchAmtEnv1Sustain, "ENV1 Sus" },
-            { PID::aftertouchAmtEnv2Sustain, "ENV2 Sus" },
-            { PID::aftertouchAmtEnv3Sustain, "ENV3 Sus" },
-            { PID::aftertouchAmtEnv4Sustain, "ENV4 Sus" },
-            { PID::aftertouchAmtEnv5Sustain, "ENV5 Sus" },
+            { PID::aftertouchAmtDca,         PID::exprSrcDca,         "DCA" },
+            { PID::aftertouchAmtCutoff,      PID::exprSrcCutoff,      "Cutoff" },
+            { PID::aftertouchAmtResonance,   PID::exprSrcResonance,   "Reso" },
+            { PID::aftertouchAmtScan,        PID::exprSrcScan,        "Scan" },
+            { PID::aftertouchAmtPitch,       PID::exprSrcPitch,       "Pitch" },
+            { PID::aftertouchAmtNoiseLevel,  PID::exprSrcNoiseLevel,  "Noise" },
+            { PID::aftertouchAmtLfo1Depth,   PID::exprSrcLfo1Depth,   "LFO1 Amt" },
+            { PID::aftertouchAmtLfo2Depth,   PID::exprSrcLfo2Depth,   "LFO2 Amt" },
+            { PID::aftertouchAmtLfo3Depth,   PID::exprSrcLfo3Depth,   "LFO3 Amt" },
+            { PID::aftertouchAmtEnv1Sustain, PID::exprSrcEnv1Sustain, "ENV1 Sus" },
+            { PID::aftertouchAmtEnv2Sustain, PID::exprSrcEnv2Sustain, "ENV2 Sus" },
+            { PID::aftertouchAmtEnv3Sustain, PID::exprSrcEnv3Sustain, "ENV3 Sus" },
+            { PID::aftertouchAmtEnv4Sustain, PID::exprSrcEnv4Sustain, "ENV4 Sus" },
+            { PID::aftertouchAmtEnv5Sustain, PID::exprSrcEnv5Sustain, "ENV5 Sus" },
             // Last, and apart in kind: these two do not modulate the voice, they
             // move the instrument - to another cached sample, to another
             // snapshot. Same bar, same bipolar amount, and the sign means the
             // same thing it means everywhere else here: which way pressure
             // travels. Through the cache that is the order the samples were
             // generated in, forwards or back.
-            { PID::aftertouchAmtCache,       "Cache"    },
-            { PID::aftertouchAmtSnap,        "Snap"     },
+            { PID::aftertouchAmtCache,       PID::exprSrcCache,       "Cache" },
+            { PID::aftertouchAmtSnap,        PID::exprSrcSnap,        "Snap" },
         };
         static constexpr int kNumAtBars = sizeof(atBars) / sizeof(atBars[0]);
         static_assert(kNumAtBars == AftertouchTarget::kCount - 1,
@@ -1218,6 +1220,15 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
             addAndMakeVisible(*bar);
             aftertouchBarA[i] = std::make_unique<SA>(apvts, pid, *bar);
             aftertouchBars[i] = std::move(bar);
+
+            const char* srcPid = atBars[i].srcPid;
+            auto sw = std::make_unique<ExprSourceSwitch>();
+            sw->onRightClick = [this, srcPid](juce::Point<int> pt) {
+                showMidiLearnMenu(processorRef, srcPid, pt); };
+            addAndMakeVisible(*sw);
+            exprSrcSwitchA[i] = std::make_unique<
+                juce::AudioProcessorValueTreeState::ComboBoxAttachment>(apvts, srcPid, *sw);
+            exprSrcSwitches[i] = std::move(sw);
         }
         addChildComponent(aftertouchHeader);   // shown by the columns easy-layout
     }
@@ -1958,6 +1969,8 @@ void SynthPanel::updateVisibility()
     aftertouchHeader.setVisible(false);
     for (auto& bar : aftertouchBars)
         if (bar) bar->setVisible(true);
+    for (auto& sw : exprSrcSwitches)
+        if (sw) sw->setVisible(true);
 
     auto setDriftControlsVisible = [](DriftSection& drift)
     {
@@ -2446,14 +2459,25 @@ void SynthPanel::layoutAftertouchEasy(juce::Rectangle<int> area)
     if (n <= 0 || area.isEmpty())
         return;
 
-    // Equal stacked bars; each paints its own kBorder edge so neighbours
-    // share a 1px divider (no gap). Last bar absorbs the rounding remainder.
-    const int barH = juce::jmax(1, area.getHeight() / n);
+    // Equal stacked rows; each cell paints its own kBorder edge so neighbours
+    // share a 1px divider (no gap). Last row absorbs the rounding remainder.
+    //
+    // A row is amount THEN source, left to right: the bar carries the depth and
+    // the small box on its right says which axis drives it. One letter wide —
+    // the axis is a footnote on a depth, not a control of equal weight — and
+    // floored at 14 px, below which the letter stops being readable.
+    const int rowH = juce::jmax(1, area.getHeight() / n);
+    const int switchW = juce::jlimit(14, 24, juce::roundToInt((float) rowH * 0.7f));
     for (int i = 0; i < n; ++i)
     {
-        auto row = (i == n - 1) ? area : area.removeFromTop(barH);
+        auto row = (i == n - 1) ? area : area.removeFromTop(rowH);
+        // Never let the switch eat the bar: on a very narrow column the depth is
+        // the control that has to survive, so it keeps at least half the width.
+        auto sw = row.removeFromRight(juce::jmin(switchW, row.getWidth() / 2));
         if (aftertouchBars[i])
             aftertouchBars[i]->setBounds(row);
+        if (exprSrcSwitches[i])
+            exprSrcSwitches[i]->setBounds(sw);
     }
 }
 
@@ -2674,7 +2698,7 @@ void SynthPanel::layoutModEasy(juce::Rectangle<int>& area, juce::Rectangle<int> 
         styleHeaderBar(driftHeader, " DRIFT", kDriftCol);
         driftHeader.setBounds(modHeaderRow.removeFromLeft(stackW));
         modHeaderRow.removeFromLeft(colGap);
-        styleHeaderBar(aftertouchHeader, " Poly-AT", kAtCol);
+        styleHeaderBar(aftertouchHeader, " Expression", kAtCol);
         aftertouchHeader.setBounds(modHeaderRow.removeFromLeft(aftertouchW));
         modHeaderRow.removeFromLeft(colGap);
         styleHeaderBar(regenHeader, " REGENERATE", kRegenCol);   // generate column (was an in-column chip)

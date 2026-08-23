@@ -123,9 +123,11 @@ namespace Calibration
 //            2 clamped away — the old ±10 and the new ±10 are the same ten
 //            octaves, so full depth means full depth again (the knob POSITION
 //            moves, of course: a^(1/2.3) equals a only at 0 and 1);
-//            (b) MPE timbre has no stored depth (the CC 74 travel IS the
-//            amount), so it cannot be migrated and instead keeps its ±4 octaves
-//            by construction (SynthVoice::kTimbreCutoffScale).
+//            (b) MPE timbre had no stored depth (the CC 74 travel WAS the
+//            amount), so it could not be migrated and kept its ±4 octaves by
+//            construction. That private path is gone: timbre is now the Y
+//            source of the expression matrix and carries an ordinary per-target
+//            amount, which this epoch's remap covers like any other.
 //            SAME BOUNDARY as epochs 5 and 7: modulation OF a depth (an env or
 //            LFO driving an LFO's Amt) is not migrated. The depth it lands on
 //            is curved live, so the destination is right; the swing an old

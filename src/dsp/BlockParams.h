@@ -209,6 +209,32 @@ namespace PID {
     static constexpr const char* aftertouchAmtDca         = "aftertouch_amt_dca";
     static constexpr const char* aftertouchAmtPitch       = "aftertouch_amt_pitch";
     static constexpr const char* aftertouchAmtNoiseLevel  = "aftertouch_amt_noise_level";
+    // Per-target expression SOURCE (ExprSource below). One choice per target,
+    // beside that target's amount: the amount says how deep, this says which of
+    // the player's expression axes drives it -- or Ø, none of them, which is
+    // where thirteen of the sixteen rows start (ExprSource::defaultFor).
+    //
+    // A preset or DAW session saved BEFORE these keys existed does not take that
+    // default: its amounts were all written to mean pressure, so both loaders
+    // ask whether the file knows the idea at all and fall back to
+    // ExprSource::kLegacy when it does not (importJsonPreset,
+    // setStateInformation, and MainPanel's snapshot slots).
+    static constexpr const char* exprSrcLfo1Depth   = "expr_src_lfo1_depth";
+    static constexpr const char* exprSrcLfo2Depth   = "expr_src_lfo2_depth";
+    static constexpr const char* exprSrcLfo3Depth   = "expr_src_lfo3_depth";
+    static constexpr const char* exprSrcEnv1Sustain = "expr_src_env1_sustain";
+    static constexpr const char* exprSrcEnv2Sustain = "expr_src_env2_sustain";
+    static constexpr const char* exprSrcEnv3Sustain = "expr_src_env3_sustain";
+    static constexpr const char* exprSrcEnv4Sustain = "expr_src_env4_sustain";
+    static constexpr const char* exprSrcEnv5Sustain = "expr_src_env5_sustain";
+    static constexpr const char* exprSrcCache       = "expr_src_cache";
+    static constexpr const char* exprSrcSnap        = "expr_src_snap";
+    static constexpr const char* exprSrcCutoff      = "expr_src_cutoff";
+    static constexpr const char* exprSrcResonance   = "expr_src_resonance";
+    static constexpr const char* exprSrcScan        = "expr_src_scan";
+    static constexpr const char* exprSrcDca         = "expr_src_dca";
+    static constexpr const char* exprSrcPitch       = "expr_src_pitch";
+    static constexpr const char* exprSrcNoiseLevel  = "expr_src_noise_level";
     static constexpr const char* driftEnabled     = "drift_enabled";
     static constexpr const char* driftRegen       = "drift_regen";
     static constexpr const char* driftCrossfade   = "drift_crossfade";
@@ -789,6 +815,98 @@ namespace AftertouchTarget {
     }
     static_assert(kNumModEnvs == 4,
                   "modEnvSustain lists 4 entries -- add one per new mod envelope.");
+}
+
+// ── Expression sources: the player's four continuous axes ──
+//
+// Every target in AftertouchTarget above owns an AMOUNT (how deep) and a SOURCE
+// (which axis drives it). Before this existed the source was always pressure,
+// hard-coded; MPE gives a key three axes and a note-on gives a fourth, and there
+// is no reason the filter has to be the pressure's and only the pressure's.
+//
+// The letters are the player's, not MIDI's: X is the sideways/bend axis, Y the
+// second continuous axis a key reports (CC74), Z the pressure. V is velocity,
+// which is not continuous at all -- it is fixed at note-on and holds for the
+// note's life. That difference is real and deliberate: V offsets a target for
+// the whole note, the other three move it while the finger moves.
+//
+// ORDER IS FROZEN. A DAW session stores a Choice as its INDEX, so inserting a
+// source here would re-point every saved routing. Append only.
+//
+// There are two different "defaults" below and they must not be confused.
+// kLegacy is Z, and it is only ever what a FILE that predates sources means:
+// "amount alone" meant pressure, so such a preset restores to exactly what it
+// did. defaultFor is what a FRESH patch starts on, and for most rows that is
+// None -- nothing drives it until the player says what should.
+namespace ExprSource {
+    enum : int {
+        Velocity = 0,   // V -- note-on velocity, constant for the note
+        X        = 1,   // per-note pitch bend, normalised by the bend range in force
+        Y        = 2,   // CC74, absolute 0..127; 0 is "no effect", not "centre"
+        Z        = 3,   // pressure (channel/poly/mod wheel/breath), the old behaviour
+        // Nothing drives this target. Appended, not inserted at 0, because a DAW
+        // session stores a Choice as its INDEX and index 0 is Velocity in every
+        // session already saved. It is the resting state of the column: most
+        // targets start here, and the switch draws it as the only grey one, so
+        // what is WIRED is what shows.
+        None     = 4
+    };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "velocity", "V"   },
+        { "x",        "X"   },
+        { "y",        "Y"   },
+        { "z",        "Z"   },
+        // ASCII label on purpose: this string goes into the DAW's automation
+        // lane through AudioParameterChoice, and the empty-set glyph the switch
+        // paints is drawn from a UTF-8 literal there (see ExprSourceSwitch).
+        { "off",      "off" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(None + 1 == kCount, "ExprSource enum and kEntries are out of sync.");
+
+    /** The source a file that PREDATES sources means. Not the fresh-patch
+     *  default -- that is defaultFor below, and for most rows it is None. This
+     *  one exists for exactly one job: a .t5p written when an amount could only
+     *  mean pressure restores as pressure. */
+    static constexpr int kLegacy = Z;
+
+    /** Which axis a target starts on. Three rows are wired and the rest are
+     *  None, because a fresh patch should say what it is rather than arm
+     *  fourteen depths at once -- and the column then reads at a glance: three
+     *  lit boxes, thirteen grey.
+     *
+     *  The three are not a preference dressed as a default. Z into the DCA is
+     *  MPE's own core gesture, press harder and it is louder. Y is the
+     *  brightness axis -- MPE names CC74 "Timbre", and until sources existed
+     *  this synth wired CC74 straight into the cutoff, so Cutoff keeps that
+     *  wiring, now as a routing the player can move. Scan is there for the same
+     *  reason and not by analogy: on the wavetable and granular engines the read
+     *  position IS where the timbre comes from, so it is the second thing a
+     *  finger sliding up the key should reach.
+     *
+     *  Pitch is deliberately NOT on X: X is already applied to it as the
+     *  per-note bend, and routing it here again would bend it twice. */
+    inline constexpr int defaultFor (int target)
+    {
+        switch (target)
+        {
+            case AftertouchTarget::DCA:    return Z;
+            case AftertouchTarget::Cutoff: return Y;
+            case AftertouchTarget::Scan:   return Y;
+            default:                       return None;
+        }
+    }
+
+    /** The per-target table above, materialised. Written out rather than
+     *  value-initialised because no default is 0 -- a zeroed table would
+     *  silently route every target to VELOCITY. */
+    inline constexpr std::array<int, AftertouchTarget::kCount> defaults()
+    {
+        std::array<int, AftertouchTarget::kCount> a {};
+        for (int t = 0; t < AftertouchTarget::kCount; ++t)
+            a[(std::size_t) t] = defaultFor(t);
+        return a;
+    }
 }
 
 // ── Drift LFO targets ──
@@ -2098,6 +2216,10 @@ struct BlockParams
     // AftertouchTarget (1..12); pressure x amount drives the target, sign sets
     // direction.
     float aftertouchTargetAmt[AftertouchTarget::kCount] = {}; // [t] = signed depth for target t
+    // Which axis drives each target, or none (ExprSource). Amount
+    // says how deep, this says from where. Default Z for every target: that is
+    // what an amount on its own meant before sources existed.
+    std::array<int, AftertouchTarget::kCount> aftertouchTargetSrc = ExprSource::defaults();
 
     // Filter
     bool  filterEnabled = false;

@@ -54,7 +54,11 @@ public:
     void resetPerformanceControllers();
 
     // MPE: route pitch-wheel on a per-note channel to the voice(s) triggered on it.
-    void setPerVoicePitchBend(int midiChannel, float semitones);
+    /** MPE X on one member channel. Two numbers for one gesture: `semitones` is
+     *  the bend (range already applied) and moves the pitch; `normalised` is how
+     *  far the wheel travelled, ±1 at full deflection, and is what the expression
+     *  matrix can route to a target. See SynthVoice::setPerVoicePitchBend. */
+    void setPerVoicePitchBend(int midiChannel, float semitones, float normalised);
     // MPE Loudness (Z): channel pressure on a member channel drives only the
     // voice(s) tagged with that channel, not the whole zone.
     void setChannelPressureForChannel(int midiChannel, float pressure);
@@ -188,12 +192,13 @@ public:
      *  keyboard. Computer-keyboard notes count: they carry no MIDI channel and
      *  are recognised by their source id instead. */
     int getKeyHeldVoiceCount() const;
-    /** The hardest-pressed key that is still DOWN, 0 when none is. What a target
-     *  reads when it acts on the whole instrument instead of on one voice: MPE
-     *  gives every note its own pressure, and the instrument can only be in one
-     *  place, so the note leaning hardest is the one that moves it. Over the
-     *  same voices as getKeyHeldVoiceCount(). */
-    float maxHeldPressure() const;
+    /** The key that is still DOWN and leaning hardest on one expression axis
+     *  (ExprSource), 0 when none is. What a target reads when it acts on the
+     *  whole instrument instead of on one voice: MPE gives every note its own
+     *  expression, and the instrument can only be in one place, so the note
+     *  leaning hardest is the one that moves it. Over the same voices as
+     *  getKeyHeldVoiceCount(). Sign is kept, because X leans both ways. */
+    float maxHeldExpression(int src) const;
     /** Voice source id the computer keyboard plays under. Above every sequencer
      *  strand on purpose, so such a voice can be told apart from an internal one. */
     static constexpr int kComputerKeyboardSourceId = 15;

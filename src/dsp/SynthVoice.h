@@ -44,21 +44,34 @@ public:
     void setAftertouch(float pressure) { aftertouch_ = juce::jlimit(0.0f, 1.0f, pressure); }
     float getAftertouch() const { return aftertouch_; }
 
-    // MPE per-note pitch bend (semitones, in addition to the global channel bend).
-    // Set by VoiceManager when pitch-wheel arrives on the voice's MIDI channel.
-    void setPerVoicePitchBend(float semitones) { perVoicePitchBendSemitones_ = juce::jlimit(-48.0f, 48.0f, semitones); }
+    // MPE per-note pitch bend — the X axis. Two numbers for one gesture, because
+    // they answer different questions: the SEMITONES are what the pitch is bent
+    // by (bend range already applied), the NORMALISED value is how far through
+    // the wheel the finger travelled, ±1 at full deflection. Only the first can
+    // move the pitch; only the second can drive a modulation target, since a
+    // target has no idea what a semitone is. Deriving one from the other would
+    // need the bend range in force, and that range can change mid-note.
+    void setPerVoicePitchBend(float semitones, float normalised = 0.0f)
+    {
+        perVoicePitchBendSemitones_ = juce::jlimit(-48.0f, 48.0f, semitones);
+        perVoicePitchBendNorm_      = juce::jlimit(-1.0f, 1.0f, normalised);
+    }
     float getPerVoicePitchBend() const { return perVoicePitchBendSemitones_; }
+    float getPerVoicePitchBendNorm() const { return perVoicePitchBendNorm_; }
 
-    // MPE per-note Timbre (the Y / slide axis, MIDI CC 74). Normalised 0..1 with
-    // a neutral centre at CC 64 (64/127) so a note with no timbre data — and a
-    // controller resting at its centre detent — is exactly unmodulated. Routed to
-    // filter brightness in the per-block cutoff chain.
-    static constexpr float kTimbreNeutral = 64.0f / 127.0f;
-    // Timbre's share of the cutoff bus. It is the one source there with no depth
-    // control of its own — the CC 74 travel IS the amount — so it cannot take the
-    // bus's depth curve and instead keeps the ±4 octaves it has always had: half
-    // a travel (0.5) onto 0.4 of the ±10-octave full scale.
-    static constexpr float kTimbreCutoffScale = 0.8f;
+    // MPE per-note Timbre (the Y axis, MIDI CC 74), normalised 0..1 and read
+    // ABSOLUTE: 0 is "no effect", 127 is full effect. Rest is therefore 0, and a
+    // note that never receives a CC 74 is exactly unmodulated.
+    //
+    // It used to be 64/127 — a centre detent, from the LinnStrument, whose Y is a
+    // sideways travel and genuinely bipolar. That is not the general case and it
+    // was measured to be wrong here: an Expressive E Osmose rests its Y at 0 and
+    // rises with forward key travel (201 of 203 note-ons in a 120 s capture had
+    // CC 74 = 0 in force), so a centred reading put every one of its notes four
+    // octaves below the dialled cutoff. Absolute is also what MPE instruments
+    // generally do with CC 74. A bipolar controller now rests at half scale
+    // instead of at zero; that is the cost, and it is the smaller one.
+    static constexpr float kTimbreRest = 0.0f;
     void setTimbre(float t) { timbre_ = juce::jlimit(0.0f, 1.0f, t); }
     float getTimbre() const { return timbre_; }
 
@@ -229,7 +242,8 @@ private:
     float currentVelocity = 0.0f;
     float aftertouch_ = 0.0f;
     float perVoicePitchBendSemitones_ = 0.0f;
-    float timbre_ = kTimbreNeutral;   // MPE CC74, neutral centre (CC64)
+    float perVoicePitchBendNorm_ = 0.0f;   // same gesture, ±1 at full wheel
+    float timbre_ = kTimbreRest;           // MPE CC74, absolute; rest is 0
     bool active = false;
     bool noteHeld = false;
     float lastAmpEnvLevel = 0.0f;

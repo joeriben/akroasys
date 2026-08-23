@@ -80,6 +80,15 @@ const char* const kMainSnapshotParamIds[] = {
     PID::aftertouchAmtCutoff, PID::aftertouchAmtResonance, PID::aftertouchAmtScan,
     PID::aftertouchAmtDca, PID::aftertouchAmtPitch, PID::aftertouchAmtNoiseLevel,
     PID::aftertouchAmtEnv4Sustain, PID::aftertouchAmtEnv5Sustain,
+    // The axis beside each of those amounts. It has to travel with it: a slot
+    // stored with Cutoff at 0.8 on Y, recalled after a slot that had Cutoff on
+    // Z, would come back as 0.8 of PRESSURE — the right depth on an axis the
+    // player is not touching, which reads as the recall having done nothing.
+    PID::exprSrcLfo1Depth, PID::exprSrcLfo2Depth, PID::exprSrcLfo3Depth,
+    PID::exprSrcEnv1Sustain, PID::exprSrcEnv2Sustain, PID::exprSrcEnv3Sustain,
+    PID::exprSrcCutoff, PID::exprSrcResonance, PID::exprSrcScan,
+    PID::exprSrcDca, PID::exprSrcPitch, PID::exprSrcNoiseLevel,
+    PID::exprSrcEnv4Sustain, PID::exprSrcEnv5Sustain,
     // Neither Cache nor Snap. Both bars MOVE the instrument, and a recall must
     // not seize a bar that is doing so under the player's finger: press into
     // slot 2, and if slot 2 was stored with that bar at rest - or reversed -
@@ -148,7 +157,8 @@ bool findParameterValue(const juce::ValueTree& state, const juce::String& id, fl
 
 void restoreParameterFromState(juce::AudioProcessorValueTreeState& apvts,
                                const juce::ValueTree& state,
-                               const char* id)
+                               const char* id,
+                               const float* absentValue = nullptr)
 {
     auto* param = apvts.getParameter(id);
     if (param == nullptr)
@@ -159,10 +169,40 @@ void restoreParameterFromState(juce::AudioProcessorValueTreeState& apvts,
     // existed otherwise leaks that parameter across recalls — the same failure
     // the BPM-clock defaults in PluginProcessor::setStateInformation exist to
     // prevent, and the one ENV4/5 would hit against every older snapshot.
+    //
+    // `absentValue` is for the one case where the layout default is the WRONG
+    // answer on absence — see slotKnowsExprSources below.
     float value = 0.0f;
-    param->setValueNotifyingHost(findParameterValue(state, id, value)
-                                     ? param->convertTo0to1(value)
-                                     : param->getDefaultValue());
+    if (findParameterValue(state, id, value))
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    else
+        param->setValueNotifyingHost(absentValue != nullptr
+                                         ? param->convertTo0to1(*absentValue)
+                                         : param->getDefaultValue());
+}
+
+/** Whether this slot was written by a build that had expression sources.
+ *  The test is the GROUP, exactly as PluginProcessor::setStateInformation asks
+ *  it of a DAW session: one key present means the slot knows the idea and every
+ *  value in it is deliberate, including an Ø. None present means the slot
+ *  predates it, and its aftertouch amounts were all written to mean pressure —
+ *  restoring them to the layout default would leave thirteen orange bars with
+ *  nothing driving them, and move Cutoff and Scan onto CC 74. */
+bool slotKnowsExprSources(const juce::ValueTree& state)
+{
+    float value = 0.0f;
+    for (auto* id : kMainSnapshotParamIds)
+        if (juce::String(id).startsWith("expr_src_")
+            && findParameterValue(state, id, value))
+            return true;
+    return false;
+}
+
+/** kLegacy for a source id, nothing for anything else. */
+const float* legacySourceFallback(const char* id)
+{
+    static constexpr float kLegacy = (float) ExprSource::kLegacy;
+    return juce::String(id).startsWith("expr_src_") ? &kLegacy : nullptr;
 }
 
 juce::File getUiSettingsFile()
@@ -3320,8 +3360,12 @@ void MainPanel::restoreMainSnapshot(const MainSnapshot& snapshot)
     // absence — without this, a slot saved without a parameter tree would
     // factory-reset the live patch instead of leaving it alone.
     if (snapshot.parameters.isValid())
+    {
+        const bool knowsSources = slotKnowsExprSources(snapshot.parameters);
         for (auto* id : kMainSnapshotParamIds)
-            restoreParameterFromState(apvts, snapshot.parameters, id);
+            restoreParameterFromState(apvts, snapshot.parameters, id,
+                                      knowsSources ? nullptr : legacySourceFallback(id));
+    }
 
     promptPanel.loadPresetData(snapshot.promptA, snapshot.promptB,
                                snapshot.seed, snapshot.randomSeed,
@@ -3453,9 +3497,13 @@ void MainPanel::restoreLcoSnapshot(const LcoSnapshot& snapshot)
 
     auto& apvts = processorRef.getValueTreeState();
     if (snapshot.parameters.isValid())
+    {
+        const bool knowsSources = slotKnowsExprSources(snapshot.parameters);
         for (auto* id : kMainSnapshotParamIds)
             if (!isLcoSnapshotSkippedParam(id))
-                restoreParameterFromState(apvts, snapshot.parameters, id);
+                restoreParameterFromState(apvts, snapshot.parameters, id,
+                                          knowsSources ? nullptr : legacySourceFallback(id));
+    }
 
     // The knobs of the orchestra in this slot: what they MEAN first, then where
     // the player had them. Both, and neither on its own — the reading without
