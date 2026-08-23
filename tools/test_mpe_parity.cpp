@@ -1373,6 +1373,117 @@ namespace
 
 }
 
+// ── 35. A voice TAKEN OVER, not released, lets its latch go ─────────────────
+//      The three release paths all key on sustainedVoice/sostenutoVoice -- and
+//      allocation WIPES those flags when it re-purposes a voice for a new note.
+//      The key that set the latch is already up (that is what made the voice
+//      sustained), so no note-off for that pitch will arrive either. Nothing
+//      ever scans it again: the latch stands for the rest of the session, and
+//      every later note of that pitch enters at full aftertouch.
+//
+//      The probe is pressureForHeldNote, not a fresh note of that pitch: an
+//      external key-down now resets its own note's latch, so a re-strike would
+//      pass whether or not the strand was cleared. pressureForHeldNote is also
+//      what the instrument-wide aftertouch targets read under the arpeggiator,
+//      so it is the audible quantity here and not an implementation detail.
+void caseTakenOverVoiceDoesNotStrandTheLatch()
+{
+    std::printf ("[35] a pedal-held voice taken over for another note lets its latch go\n");
+    Rig r;
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::voiceCount))
+        p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = 1 voice, mono
+    r.flush();
+
+    r.cc (1, 64, 127);            // damper down
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    r.noteOff (1, 60);            // held by the pedal -- the latch is KEPT here
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 1.0f, 1e-3f,
+               "the pedalled note still carries the pressure its finger left");
+
+    // Mono legato takes voice 0 over for the new note. Nothing was released,
+    // and both pedal flags are gone from here on.
+    r.noteOn (1, 67);
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and lets it go when the voice is taken away from that pitch");
+
+    r.cc (1, 64, 0);              // damper up: there is nothing left to scan
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 0.0f, 1e-3f,
+               "with nothing stranded for the pedal to have to find");
+}
+
+// ── 36. The latch outlives an arpeggiator gap ──────────────────────────────
+//      Under the arp a held key sounds NOTHING between steps, so "does a voice
+//      still hold this pitch" answers no while the hand is still leaning into
+//      the chord. And the arp's own step note-off carries sourceId -1, which is
+//      what an external key-up carries too -- no field noteOff receives can
+//      tell them apart. Only the key ledger can, which is why there is one.
+//
+//      What it costs when it is wrong: with aftertouch on Cache or Snap the
+//      travellers walk back to the first position on every gap, and in the
+//      language oscillator each of those is a Csound recompile of the orchestra
+//      already sounding, one per arpeggio note, back to back.
+void casePolyPressureSurvivesAnArpGap()
+{
+    std::printf ("[36] a held key keeps its pressure through an arpeggiator gap\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 100);
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 100.0f / 127.0f, 1e-3f,
+               "the finger's pressure is readable with the arp off");
+
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+
+    // The key is NEVER lifted. Long enough for the arp's on-edge flush of the
+    // voice it was sounding, then many steps and the gap after each of them.
+    r.run (200);
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 100.0f / 127.0f, 1e-3f,
+               "and still readable after the arp has stepped over it, hand unmoved");
+}
+
+
+// ── 37. A fresh press starts at no pressure, even over a pedalled note ──────
+//      The reachable half of case 35, and the one that needs no stealing at
+//      all: the damper is down, so the pedalled voice is busy and the re-press
+//      gets a voice of its OWN. Nothing is taken over, no release path runs --
+//      and note-on seeds the new voice from pressureForNote, which is still the
+//      old finger's reading. The key going down is the only event that can end
+//      it, and it is the one thing noteOff and the pedal scans cannot see.
+void caseFreshPressStartsAtNoPressureUnderTheDamper()
+{
+    std::printf ("[37] a fresh press starts at no pressure, even over a pedalled note\n");
+    Rig r;
+    r.cc (1, 64, 127);            // damper down
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);  // pressed as hard as it goes
+    r.flush();
+    const auto* pedalled = r.heldVoiceForNote (60);
+    check (pedalled != nullptr, "the note is sounding");
+
+    r.noteOff (1, 60);            // held by the pedal, latch correctly kept
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 1.0f, 1e-3f,
+               "the pedalled note keeps its pressure while the damper is down");
+
+    r.noteOn (1, 60, 1);          // the same key again, lightest touch there is
+    r.flush();
+    checkNear (r.proc.getVoiceManager().pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and the new press starts at nothing rather than inheriting it");
+    if (pedalled != nullptr)
+        checkNear (pedalled->getAftertouch(), 1.0f, 1e-3f,
+                   "while the note under the pedal keeps the pressure it had");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1413,6 +1524,9 @@ int main()
     casePolyPressureEndsWithThePedal();
     casePolyPressureSurvivesAHeldUnison();
     caseNoteOffNamesItsChannel();
+    caseTakenOverVoiceDoesNotStrandTheLatch();
+    casePolyPressureSurvivesAnArpGap();
+    caseFreshPressStartsAtNoPressureUnderTheDamper();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

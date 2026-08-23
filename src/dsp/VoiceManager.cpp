@@ -175,9 +175,18 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             // ground under a finger that has not left the key -- and on the bind
             // path it would run BEFORE the conditional noteOn below, which
             // resets the rest again.
+            // A hold can end WITHOUT a release. Taking this voice over wipes the
+            // three flags above, so neither pedal scan will ever see it again and
+            // the pitch it was on would keep its poly-pressure latch for the rest
+            // of the session -- every later note of that pitch entering at full
+            // aftertouch, from any source, until a panic. Asked BEFORE the seed
+            // below, because the seed reads the latch; and with this voice
+            // excluded, because it still reports the old note at this point.
+            const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
             sustainedVoice[0] = false;
             sostenutoVoice[0] = false;
             sostenutoReleasedVoice[0] = false;
+            clearPolyPressureIfReleased(displacedNote, 0);
             v.setPerVoicePitchBend(0.0f);
             v.setAftertouch(pressureForNote(note));
             // Glide pitch without retriggering envelopes
@@ -190,11 +199,14 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             v.glideToNote(note, glideMs > 0.0f ? glideMs : 30.0f);
             return;
         }
+            // A hold ending without a release -- see the mono legato branch.
+        const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
         if (v.isActive())
             v.beginRestartFade();
         sustainedVoice[0] = false;
         sostenutoVoice[0] = false;
         sostenutoReleasedVoice[0] = false;
+        clearPolyPressureIfReleased(displacedNote, 0);
         v.setAftertouch(pressureForNote(note));
         if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
         {
@@ -307,11 +319,14 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     if (hasCurrentBlockParams_)
         v.configureForBlock(applyPerformanceControllers(currentBlockParams_));
 
+    // A hold ending without a release -- see the mono legato branch.
+    const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
     if (v.isActive())
         v.beginRestartFade();
     sustainedVoice[static_cast<size_t>(idx)] = false;
     sostenutoVoice[static_cast<size_t>(idx)] = false;
     sostenutoReleasedVoice[static_cast<size_t>(idx)] = false;
+    clearPolyPressureIfReleased(displacedNote, idx);
     v.setAftertouch(pressureForNote(note));
 
     if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
@@ -562,9 +577,17 @@ void VoiceManager::resetPerformanceControllers()
     channelTimbre_.fill(SynthVoice::kTimbreRest);
 }
 
-void VoiceManager::clearPolyPressureIfReleased(int note) noexcept
+void VoiceManager::clearPolyPressureIfReleased(int note, int ignoreVoice) noexcept
 {
     if (note < 0 || note > 127)
+        return;
+
+    // A finger still on the key is the first and strongest reason to keep it,
+    // and it is invisible from here -- see keyHeldNote_. Under the arpeggiator
+    // this is the ONLY reason there is: between two steps nothing of that pitch
+    // is sounding, so the scan below would find nothing and clear the latch on
+    // every gap, under a hand that never moved.
+    if (keyHeldNote_[static_cast<size_t>(note)])
         return;
 
     // The same note number can be sounding on more than one voice, and the
@@ -573,6 +596,8 @@ void VoiceManager::clearPolyPressureIfReleased(int note) noexcept
     // finger left, exactly as it does when it loses its expression channel.
     for (int i = 0; i < MAX_VOICES; ++i)
     {
+        if (i == ignoreVoice)
+            continue;
         const auto& v = voices[static_cast<size_t>(i)];
         if (v.isActive() && ! v.isReleasing() && v.getCurrentNote() == note)
             return;
@@ -1363,11 +1388,14 @@ void VoiceManager::setDroneNote(int note, float velocity, bool lfo1TrigMode, boo
         v.setTuningTable(tuningHz_);
         if (hasCurrentBlockParams_)
             v.configureForBlock(applyPerformanceControllers(currentBlockParams_));
+            // A hold ending without a release -- see the mono legato branch.
+        const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
         if (v.isActive())
             v.beginRestartFade();
         sustainedVoice[static_cast<size_t>(idx)] = false;
         sostenutoVoice[static_cast<size_t>(idx)] = false;
         sostenutoReleasedVoice[static_cast<size_t>(idx)] = false;
+        clearPolyPressureIfReleased(displacedNote, idx);
         v.setAftertouch(pressureForNote(note));
         if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
             v.getSampler().shareBufferFrom(*currentSamplerMaster_);

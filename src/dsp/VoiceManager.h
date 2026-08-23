@@ -59,6 +59,32 @@ public:
     void setPolyPressure(int note, float pressure, int sourceId = -1);
     void resetPerformanceControllers();
 
+    /** The physical-key ledger, refreshed once per block by the processor:
+        clearKeysHeld() then one markKeyHeld() per key that is down. It exists
+        because the poly-key-pressure latch belongs to a FINGER, and voice state
+        is only a proxy for that -- a proxy that is wrong in both directions.
+        With the arpeggiator on, a held key sounds nothing between steps, so the
+        voices say "released" while the hand is still leaning in; under the
+        damper a voice holds a pitch no key is on any more. The processor is the
+        only place that knows, because the arpeggiator tracks held keys whether
+        or not it is enabled and external notes are filtered out of the voice
+        stream while it is. */
+    void clearKeysHeld() noexcept { keyHeldNote_.fill(false); }
+    /** A key went DOWN on this note number: its poly-pressure latch starts over.
+        Aftertouch begins at nothing and rises, so a fresh press inheriting the
+        pressure of the previous one is a stale reading whatever else is true --
+        and it is the last way a latch that was stranded can still be heard. */
+    void clearPolyPressure(int note) noexcept
+    {
+        if (note >= 0 && note <= 127)
+            polyPressureByNote[static_cast<size_t>(note)] = 0.0f;
+    }
+    void markKeyHeld(int note) noexcept
+    {
+        if (note >= 0 && note <= 127)
+            keyHeldNote_[static_cast<size_t>(note)] = true;
+    }
+
     // MPE: route pitch-wheel on a per-note channel to the voice(s) triggered on it.
     /** MPE X on one member channel. Two numbers for one gesture: `semitones` is
      *  the bend (range already applied) and moves the pitch; `normalised` is how
@@ -293,11 +319,22 @@ private:
         with a MIDI channel; `channel` 0 simply clears this voice. */
     void claimExprChannel(int voiceIndex, int8_t channel) noexcept;
 
-    /** Drop `note`'s poly-key-pressure latch unless a voice still HOLDS that
-        pitch. Called wherever a hold ends -- the note-off message and each of
-        the three paths that release a voice directly (both pedals and the
-        drone), because the latch outlives any of them that forgets it. */
-    void clearPolyPressureIfReleased(int note) noexcept;
+    /** Drop `note`'s poly-key-pressure latch unless something still holds that
+        pitch. Called wherever a hold ends -- the note-off message, each of the
+        three paths that release a voice directly (both pedals and the drone),
+        and the allocation paths that re-purpose a held voice instead of
+        releasing it -- because the latch outlives any of them that forgets it.
+
+        It asks TWO ledgers, because neither alone is the answer. A voice can
+        hold a pitch with no key down (the damper), and a key can hold a pitch
+        with no voice at all (the arpeggiator between its steps). Clearing on
+        either half alone is a bug in one of those two directions.
+
+        `ignoreVoice` is for the allocation sites, where the voice being asked
+        about is the one being taken away from that pitch: it still reports the
+        old note at the moment the question has to be asked, because the answer
+        decides what the NEW note is seeded with. */
+    void clearPolyPressureIfReleased(int note, int ignoreVoice = -1) noexcept;
     std::array<float, MAX_VOICES> voiceMpePressure_ {};   // MPE per-note Z (member-channel pressure)
     // Last CC 74 seen per MIDI channel (1..16; index 0 unused). Not a voice
     // property: a note's Y rest is the value in force when it STARTED, and the
@@ -313,6 +350,12 @@ private:
     std::array<bool, MAX_VOICES> sostenutoVoice {};
     std::array<bool, MAX_VOICES> sostenutoReleasedVoice {};
     std::array<float, 128> polyPressureByNote {};
+    // Which note numbers a physical key is DOWN on, refreshed once per block by
+    // the processor (see markKeyHeld). Nothing here can derive it: with the
+    // arpeggiator on, an external note on/off never reaches these voices at
+    // all, and the arp's own step note-offs carry sourceId -1 -- indistinguish-
+    // able from a key-up by every field noteOff receives.
+    std::array<bool, 128> keyHeldNote_ {};
     float channelPressure = 0.0f;
     float modWheelPressure = 0.0f;
     float breathPressure = 0.0f;
