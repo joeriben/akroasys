@@ -565,6 +565,8 @@ void VoiceManager::resetPerformanceControllers()
     channelVolumeGain = 1.0f;
     pitchBendSemitones = 0.0f;
     polyPressureByNote.fill(0.0f);
+    keyDownChannels_.fill(0);
+    keysDown_ = 0;
     for (auto& v : voices)
     {
         if (v.isActive())
@@ -577,17 +579,79 @@ void VoiceManager::resetPerformanceControllers()
     channelTimbre_.fill(SynthVoice::kTimbreRest);
 }
 
+namespace
+{
+    // Bit 0 is everything without a MIDI channel of its own -- the computer
+    // keyboard -- and bits 1..16 are the channels. Deliberately NOT folded onto
+    // channel 1: a key on the machine's own keyboard and an external key on
+    // channel 1 are two fingers, and one of them going up must not take the
+    // other's reading with it.
+    inline uint32_t keyChannelBit(int midiChannel) noexcept
+    {
+        return 1u << ((midiChannel >= 1 && midiChannel <= 16) ? midiChannel : 0);
+    }
+}
+
+void VoiceManager::noteKeyDown(int note, int midiChannel) noexcept
+{
+    if (note < 0 || note > 127)
+        return;
+    auto& mask = keyDownChannels_[static_cast<size_t>(note)];
+    const uint32_t bit = keyChannelBit(midiChannel);
+    if ((mask & bit) != 0)
+        return;                       // a note-on re-sent on a channel already down
+    // The FIRST finger on a pitch starts its reading over. A second one does
+    // not: it leans on the same key number, and the reading is theirs jointly.
+    if (mask == 0)
+    {
+        polyPressureByNote[static_cast<size_t>(note)] = 0.0f;
+        ++keysDown_;
+    }
+    mask |= bit;
+}
+
+void VoiceManager::noteKeyUp(int note, int midiChannel) noexcept
+{
+    if (note < 0 || note > 127)
+        return;
+    auto& mask = keyDownChannels_[static_cast<size_t>(note)];
+    if (mask == 0)
+        return;
+    const uint32_t bit = keyChannelBit(midiChannel);
+    // A key-up that names a channel nothing is down on is still a key-up: some
+    // controllers end a note on a channel they did not start it on, and a lost
+    // note-on would otherwise leave the reading standing for good. It takes the
+    // whole entry, which is what the pre-MPE behaviour was.
+    mask = ((mask & bit) != 0) ? (mask & ~bit) : 0u;
+    if (mask == 0)
+    {
+        if (keysDown_ > 0)
+            --keysDown_;
+        clearPolyPressureIfReleased(note);
+    }
+}
+
+void VoiceManager::allKeysReleased() noexcept
+{
+    if (keysDown_ == 0)
+        return;
+    keyDownChannels_.fill(0);
+    keysDown_ = 0;
+    for (int n = 0; n < 128; ++n)
+        clearPolyPressureIfReleased(n);
+}
+
 void VoiceManager::clearPolyPressureIfReleased(int note, int ignoreVoice) noexcept
 {
     if (note < 0 || note > 127)
         return;
 
     // A finger still on the key is the first and strongest reason to keep it,
-    // and it is invisible from here -- see keyHeldNote_. Under the arpeggiator
+    // and it is invisible from here -- see noteKeyDown. Under the arpeggiator
     // this is the ONLY reason there is: between two steps nothing of that pitch
     // is sounding, so the scan below would find nothing and clear the latch on
     // every gap, under a hand that never moved.
-    if (keyHeldNote_[static_cast<size_t>(note)])
+    if (keyDownChannels_[static_cast<size_t>(note)] != 0)
         return;
 
     // The same note number can be sounding on more than one voice, and the
@@ -1432,6 +1496,11 @@ void VoiceManager::setDroneNote(int note, float velocity, bool lfo1TrigMode, boo
         v.setTuningTable(tuningHz_);
         if (hasCurrentBlockParams_)
             v.configureForBlock(applyPerformanceControllers(currentBlockParams_));
+        // Same as the four allocation sites: the pitch this voice was on ends
+        // here without anything being released, so its latch has to be asked
+        // about before the seed below reads one.
+        const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
+        clearPolyPressureIfReleased(displacedNote, droneVoiceIndex);
         v.setAftertouch(pressureForNote(note));
         v.glideToNote(note, 15.0f);  // short glide keeps mouse-drag scrubs click-free
     }

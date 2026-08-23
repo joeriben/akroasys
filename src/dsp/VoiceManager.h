@@ -59,31 +59,36 @@ public:
     void setPolyPressure(int note, float pressure, int sourceId = -1);
     void resetPerformanceControllers();
 
-    /** The physical-key ledger, refreshed once per block by the processor:
-        clearKeysHeld() then one markKeyHeld() per key that is down. It exists
-        because the poly-key-pressure latch belongs to a FINGER, and voice state
-        is only a proxy for that -- a proxy that is wrong in both directions.
-        With the arpeggiator on, a held key sounds nothing between steps, so the
-        voices say "released" while the hand is still leaning in; under the
-        damper a voice holds a pitch no key is on any more. The processor is the
-        only place that knows, because the arpeggiator tracks held keys whether
-        or not it is enabled and external notes are filtered out of the voice
-        stream while it is. */
-    void clearKeysHeld() noexcept { keyHeldNote_.fill(false); }
-    /** A key went DOWN on this note number: its poly-pressure latch starts over.
-        Aftertouch begins at nothing and rises, so a fresh press inheriting the
-        pressure of the previous one is a stale reading whatever else is true --
-        and it is the last way a latch that was stranded can still be heard. */
-    void clearPolyPressure(int note) noexcept
-    {
-        if (note >= 0 && note <= 127)
-            polyPressureByNote[static_cast<size_t>(note)] = 0.0f;
-    }
-    void markKeyHeld(int note) noexcept
-    {
-        if (note >= 0 && note <= 127)
-            keyHeldNote_[static_cast<size_t>(note)] = true;
-    }
+    /** The physical-key ledger: told, not derived. The poly-key-pressure latch
+        belongs to a FINGER, and voice state is only a proxy for that -- a proxy
+        that is wrong in both directions. With the arpeggiator on, a held key
+        sounds nothing between its steps, so the voices report "released" while
+        the hand is still leaning in; under the damper a voice holds a pitch no
+        key is on any more. Neither can the arpeggiator's own held-key list
+        stand in: it is a SET, one entry per note number, so two fingers on one
+        pitch -- or a controller that re-sends a note-on it never ended -- look
+        exactly like one.
+
+        What tells those two apart is the CHANNEL, which is the whole point of
+        MPE: two fingers on one pitch arrive on two member channels, a
+        retransmit arrives twice on one. So each note number holds a SET of the
+        channels currently pressing it -- bit 0 for the computer keyboard and
+        anything channel-less, bits 1..16 for the MIDI channels. The processor
+        calls these at every point a physical key really moves: the two loops
+        that feed the arpeggiator from raw MIDI (the only place external key
+        events are seen in both arp states) and the computer keyboard's own
+        entry points.
+
+        Down: the FIRST finger on a pitch starts its reading over, because
+        aftertouch begins at nothing and rises and a fresh press must not
+        inherit the last one's. A second finger changes nothing, and neither
+        does a note-on a controller re-sends without ever having ended the last.
+        Up: the LAST finger off a pitch ends the reading -- unless a voice still
+        holds it, which is the damper. */
+    void noteKeyDown(int note, int midiChannel) noexcept;
+    void noteKeyUp(int note, int midiChannel) noexcept;
+    /** Every key up at once: panic, editor focus loss, replay takeover. */
+    void allKeysReleased() noexcept;
 
     // MPE: route pitch-wheel on a per-note channel to the voice(s) triggered on it.
     /** MPE X on one member channel. Two numbers for one gesture: `semitones` is
@@ -330,7 +335,8 @@ private:
         with no voice at all (the arpeggiator between its steps). Clearing on
         either half alone is a bug in one of those two directions.
 
-        `ignoreVoice` is for the allocation sites, where the voice being asked
+        Not public: a key-up goes through noteKeyUp, which owns the count this
+        consults. `ignoreVoice` is for the allocation sites, where the voice being asked
         about is the one being taken away from that pitch: it still reports the
         old note at the moment the question has to be asked, because the answer
         decides what the NEW note is seeded with. */
@@ -350,12 +356,15 @@ private:
     std::array<bool, MAX_VOICES> sostenutoVoice {};
     std::array<bool, MAX_VOICES> sostenutoReleasedVoice {};
     std::array<float, 128> polyPressureByNote {};
-    // Which note numbers a physical key is DOWN on, refreshed once per block by
-    // the processor (see markKeyHeld). Nothing here can derive it: with the
-    // arpeggiator on, an external note on/off never reaches these voices at
-    // all, and the arp's own step note-offs carry sourceId -1 -- indistinguish-
-    // able from a key-up by every field noteOff receives.
-    std::array<bool, 128> keyHeldNote_ {};
+    // Which channels are pressing each note number -- see noteKeyDown. Nothing
+    // here can derive it: with the arpeggiator on, an external note on/off
+    // never reaches these voices at all, and the arp's own step note-offs carry
+    // sourceId -1, indistinguishable from a key-up by every field noteOff
+    // receives. Bit 0 = channel-less (the computer keyboard), bits 1..16 = the
+    // MIDI channels. keysDown_ counts the non-empty entries, kept only so a
+    // panic can skip the sweep when nothing was down.
+    std::array<uint32_t, 128> keyDownChannels_ {};
+    int keysDown_ = 0;
     float channelPressure = 0.0f;
     float modWheelPressure = 0.0f;
     float breathPressure = 0.0f;

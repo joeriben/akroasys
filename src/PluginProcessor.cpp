@@ -764,6 +764,9 @@ void T5ynthProcessor::beginComputerKeyboardNote(int midiNote, float velocity, bo
     // buffer, which these notes never enter — and what lets switching the arp on
     // mid-hold pick up keys that are already down.
     arpeggiator.noteOn(note, vel, kComputerKeyboardSourceId);
+    // A key on this keyboard is a key. It never enters the MIDI buffer, so the
+    // two loops that keep the ledger from raw MIDI never see it.
+    voiceManager.noteKeyDown(note, /*midiChannel=*/0);
 
     // With the arp on, the arp's notes sound and the raw key does not, exactly as
     // for an external keyboard. The arp emits them from processBlock.
@@ -797,6 +800,7 @@ void T5ynthProcessor::endComputerKeyboardNote(int midiNote)
 
     const int note = juce::jlimit(0, 127, midiNote);
     arpeggiator.noteOff(note);
+    voiceManager.noteKeyUp(note, /*midiChannel=*/0);
     // Unconditional: a no-op unless this key really started a direct voice (arp
     // off when it went down, or switched off while it was held).
     voiceManager.noteOff(note, kComputerKeyboardSourceId);
@@ -809,6 +813,7 @@ void T5ynthProcessor::allComputerKeyboardNotesOff()
     const juce::ScopedLock sl(getCallbackLock());
 
     arpeggiator.allKeysUp();
+    voiceManager.allKeysReleased();
     for (int note = 0; note < 128; ++note)
         voiceManager.noteOff(note, kComputerKeyboardSourceId);
     if (!voiceManager.hasActiveVoices())
@@ -3693,6 +3698,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // lead, NOT reset(): reset() would also clear lastPlayedNote, and the
         // note-off the arp still owes for it would never be emitted.
         arpeggiator.allKeysUp();
+        voiceManager.allKeysReleased();
         arpeggiator.clearSeqLead();
         lastMidiNoteOn.store(false, std::memory_order_relaxed);
     }
@@ -4742,13 +4748,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             {
                 if (ch16Encoder)
                     continue;
-                // A key going down starts that note's poly-pressure latch over.
-                // Aftertouch begins at nothing and rises, so a fresh press must
-                // not inherit the last one's reading -- and this is the only
-                // place raw key events are seen in BOTH arp states, which is
-                // what the latch needs and what noteOff cannot tell apart (an
-                // arp step note-off carries sourceId -1 exactly like a key-up).
-                voiceManager.clearPolyPressure(msg.getNoteNumber());
+                // This loop and its twin in the arp-off branch are the only
+                // places a raw external key event is seen in BOTH arp states,
+                // so they are where the key ledger is kept -- noteOff cannot
+                // do it, because an arp step note-off carries sourceId -1
+                // exactly like a key-up does.
+                voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
                 arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                    /*sourceId=*/-1, ch);
                 if (stepRecordArmed.load(std::memory_order_relaxed))
@@ -4759,6 +4764,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 if (ch16Encoder)
                     continue;
                 arpeggiator.noteOff(msg.getNoteNumber());
+                // The finger leaving is the ONLY thing that ends this note's
+                // pressure reading while the arp is on. The arp drops a lifted
+                // key from the pattern and never plays it again, so no note-off
+                // for that pitch is ever emitted, and nothing downstream would
+                // ask a second time.
+                voiceManager.noteKeyUp(msg.getNoteNumber(), ch);
             }
             else
             {
@@ -4823,6 +4834,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         if (replayActive)
         {
             arpeggiator.allKeysUp();
+            voiceManager.allKeysReleased();
         }
         else
         {
@@ -4836,30 +4848,22 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     continue;
                 if (msg.isNoteOn())
                 {
-                    // Same as in the arp-on branch above: a fresh press starts
-                    // the latch over. This loop only observes -- the note itself
-                    // reaches the voices later in the block, and reads the latch
-                    // when it is seeded, so the order here is the one that matters.
-                    voiceManager.clearPolyPressure(msg.getNoteNumber());
+                    // Same ledger as in the arp-on branch above. This loop only
+                    // observes -- the note itself reaches the voices later in
+                    // the block and reads the latch when it is seeded, so the
+                    // order here is the one that matters.
+                    voiceManager.noteKeyDown(msg.getNoteNumber(), ch);
                     arpeggiator.noteOn(msg.getNoteNumber(), msg.getFloatVelocity(),
                                        /*sourceId=*/-1, ch);
                 }
                 else if (msg.isNoteOff())
+                {
                     arpeggiator.noteOff(msg.getNoteNumber());
+                    voiceManager.noteKeyUp(msg.getNoteNumber(), ch);
+                }
             }
         }
     }
-
-    // The physical-key ledger for this block. The arpeggiator tracks which keys
-    // are down whether or not it is enabled (both branches above), and it is the
-    // only thing here that knows: with the arp ON, external note on/off never
-    // reach the voices at all, so voice state says "released" while the hand is
-    // still leaning into the chord. The poly-pressure latch asks this before it
-    // clears -- without it, every arp gap walks the aftertouch travellers back
-    // to zero under a finger that never moved.
-    voiceManager.clearKeysHeld();
-    for (const auto& heldKey : arpeggiator.getHeldKeys())
-        voiceManager.markKeyHeld(heldKey.note);
 
     // The sequencers schedule per-strand and the arp appends after them, so the
     // internal stream is not globally time-ordered. Sort by sample offset so the
@@ -5424,6 +5428,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         // ahead of us in internalNoteEvents_ — that voice would
                         // start after the panic and never receive its note-off.
                         arpeggiator.allKeysUp();
+                        voiceManager.allKeysReleased();
                         arpeggiator.clearSeqLead();
                         lastMidiNoteOn.store(false, std::memory_order_relaxed);
                     }

@@ -1484,6 +1484,184 @@ void caseFreshPressStartsAtNoPressureUnderTheDamper()
 }
 
 
+// ── 38. Under the arpeggiator, a lifted key's pressure ends with the finger ──
+//      The arp DROPS a lifted key from its pattern and never plays it again, so
+//      no note-off for that pitch is ever emitted -- and with the arp on, an
+//      external key-up does not reach the voices either. If the key event is
+//      not itself the end of the reading, nothing downstream asks a second
+//      time, and that note number keeps a permanent aftertouch FLOOR: every
+//      later voice on it that no external key started -- a sequencer note, the
+//      drone, a replay note, the machine's own keyboard -- enters at full
+//      pressure. The common gesture is lifting one key out of a held chord.
+void caseArpKeyUpEndsThePressure()
+{
+    std::printf ("[38] a key lifted under the arpeggiator takes its pressure with it\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.noteOn (1, 64);
+    r.noteOn (1, 67);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.polyPressure (1, 64, 127);
+    r.polyPressure (1, 67, 127);
+    r.flush();
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+
+    const auto& vm = r.proc.getVoiceManager();
+    r.noteOff (1, 67);            // ONE key out of the chord -- a chord change
+    r.run (80);
+    checkNear (vm.pressureForHeldNote (67), 0.0f, 1e-3f,
+               "the lifted key's pressure ends with the finger, arp or no arp");
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "while the keys still down keep theirs");
+
+    r.noteOff (1, 60);
+    r.noteOff (1, 64);
+    r.run (80);
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and the last two end with their fingers too");
+    checkNear (vm.pressureForHeldNote (64), 0.0f, 1e-3f,
+               "-- including the one the arp happened to be sounding");
+}
+
+// ── 39. A note-on the controller re-sends is not a new press ────────────────
+//      A key-down starts its note's reading over, which is right for a FRESH
+//      press and wrong for the same key announced twice. Controllers re-send,
+//      and key repeat does it too -- the arpeggiator's own noteOn names the
+//      case. What tells them apart is the channel: a retransmit arrives twice
+//      on one, two fingers arrive on two.
+void caseRetransmittedNoteOnIsNotAFreshPress()
+{
+    std::printf ("[39] a note-on re-sent on the same channel is not a new press\n");
+    Rig r;
+    r.noteOn (2, 60);
+    r.flush();
+    r.polyPressure (2, 60, 127);
+    r.flush();
+    const auto& vm = r.proc.getVoiceManager();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f, "the finger is readable");
+
+    r.noteOn (2, 60);             // again, with no note-off between
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "and stays readable when the controller re-sends the note-on");
+
+    r.noteOff (2, 60);            // one key-up still ends it
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "-- one key-up still ends it, the repeat did not outlive the key");
+}
+
+// ── 40. A second finger on one pitch does not reset the first's reading ─────
+//      The key-down half of cases 31 and 32: the same pitch really is played on
+//      two member channels, and the second press must not zero a reading the
+//      first finger is still applying. It would collapse that key's Z mid-
+//      gesture and walk a Cache or Snap traveller back to its first position
+//      under a hand that never moved -- the same failure as an arp gap, entered
+//      from the other side.
+void caseSecondFingerDoesNotResetTheFirst()
+{
+    std::printf ("[40] a second finger on one pitch does not reset the first's reading\n");
+    Rig r;
+    r.noteOn (2, 60);
+    r.flush();
+    r.polyPressure (2, 60, 127);
+    r.flush();
+    const auto& vm = r.proc.getVoiceManager();
+
+    r.noteOn (3, 60);             // a second finger, its own member channel
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "the first finger keeps its reading while the second arrives");
+
+    r.noteOff (2, 60);            // the FIRST finger goes; the second is down
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "and the reading outlives it, because a finger is still on that key");
+
+    r.noteOff (3, 60);
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "ending only when the last one lifts");
+
+    // The same two fingers with NO voice to fall back on. Above, the second
+    // finger's own voice still held the pitch when the first lifted, so the
+    // voice scan would have carried it even if the key ledger had not -- which
+    // makes the case above no test of the ledger at all. Under the arpeggiator
+    // there is no voice in the gap, and the only thing that can know a finger
+    // is still on that key is which CHANNELS are down on it.
+    Rig a;
+    a.noteOn (2, 60);
+    a.noteOn (3, 60);            // two fingers, one pitch, two member channels
+    a.flush();
+    a.polyPressure (2, 60, 127);
+    a.flush();
+    if (auto* p = a.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    a.run (40);
+
+    const auto& avm = a.proc.getVoiceManager();
+    a.noteOff (2, 60);           // one of the two goes
+    a.run (80);                  // long enough to cross several arp gaps
+    checkNear (avm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "and under the arpeggiator too, where no voice can vouch for it");
+
+    a.noteOff (3, 60);
+    a.run (80);
+    checkNear (avm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "-- ending there when the second finger lifts, and not before");
+}
+
+// ── 41. The machine's own keyboard is a keyboard ────────────────────────────
+//      Its keys never enter the MIDI buffer, so the two loops that keep the key
+//      ledger from raw MIDI never see them. Missed on the way up, a key-up
+//      leaves the reading standing for good; missed on the way down, a fresh
+//      press inherits the last one's -- case 37 through the other keyboard.
+void caseComputerKeyboardKeysCountToo()
+{
+    std::printf ("[41] the machine's own keyboard is a keyboard\n");
+    {
+        Rig r;
+        r.proc.beginComputerKeyboardNote (60, 0.8f);
+        r.flush();
+        r.polyPressure (1, 60, 127);
+        r.flush();
+        const auto& vm = r.proc.getVoiceManager();
+        checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+                   "a key on it takes pressure like any other");
+        r.proc.endComputerKeyboardNote (60);
+        r.flush();
+        checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+                   "and lets it go when the key comes up");
+    }
+    {
+        Rig r;
+        r.cc (1, 64, 127);            // damper down
+        r.noteOn (1, 60);
+        r.flush();
+        r.polyPressure (1, 60, 127);
+        r.flush();
+        const auto* pedalled = r.heldVoiceForNote (60);
+        check (pedalled != nullptr, "the pedalled note is sounding");
+        r.noteOff (1, 60);            // held by the pedal, reading correctly kept
+        r.flush();
+        const auto& vm = r.proc.getVoiceManager();
+        checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+                   "the pedalled note keeps its pressure");
+
+        r.proc.beginComputerKeyboardNote (60, 0.008f);   // the lightest touch
+        r.flush();
+        checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+                   "and a press on the other keyboard starts at nothing all the same");
+        if (pedalled != nullptr)
+            checkNear (pedalled->getAftertouch(), 1.0f, 1e-3f,
+                       "while the note under the pedal keeps the pressure it had");
+    }
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1527,6 +1705,10 @@ int main()
     caseTakenOverVoiceDoesNotStrandTheLatch();
     casePolyPressureSurvivesAnArpGap();
     caseFreshPressStartsAtNoPressureUnderTheDamper();
+    caseArpKeyUpEndsThePressure();
+    caseRetransmittedNoteOnIsNotAFreshPress();
+    caseSecondFingerDoesNotResetTheFirst();
+    caseComputerKeyboardKeysCountToo();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
