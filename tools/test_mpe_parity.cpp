@@ -1789,6 +1789,37 @@ void caseKeyUpOnAnUnheldChannelTakesNothing()
 }
 
 
+// ── 46. Reset All Controllers is not the hand leaving the keys ─────────────
+//      CC 121 resets controller VALUES and releases no voice: the chord goes on
+//      sounding and the hand goes on leaning. If it drops the keys as well, the
+//      reading gate stays shut for every one of them -- the instrument deaf to
+//      pressure on a chord it is still playing, until each key is lifted and
+//      pressed again. A DAW sends it on transport stop and locate, and a
+//      controller sends it on a patch change.
+void caseResetAllControllersIsNotTheHandLeaving()
+{
+    std::printf ("[46] reset-all-controllers is not the hand leaving the keys\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    const auto& vm = r.proc.getVoiceManager();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f, "the finger is readable");
+
+    r.cc (1, 121, 0);             // Reset All Controllers
+    r.flush();
+    check (r.heldVoiceForNote (60) != nullptr, "the note is still sounding after it");
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and the reading went to nothing with the other controller values");
+
+    r.polyPressure (1, 60, 100);  // the hand leans in again, key never lifted
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 100.0f / 127.0f, 1e-3f,
+               "-- and the key still answers, because the finger never left it");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1840,6 +1871,7 @@ int main()
     caseAftertouchInTheReleaseBufferDoesNotReArm();
     casePanicUnderAHeldChordLeavesNothingStanding();
     caseKeyUpOnAnUnheldChannelTakesNothing();
+    caseResetAllControllersIsNotTheHandLeaving();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

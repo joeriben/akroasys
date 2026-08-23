@@ -587,8 +587,13 @@ void VoiceManager::resetPerformanceControllers()
     channelVolumeGain = 1.0f;
     pitchBendSemitones = 0.0f;
     polyPressureByNote.fill(0.0f);
-    keyDownChannels_.fill(0);
-    keysDown_ = 0;
+    // NOT keyDownChannels_. This runs for Reset All Controllers (CC 121), which
+    // releases no voice: the chord goes on sounding and the hand goes on
+    // leaning into it. Dropping the keys here would leave the reading gate shut
+    // for every one of them until they are lifted and pressed again -- the
+    // instrument deaf to pressure on a chord it is still playing. Resetting
+    // controller VALUES is not the hand leaving the keys. A real panic clears
+    // the ledger where that belongs, beside the arpeggiator's own allKeysUp.
     for (auto& v : voices)
     {
         if (v.isActive())
