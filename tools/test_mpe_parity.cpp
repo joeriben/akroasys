@@ -1662,6 +1662,133 @@ void caseComputerKeyboardKeysCountToo()
 }
 
 
+// ── 42. A stream restart under a held key does not deafen that pitch ────────
+//      prepare() and reset() clear the reading; if they leave the key ledger
+//      standing, that note number is stuck holding a finger that is not there.
+//      Every later clear for it short-circuits AND every later first-press
+//      reset does too -- the pitch keeps whatever it is next given, for good.
+//      A host restarts the stream for a sample-rate change, a buffer-size
+//      change, a device switch or a suspend; a held chord across one of those
+//      is ordinary.
+void caseStreamRestartDoesNotDeafenAPitch()
+{
+    std::printf ("[42] a stream restart under a held key does not deafen that pitch\n");
+    Rig r;
+    r.noteOn (2, 60);             // a key goes down...
+    r.flush();
+    r.proc.releaseResources();    // ...and the host restarts the stream under it
+    r.proc.prepareToPlay (kSampleRate, kBlockSize);
+    pump (20);
+
+    const auto& vm = r.proc.getVoiceManager();
+    r.noteOn (3, 60);
+    r.flush();
+    r.polyPressure (3, 60, 127);
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "a key pressed after the restart still takes pressure");
+    r.noteOff (3, 60);
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and still lets it go, rather than being held by a finger that left");
+
+    r.noteOn (3, 60, 1);          // the lightest touch there is
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "-- and a fresh press after all that starts at nothing");
+}
+
+// ── 43. Aftertouch in the same buffer as the key-up does not re-arm it ──────
+//      The key events of a whole buffer are read at the top of the block; the
+//      aftertouch is applied in the sample-accurate walk further down. So an
+//      aftertouch message sitting in the same buffer as the note-off that ended
+//      the key arrives AFTER the reading was closed. At 256 samples that window
+//      is under six milliseconds, which a controller streaming pressure hits on
+//      most releases -- and with the arpeggiator on nothing asks a second time,
+//      so what it re-armed stands for the session. The arp then feeds it to its
+//      own octave notes and to the step-hold preview: full pressure on notes
+//      nobody leaned on.
+void caseAftertouchInTheReleaseBufferDoesNotReArm()
+{
+    std::printf ("[43] aftertouch in the same buffer as the key-up does not re-arm it\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+
+    // Both in ONE buffer, the way a release actually arrives.
+    r.polyPressure (1, 60, 127);
+    r.noteOff (1, 60);
+    r.run (80);
+
+    const auto& vm = r.proc.getVoiceManager();
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "the reading ends with the key, whatever else was in that buffer");
+}
+
+// ── 44. A panic under a held chord leaves nothing standing ──────────────────
+//      All-notes-off drops every key, which is right -- the arpeggiator does
+//      the same -- but the fingers are still on the keys and go on sending. The
+//      key-up that eventually comes finds nothing recorded and has nothing to
+//      clear with, so anything written in between would stand for good. A DAW
+//      sends CC123 on transport stop, so "stop while holding a chord, keep
+//      holding, lean in" is an ordinary gesture.
+void casePanicUnderAHeldChordLeavesNothingStanding()
+{
+    std::printf ("[44] a panic under a held chord leaves nothing standing\n");
+    Rig r;
+    r.noteOn (1, 60);
+    r.flush();
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
+    r.run (40);
+
+    r.cc (1, 123, 0);             // all notes off, finger still down
+    r.run (10);
+    r.polyPressure (1, 60, 127);  // the hand goes on leaning
+    r.run (10);
+    r.noteOff (1, 60);            // and eventually lifts
+    r.run (40);
+
+    const auto& vm = r.proc.getVoiceManager();
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "nothing is left holding that pitch after the panic");
+}
+
+// ── 45. A key-up naming a channel that is not down takes nothing with it ────
+//      It used to take the WHOLE entry, on the theory that a lost note-on would
+//      otherwise leave the reading standing. The entry it takes belongs to
+//      whichever fingers are down, and there is a plain path to the wrong one:
+//      the computer keyboard declines to register a key while a replay runs and
+//      reports its key-up afterwards all the same, so a key-up for a key that
+//      was never registered lands on a pitch another finger is holding.
+void caseKeyUpOnAnUnheldChannelTakesNothing()
+{
+    std::printf ("[45] a key-up naming a channel that is not down takes nothing\n");
+    Rig r;
+    r.noteOn (2, 60);
+    r.flush();
+    r.polyPressure (2, 60, 127);
+    r.flush();
+    if (auto* p = r.proc.getValueTreeState().getParameter (PID::arpMode))
+        p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // no voice in the gap
+    r.run (40);
+
+    const auto& vm = r.proc.getVoiceManager();
+    r.noteOff (5, 60);            // a channel nothing is down on
+    r.run (80);
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "the finger that IS on that key keeps its reading");
+
+    r.noteOff (2, 60);            // its own key-up still ends it
+    r.run (80);
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and lets it go when that finger lifts");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1709,6 +1836,10 @@ int main()
     caseRetransmittedNoteOnIsNotAFreshPress();
     caseSecondFingerDoesNotResetTheFirst();
     caseComputerKeyboardKeysCountToo();
+    caseStreamRestartDoesNotDeafenAPitch();
+    caseAftertouchInTheReleaseBufferDoesNotReArm();
+    casePanicUnderAHeldChordLeavesNothingStanding();
+    caseKeyUpOnAnUnheldChannelTakesNothing();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

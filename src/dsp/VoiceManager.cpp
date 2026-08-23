@@ -77,6 +77,11 @@ void VoiceManager::prepare(double sampleRate, int samplesPerBlock)
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);
     polyPressureByNote.fill(0.0f);
+    // With the latch, never without it: a mask left standing suppresses every
+    // later clear AND every later first-finger reset for that note number, so
+    // one held key across a stream restart would deafen that pitch for good.
+    keyDownChannels_.fill(0);
+    keysDown_ = 0;
     channelPressure = 0.0f;
     modWheelPressure = 0.0f;
     breathPressure = 0.0f;
@@ -116,6 +121,11 @@ void VoiceManager::reset()
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);
     polyPressureByNote.fill(0.0f);
+    // With the latch, never without it: a mask left standing suppresses every
+    // later clear AND every later first-finger reset for that note number, so
+    // one held key across a stream restart would deafen that pitch for good.
+    keyDownChannels_.fill(0);
+    keysDown_ = 0;
     channelPressure = 0.0f;
     modWheelPressure = 0.0f;
     breathPressure = 0.0f;
@@ -533,6 +543,18 @@ void VoiceManager::setChannelPressure(float pressure)
 void VoiceManager::setPolyPressure(int note, float pressure, int sourceId)
 {
     note = juce::jlimit(0, 127, note);
+    // Nothing is pressing that key, so there is no reading to record. This is
+    // an ORDER problem, not a filter: the key events of a whole buffer are read
+    // at the top of the block, while aftertouch is applied in the sample-
+    // accurate walk further down -- so an aftertouch message sitting in the
+    // same buffer as the note-off that ended the key arrives after the reading
+    // was already closed. At 256 samples that window is under six milliseconds,
+    // which a controller streaming pressure hits on most releases; and with the
+    // arpeggiator on nothing asks a second time, so the value it re-armed would
+    // stand for the session. Note-ons are read in that same pass, so a fresh
+    // press and its first aftertouch in one buffer are still in the right order.
+    if (keyDownChannels_[static_cast<size_t>(note)] == 0)
+        return;
     sourceId = sourceId >= 0 ? juce::jlimit(0, 15, sourceId) : -1;
     polyPressureByNote[static_cast<size_t>(note)] = juce::jlimit(0.0f, 1.0f, pressure);
 
@@ -617,12 +639,14 @@ void VoiceManager::noteKeyUp(int note, int midiChannel) noexcept
     auto& mask = keyDownChannels_[static_cast<size_t>(note)];
     if (mask == 0)
         return;
-    const uint32_t bit = keyChannelBit(midiChannel);
-    // A key-up that names a channel nothing is down on is still a key-up: some
-    // controllers end a note on a channel they did not start it on, and a lost
-    // note-on would otherwise leave the reading standing for good. It takes the
-    // whole entry, which is what the pre-MPE behaviour was.
-    mask = ((mask & bit) != 0) ? (mask & ~bit) : 0u;
+    // A key-up that names a channel nothing is down on removes nothing. It used
+    // to take the whole entry, on the theory that a lost note-on would otherwise
+    // leave the reading standing -- but the entry it takes belongs to whichever
+    // fingers ARE down, and there is a plain path to it: the computer keyboard
+    // declines to register a key while a replay runs and reports its key-up
+    // afterwards all the same, so the key-up of a key that was never registered
+    // lands on a pitch another finger is holding.
+    mask &= ~keyChannelBit(midiChannel);
     if (mask == 0)
     {
         if (keysDown_ > 0)
