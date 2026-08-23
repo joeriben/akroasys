@@ -5,6 +5,16 @@ namespace
 {
 constexpr bool kSamplerDebugLogging = false;
 
+// The guard has to sit at the CALL SITE, not in the body. Every call here
+// builds its message by concatenating juce::Strings, and that concatenation is
+// evaluated BEFORE the call -- an `if constexpr` inside the function cannot
+// reach it. Measured: eleven heap allocations per poly note-on, twenty-four
+// with a sample loaded, on the audio thread, in a build where the logging is
+// switched off. A sequencer at 1/32 and 240 BPM is some 350 malloc calls per
+// second there, which is the one thing the audio thread must never do.
+#define T5_SAMPLER_DEBUG_LOG(...) \
+    do { if constexpr (kSamplerDebugLogging) samplerVoiceDebugLog (__VA_ARGS__); } while (false)
+
 void samplerVoiceDebugLog(const juce::String& message)
 {
     if constexpr (kSamplerDebugLogging)
@@ -225,7 +235,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
         {
             v.getSampler().shareBufferFrom(*currentSamplerMaster_);
-            samplerVoiceDebugLog("noteOn mono share voice=0 note=" + juce::String(note)
+            T5_SAMPLER_DEBUG_LOG("noteOn mono share voice=0 note=" + juce::String(note)
                                  + " engine=" + juce::String(engineModeName(v.getEngineMode())));
         }
         if (v.getEngineMode() == SynthVoice::EngineMode::Wavetable && currentWavetableMaster_ != nullptr)
@@ -240,7 +250,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         voiceMpePressure_[0] = 0.0f;
         v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
         v.setPerVoicePitchBend(0.0f);
-        samplerVoiceDebugLog("noteOn mono trigger voice=0 note=" + juce::String(note)
+        T5_SAMPLER_DEBUG_LOG("noteOn mono trigger voice=0 note=" + juce::String(note)
                              + " velocity=" + juce::String(velocity, 3)
                              + " engine=" + juce::String(engineModeName(v.getEngineMode())));
         v.noteOnTimestamp = ++noteOnCounter;
@@ -251,7 +261,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && v.getSampler().hasAudio())
         {
             v.getSampler().retrigger();
-            samplerVoiceDebugLog("noteOn mono retrigger voice=0 note=" + juce::String(note));
+            T5_SAMPLER_DEBUG_LOG("noteOn mono retrigger voice=0 note=" + juce::String(note));
         }
         if (v.getEngineMode() == SynthVoice::EngineMode::Wavetable)
         {
@@ -363,7 +373,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
     {
         v.getSampler().shareBufferFrom(*currentSamplerMaster_);
-        samplerVoiceDebugLog("noteOn poly share voice=" + juce::String(idx)
+        T5_SAMPLER_DEBUG_LOG("noteOn poly share voice=" + juce::String(idx)
                              + " note=" + juce::String(note)
                              + " engine=" + juce::String(engineModeName(v.getEngineMode())));
     }
@@ -379,7 +389,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     voiceMpePressure_[static_cast<size_t>(idx)] = 0.0f;
     v.beginTimbre(channelTimbreFor(effectiveMidiChannel));
     v.setPerVoicePitchBend(0.0f);
-    samplerVoiceDebugLog("noteOn poly trigger voice=" + juce::String(idx)
+    T5_SAMPLER_DEBUG_LOG("noteOn poly trigger voice=" + juce::String(idx)
                          + " note=" + juce::String(note)
                          + " velocity=" + juce::String(velocity, 3)
                          + " engine=" + juce::String(engineModeName(v.getEngineMode())));
@@ -398,7 +408,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && v.getSampler().hasAudio())
     {
         v.getSampler().retrigger();
-        samplerVoiceDebugLog("noteOn poly retrigger voice=" + juce::String(idx)
+        T5_SAMPLER_DEBUG_LOG("noteOn poly retrigger voice=" + juce::String(idx)
                              + " note=" + juce::String(note));
     }
     if (v.getEngineMode() == SynthVoice::EngineMode::Wavetable)
