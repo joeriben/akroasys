@@ -302,6 +302,15 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             voiceMpePressure_[static_cast<size_t>(newest)] = 0.0f;
             // No beginTimbre: same reason as the mono legato branch above --
             // this is a continued voice gliding, not a fresh strike.
+            //
+            // A sixth path that takes a voice off its pitch with nothing
+            // released -- see the mono legato branch. Reached whenever a
+            // sequencer step carries Glide or Bind, so: play along with a
+            // gliding line, touch the pitch it is on, lean, lift. The voice arm
+            // rightly keeps the reading while the step's voice still holds that
+            // pitch; when the step glides away, nothing was asking any more.
+            const int displacedNote = v.isActive() ? v.getCurrentNote() : -1;
+            clearPolyPressureIfReleased(displacedNote, newest);
             v.glideToNote(note, glideMs);
             // Continued voice is now the newest: keeps it from becoming the steal
             // victim mid-slide, and makes the next same-source bind find it.

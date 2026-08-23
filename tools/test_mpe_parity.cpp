@@ -1853,6 +1853,64 @@ void caseAftertouchBeforeThePressDoesNotSeedIt()
 }
 
 
+// ── 48. A gliding step takes the reading of the pitch it leaves ─────────────
+//      The sixth path that moves a voice off its note with nothing released:
+//      the poly bind/glide branch, reached whenever a sequencer step carries
+//      Glide or Bind. Play along with a gliding line, touch the pitch it is on,
+//      lean, lift: the voice arm rightly keeps the reading while the step's own
+//      voice still holds that pitch -- and when the step glides away, nothing
+//      is asking any more. From then on every sequencer, arp or drone note on
+//      that pitch enters at full pressure, for the session.
+void caseGlidingStepTakesTheReadingWithIt()
+{
+    std::printf ("[48] a gliding step takes the reading of the pitch it leaves\n");
+    Rig r;
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    // The generative sequencer mirrors its own pattern into the step data every
+    // block, so the steps below only stay put with it off.
+    set (PID::genSeqRunning, 0.0f);
+    r.run (2);
+
+    auto& seq = r.proc.getStepSequencer();
+    seq.setNumSteps (2);
+    seq.setStepNote (0, 60);
+    seq.setStepNote (1, 67);
+    seq.setStepEnabled (0, true);
+    seq.setStepEnabled (1, true);
+    // The articulation carries the INCOMING transition, so it is step 0 that
+    // has to slide for step 1's note to continue step 0's voice.
+    seq.setStepBindMode (0, T5ynthStepSequencer::BindMode::Glide);
+    seq.setStepBindMode (1, T5ynthStepSequencer::BindMode::Off);
+    set (PID::seqSteps, 2.0f);
+    set (PID::seqBpm, 40.0f);     // slow, so the hand acts inside step 0
+    set (PID::seqRunning, 1.0f);
+    r.run (10);                   // the line is on step 0, sounding note 60
+
+    const auto& vm = r.proc.getVoiceManager();
+    r.polyPressure (1, 60, 127);  // a hand touches the pitch the line is on...
+    r.noteOn (1, 60);
+    r.flush();
+    r.polyPressure (1, 60, 127);
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f, "the hand is readable");
+
+    r.noteOff (1, 60);            // ...and lifts. The step's voice still holds 60.
+    r.flush();
+    checkNear (vm.pressureForHeldNote (60), 1.0f, 1e-3f,
+               "which the line's own voice rightly keeps while it is still on 60");
+
+    r.run (100);                  // long enough for the glide to step 67
+    checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+               "and the reading goes when the line glides off that pitch");
+    set (PID::seqRunning, 0.0f);
+    r.run (5);
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1906,6 +1964,7 @@ int main()
     caseKeyUpOnAnUnheldChannelTakesNothing();
     caseResetAllControllersIsNotTheHandLeaving();
     caseAftertouchBeforeThePressDoesNotSeedIt();
+    caseGlidingStepTakesTheReadingWithIt();
     caseLegatoKeepsItsTimbreOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
