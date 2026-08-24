@@ -4298,10 +4298,36 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // engines run. Manual keyboard notes stay untouched.
     if (arpEnabled && !arpWasEnabled)
     {
+        const size_t flushFrom = internalNoteEvents_.size();
         if (genModeActiveInAudio)
             generativeSequencer.allNotesOff(internalNoteEvents_);
         else
             stepSequencer.allNotesOff(internalNoteEvents_);
+
+        // Applied to the voices HERE rather than left in the stream, and that is
+        // the whole point of these four lines: the lead filter further down runs
+        // in this same block and erases every lead event, note-offs included
+        // ("drop lead note-ons AND note-offs"). It ate this flush. And because
+        // allNotesOff has already set lastPlayedNote to -1 by then, no later
+        // flush could ever re-emit it -- so the voice was never released by
+        // anyone. Switch the arpeggiator on while a sequencer is inside a gated
+        // step and that note droned under the arpeggio, survived releasing the
+        // chord, survived stopping the transport, survived switching the arp
+        // back off, and only a MIDI panic ended it. Measured on both sequencers
+        // (tools/repro_arp_edge_stuck.cpp).
+        //
+        // Offset 0 is what allNotesOff stamps, so applying at block top is the
+        // same instant the stream would have used. sourceId and channel are the
+        // event's own, which is what keeps an external key of the same pitch out
+        // of it. resize() only shrinks -- no allocation on the audio thread.
+        for (size_t i = flushFrom; i < internalNoteEvents_.size(); ++i)
+        {
+            const auto& flushed = internalNoteEvents_[i];
+            if (flushed.type == VoiceEvent::Type::NoteOff)
+                voiceManager.noteOff(flushed.note, flushed.strandId,
+                                     /*forceRelease=*/false, flushed.mpeChannel);
+        }
+        internalNoteEvents_.resize(flushFrom);
 
         // Keys already down were sounding as ordinary voices; from this block on
         // the arp plays them instead. Release those voices or they drone under
