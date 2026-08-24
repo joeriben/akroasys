@@ -3099,6 +3099,123 @@ void caseSlidingStepDoesNotContinueAPanickedTail()
 }
 
 
+
+// ── 67. In mono, a hand is still a hand and the machine still is not ────────
+//      followsLivePressure is only as good as the four places that record what
+//      started a voice, and the corpus never left the default poly voice count,
+//      so two of the four were never entered at all. Both have measured damage:
+//      deleting the mono TRIGGER site leaves the hand's own note unmarked, so
+//      its tail swells 0.8661 -> 1.0000 on the wheel and then collapses to
+//      0.0000 at rest -- the exact pair of artefacts this whole class exists to
+//      prevent. Deleting the mono LEGATO site marks a sequencer step that takes
+//      voice 0 as hand-started, which FREEZES it: the wheel moves nothing.
+void caseMonoKnowsAHandFromTheMachine()
+{
+    std::printf ("[67] in mono, a hand is still a hand and the machine still is not\n");
+
+    auto mono = [] (Rig& r)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (PID::voiceCount))
+            p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = mono
+        r.flush();
+    };
+
+    // The hand's own note, struck into an empty pool -- the mono TRIGGER branch.
+    // Under the DAMPER, and that is what makes the case discriminate: a plain
+    // release freezes on the release term alone, so a note whose origin was
+    // never recorded looks identical to one that was. A pedal-held voice is not
+    // releasing, so only its origin can decide whether the wheel reaches it.
+    {
+        Rig r;
+        mono (r);
+        r.cc (1, 64, 127);             // damper down
+        r.noteOn (2, 60);
+        r.flush();
+        r.pressure (2, 110);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (60);
+        check (v != nullptr, "the mono note sounds");
+        if (v != nullptr)
+        {
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f, "and is leaned into");
+            r.noteOff (2, 60);
+            r.flush();
+            r.cc (1, 1, 127);
+            r.flush();
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "the wheel does not raise what the pedal holds");
+            r.cc (1, 1, 0);
+            r.flush();
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "and does not cut it either");
+        }
+    }
+
+    // A second key on top of the first -- the mono LEGATO branch, still a hand.
+    {
+        Rig r;
+        mono (r);
+        r.cc (1, 64, 127);             // damper down, for the same reason
+        r.noteOn (2, 60);
+        r.flush();
+        r.noteOn (2, 64);              // legato onto the same channel
+        r.flush();
+        r.pressure (2, 110);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (64);
+        check (v != nullptr, "the legato note sounds");
+        if (v != nullptr)
+        {
+            r.noteOff (2, 64);
+            r.noteOff (2, 60);
+            r.flush();
+            r.cc (1, 1, 127);
+            r.flush();
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "and the pedal holds it without the wheel reaching it");
+        }
+    }
+
+    // And the machine's own note in mono: a sequencer step, which has no hand
+    // and must follow the wheel for as long as it is sounding.
+    {
+        Rig r;
+        mono (r);
+        auto set = [&r] (const char* pid, float v)
+        {
+            if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        set (PID::genSeqRunning, 0.0f);
+        r.run (2);
+        auto& seq = r.proc.getStepSequencer();
+        seq.setNumSteps (1);
+        seq.setStepNote (0, 67);
+        seq.setStepEnabled (0, true);
+        set (PID::seqSteps, 1.0f);
+        set (PID::seqBpm, 40.0f);
+        set (PID::seqGate, 0.95f);
+        set (PID::seqRunning, 1.0f);
+        // A hand is holding voice 0 first, so the step arrives on a sounding
+        // voice and goes through the mono LEGATO branch rather than the trigger
+        // one. Striking into an empty pool would never enter it.
+        r.noteOn (2, 55);
+        r.flush();
+        int waited = 0;
+        while (r.heldVoiceForNote (67) == nullptr && waited < 400) { r.run (1); ++waited; }
+        r.cc (1, 1, 127);
+        r.flush();
+        const auto* line = r.heldVoiceForNote (67);
+        check (line != nullptr, "the mono sequencer line takes the voice");
+        if (line != nullptr)
+            checkNear (line->getAftertouch(), 1.0f, 1e-3f,
+                       "and follows the wheel, because nobody's finger owns it");
+        set (PID::seqRunning, 0.0f);
+        r.run (2);
+    }
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -3172,6 +3289,7 @@ int main()
     caseSostenutoTailFreezesToo();
     casePanicEndsTheMachinesOwnNotesToo();
     caseSlidingStepDoesNotContinueAPanickedTail();
+    caseMonoKnowsAHandFromTheMachine();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
