@@ -305,7 +305,23 @@ public:
         that and that no controller reset clears. */
     bool followsLivePressure(int i) const
     {
-        return ! voiceStartedByHand_[static_cast<size_t>(i)] || isKeyHeldVoice(i);
+        if (isKeyHeldVoice(i))
+            return true;
+        // A voice with no hand follows for its whole sounding life -- but a note
+        // that has been ENDED is not sounding, it is dying, and the boundary is
+        // the same one a key-up draws for a hand. Without this term a panic left
+        // every sequencer, arpeggiator and drone tail following the wheel: CC123
+        // (what a DAW sends on transport stop) cut the line, and the next wheel,
+        // breath or channel-pressure move brought all of it back from silence to
+        // full level for the length of the release -- measured, four voices at
+        // once, still ringing 2.1 s later. The hand half of that was fixed and
+        // this half was not, which made the rule true of hands only.
+        //
+        // Not isReleasing() alone: a note the damper is holding has had its
+        // gate-off too but is still SOUNDING at full, and that one must keep
+        // following. isReleasing() is false there, so it does.
+        return ! voiceStartedByHand_[static_cast<size_t>(i)]
+            && ! voices[static_cast<size_t>(i)].isReleasing();
     }
 
     /** Set voice limit at runtime (1=mono, 4/6/8/12/16). */

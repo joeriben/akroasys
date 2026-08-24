@@ -2926,6 +2926,95 @@ void caseSostenutoTailFreezesToo()
 }
 
 
+
+// ── 65. A panic ends the machine's own notes too ────────────────────────────
+//      Case 62 closed this door for a HAND's dying notes and left it open for
+//      everything else. A step-sequencer, generative, arpeggiator or drone voice
+//      has no hand, so it follows live controls -- and "for its whole sounding
+//      life" was taken to include the release tail a panic had just started. A
+//      DAW sends CC123 on transport stop, which is by definition the moment the
+//      sequencer was the thing playing: the line was cut, and the next wheel,
+//      breath or channel-pressure move brought all of it back from silence to
+//      full level for the length of the release. Measured, four voices at once,
+//      still ringing 2.1 s later.
+void casePanicEndsTheMachinesOwnNotesToo()
+{
+    std::printf ("[65] a panic ends the machine's own notes too\n");
+
+    Rig r;
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    set (PID::genSeqRunning, 0.0f);
+    r.run (2);
+    auto& seq = r.proc.getStepSequencer();
+    seq.setNumSteps (1);
+    seq.setStepNote (0, 60);
+    seq.setStepEnabled (0, true);
+    set (PID::seqSteps, 1.0f);
+    set (PID::seqBpm, 40.0f);
+    set (PID::seqGate, 0.95f);
+    set (PID::seqRunning, 1.0f);
+
+    // Wait for the line to be INSIDE its note; a fixed block count lands in a
+    // gap as often as not.
+    int waited = 0;
+    while (r.activeVoiceCount() == 0 && waited < 400) { r.run (1); ++waited; }
+    const auto* line = r.voiceForNote (60);
+    check (line != nullptr, "the sequencer's line is sounding");
+    if (line == nullptr) return;
+
+    r.cc (1, 123, 0);              // the panic a DAW sends on transport stop
+    r.run (2);
+    checkNear (line->getAftertouch(), 0.0f, 1e-3f, "the panic takes its pressure with it");
+
+    r.cc (1, 1, 127);              // and then the wheel, over the dying line
+    r.run (2);
+    checkNear (line->getAftertouch(), 0.0f, 1e-3f,
+               "the wheel does not raise the line the panic just cut");
+    r.pressure (1, 127);
+    r.run (2);
+    checkNear (line->getAftertouch(), 0.0f, 1e-3f, "nor does zone-wide pressure");
+    r.cc (1, 2, 127);
+    r.run (2);
+    checkNear (line->getAftertouch(), 0.0f, 1e-3f, "nor the breath controller");
+
+    // Still a gate, and this is the half that matters: a sequencer note that is
+    // actually PLAYING follows the wheel, which is the whole rule for a voice
+    // with no hand behind it. Without this the case would pass on a predicate
+    // that simply froze everything.
+    Rig h;
+    auto seth = [&h] (const char* pid, float v)
+    {
+        if (auto* p = h.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    seth (PID::genSeqRunning, 0.0f);
+    h.run (2);
+    auto& seq2 = h.proc.getStepSequencer();
+    seq2.setNumSteps (1);
+    seq2.setStepNote (0, 62);
+    seq2.setStepEnabled (0, true);
+    seth (PID::seqSteps, 1.0f);
+    seth (PID::seqBpm, 40.0f);
+    seth (PID::seqGate, 0.95f);
+    seth (PID::seqRunning, 1.0f);
+    waited = 0;
+    while (h.activeVoiceCount() == 0 && waited < 400) { h.run (1); ++waited; }
+    h.cc (1, 1, 127);
+    h.run (2);
+    const auto* playing = h.voiceForNote (62);
+    check (playing != nullptr, "a sequencer note is playing");
+    if (playing != nullptr)
+        checkNear (playing->getAftertouch(), 1.0f, 1e-3f,
+                   "and follows the wheel, because nobody's finger owns it");
+    seth (PID::seqRunning, 0.0f);
+    h.run (2);
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2997,6 +3086,7 @@ int main()
     casePanicDoesNotHandTheTailsBackToTheWheel();
     caseComputerKeyboardTailFreezesToo();
     caseSostenutoTailFreezesToo();
+    casePanicEndsTheMachinesOwnNotesToo();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

@@ -538,33 +538,17 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
     // Cleared here rather than inside the loop above because the same note
     // number can be sounding on more than one voice, and the drone is scanned
     // too: a drone holding this pitch is still a reason to keep the latch.
+    // No refresh after this: measured, the loop that used to stand here visited
+    // 13086 voices across a 160 s randomised soak and changed not one value. It
+    // cannot fire, because the only quantity that can diverge at a note-off is
+    // the latch, and clearPolyPressureIfReleased returns early while any
+    // non-releasing voice still holds that pitch -- which is exactly the voice
+    // the loop would have refreshed. What it claimed to fix (a drone pinned at a
+    // departed finger's pressure, because pressureForNote takes the max and the
+    // latch is a FLOOR) is real and is NOT fixed here: the latch's lifetime is a
+    // deliberate design, frozen in cases 34/35/37/41/48/53, and narrowing it to
+    // hand-started voices breaks all five. Open question, not a side effect.
     clearPolyPressureIfReleased(note);
-    // And then a refresh, which this deliberately did NOT do while the guard
-    // above was still "skip anything releasing". followsLivePressure draws the
-    // line by ORIGIN now, so this can no longer disturb a hand's note: a key
-    // that came up is skipped whatever else happens. What it does reach is the
-    // voices that have no hand -- the drone's, the sequencers', the
-    // arpeggiator's -- whose stored pressure was left standing on the latch
-    // this line just cleared. Without it, a drone sharing a pitch with a key
-    // kept that key's 0.87 for the rest of its life while pressureForVoice
-    // recomputed 0, and in Csound/LRO mode, which publishes the stored value,
-    // a drone that should have fallen back to nothing under aftertouch -> DCA
-    // rang on at most of full level.
-    //
-    // Restricted to voices that are still SOUNDING, and the restriction is the
-    // whole of it: a plain refreshPerformancePressure() here also reached the
-    // arpeggiator's and the sequencers' RELEASE TAILS, which have no hand
-    // either, and cut every one of them from 0.9449 to zero in the block the
-    // last finger left -- measured, three at once. Following a control you can
-    // still hear is the rule; re-deciding the level of a tail already on its
-    // way out is a click.
-    for (int i = 0; i < MAX_VOICES; ++i)
-    {
-        auto& sounding = voices[static_cast<size_t>(i)];
-        if (! sounding.isActive() || sounding.isReleasing() || ! followsLivePressure(i))
-            continue;
-        sounding.setAftertouch(pressureForVoice(i));
-    }
 
     // Update gain: held voice count decreased (releasing voices don't count).
     updateGainTarget();
