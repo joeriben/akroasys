@@ -317,11 +317,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             // never blocks a real slide. (channel 0 == internal sequencer/arp.)
             const bool originMatches =
                 voiceMidiChannel_[static_cast<size_t>(i)] == effectiveMidiChannel;
-            // And it must still be SOUNDING. A step that slides to the next one
-            // schedules no gate-off at all (StepSequencer: samplesUntilGateOff =
-            // slidesToNext ? -1.0 : ...), so a legitimate slide always continues
-            // a voice whose gate is open -- refusing a releasing one cannot
-            // block a real one. What it blocks is a corpse: allNotesOff wipes
+            // And it must still be SOUNDING. What that blocks is a corpse: allNotesOff wipes
             // voiceMidiChannel_ to 0 across every release tail, so after a panic
             // a keyboard tail reads as internal (channel 0, sourceId -1) and
             // satisfies originMatches. If the hand played after the line, that
@@ -329,6 +325,27 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             // and unlike the mono legato branch, which re-holds what it takes,
             // this one only calls glideToNote. The line did not come back after
             // a transport stop; it faded out where it should have played.
+            //
+            // It was first justified with "a sliding step schedules no gate-off,
+            // so a real slide never arrives at a releasing voice" -- and that is
+            // FALSE, measured. slidesToNext is decided at the SOURCE step's
+            // note-on from steps[nextIdx].enabled; whether the next step emits a
+            // Glide is decided at ITS OWN boundary from steps[prevIdx].enabled
+            // and its bindMode. Both inputs are live controls, so the two can
+            // disagree: toggling a step's enable while the pattern runs gave 4
+            // refusals at 120 BPM and 12 at 300, with no panic anywhere.
+            //
+            // The guard is kept because what happens there is better, not worse
+            // -- the slide falls through to a fresh strike where the old code
+            // dragged a corpse, 38 silent blocks against 107 over the same 500.
+            // The price is that the Glide silently becomes a strike: triggerEpoch
+            // bumps, the sampler retriggers, and in Csound/LRO mode changed2(trig)
+            // fires, which this branch exists to avoid. The real repair is to
+            // make the sequencer's two decisions agree; that is not this fix.
+            //
+            // Also not "both sequencers": the generative one never emits Glide or
+            // Bind at all (GenerativeSequencer: Articulation::Normal,
+            // unconditional), so this branch is unreachable from it.
             if (vi.isActive() && ! vi.isReleasing() && sourceMatches && originMatches
                 && vi.noteOnTimestamp >= maxTs)
             {
