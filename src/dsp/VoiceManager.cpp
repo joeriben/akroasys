@@ -579,7 +579,7 @@ void VoiceManager::allNotesOff()
     sustainedVoice.fill(false);
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);
-    resetPerformanceControllers();
+    resetPerformanceControllers(/*endingEveryNote=*/true);
     // The tags, unconditionally -- which resetPerformanceControllers cannot do
     // for us, because it also runs for CC 121, where nothing was un-owned. Here
     // everything was. The voices are all in their release tail at this point,
@@ -698,7 +698,7 @@ void VoiceManager::setPolyPressure(int note, float pressure, int sourceId)
     }
 }
 
-void VoiceManager::resetPerformanceControllers()
+void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
 {
     if (sustainPedalDown)
         releaseSustainedVoices();
@@ -724,9 +724,21 @@ void VoiceManager::resetPerformanceControllers()
     // instrument deaf to pressure on a chord it is still playing. Resetting
     // controller VALUES is not the hand leaving the keys. A real panic clears
     // the ledger where that belongs, beside the arpeggiator's own allKeysUp.
-    for (auto& v : voices)
+    // Under CC 121 the pressure follows the same rule every other writer
+    // follows, and this was the one that did not: a decaying note and a note the
+    // pedal is holding were zeroed too. With aftertouch -> DCA at full that is a note cut off in
+    // one block instead of fading -- measured, a hand's tail from level 0.2851
+    // to 0.0000 in 5.3 ms, a pedal-held note from 0.629, a sequencer's tail from
+    // 0.219. It is the second half of the criterion the gesture tool states:
+    // silent as a swell, very audible as a decaying note cut off.
+    //
+    // A key that is still DOWN is zeroed exactly as before, which is what CC 121
+    // asks for and what cases 46 and 49 hold: such a voice passes
+    // followsLivePressure, so nothing about the held-chord behaviour changes.
+    for (int i = 0; i < MAX_VOICES; ++i)
     {
-        if (v.isActive())
+        auto& v = voices[static_cast<size_t>(i)];
+        if (v.isActive() && (endingEveryNote || followsLivePressure(i)))
             v.setAftertouch(0.0f);
         v.setPerVoicePitchBend(0.0f);
     }

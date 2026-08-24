@@ -62,7 +62,19 @@ public:
     void setChannelVolume(float value);
     void setChannelPressure(float pressure);
     void setPolyPressure(int note, float pressure, int sourceId = -1);
-    void resetPerformanceControllers();
+    /** Reset the performance controllers to rest.
+
+        @param endingEveryNote  true only from allNotesOff. A panic is TAKING
+               the notes away, so it zeroes the stored pressure of every
+               sounding voice, tails and pedal-held notes included -- cases 50
+               and 62 hold that. CC 121 is not that: it resets controller
+               VALUES while every note goes on sounding, so it may only reach
+               the voices a live control is still allowed to move. Zeroing a
+               tail there cut a decaying note off in one block instead of
+               letting it fade -- measured, level 0.2851 to 0.0000 in 5.3 ms,
+               and a pedal-held note from 0.629. A key still DOWN is zeroed
+               either way, which is what the message asks for. */
+    void resetPerformanceControllers(bool endingEveryNote = false);
 
     /** The physical-key ledger: told, not derived. The poly-key-pressure latch
         belongs to a FINGER, and voice state is only a proxy for that -- a proxy
