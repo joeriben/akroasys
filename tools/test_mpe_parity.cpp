@@ -3401,6 +3401,8 @@ void caseResetAllControllersDoesNotCentreAFrozenBend()
         {
             checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                        "and is bent before the key comes up");
+            const float normBefore = v->getPerVoicePitchBendNorm();
+            check (normBefore > 0.5f, "and X is deflected with it");
             r.noteOff (2, 60);
             r.flush();
             r.cc (1, 121, 0);
@@ -3414,8 +3416,15 @@ void caseResetAllControllersDoesNotCentreAFrozenBend()
             // Centring one and not the other leaves the pitch back at rest
             // while every X target still reads full deflection -- and nothing
             // else in this file reads the norm on this path.
-            checkNear (v->getPerVoicePitchBendNorm(), 8191.0f / 8192.0f, 1e-3f,
-                       "and X reads the same in the unit the modulation uses");
+            //
+            // Against what it read BEFORE, not against a literal. The norm is
+            // the bend measured on the X full scale, one semitone by default,
+            // so at any wheel past 2.09 % of travel it saturates at exactly
+            // 1.0 and a literal here would neither be 8191/8192 nor tell a
+            // kept deflection from a fiftieth of one. Whether the SCALING is
+            // right is case 26's question, at half a semitone, below the clamp.
+            checkNear (v->getPerVoicePitchBendNorm(), normBefore, 1e-6f,
+                       "and X reads what it read, in the unit the modulation uses");
         }
     }
 
@@ -3603,14 +3612,16 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
     if (v == nullptr) return;
     checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                "and is bent with the key still down");
+    const float normBefore = v->getPerVoicePitchBendNorm();
+    check (normBefore > 0.5f, "and X is deflected with it");
 
     r.cc (1, 123, 0);              // all notes off, at full level
     r.flush();
     check (v->isActive() && v->isReleasing(), "the panic released it rather than cutting it");
     checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                "and it rings out at the pitch it was taken away at");
-    checkNear (v->getPerVoicePitchBendNorm(), 8191.0f / 8192.0f, 1e-3f,
-               "in both units");
+    checkNear (v->getPerVoicePitchBendNorm(), normBefore, 1e-6f,
+               "in both units -- see case 69 for why this reads the before value");
 
     // The half that must NOT change: the panic still zeroes the pressure, so
     // the note it is taking away goes quiet. That is what endingEveryNote is
