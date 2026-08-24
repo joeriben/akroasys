@@ -3534,6 +3534,28 @@ void caseResetAllControllersDoesNotMoveTheNextNotesYOrigin()
                        "the first move is the distance the finger moved");
     }
 
+    // The panic reaches this same function (allNotesOff passes
+    // endingEveryNote = true), so CC 123 has to hold it too -- and a version
+    // that restores the wipe on the panic path alone passes everything else.
+    {
+        Rig r;
+        r.cc (2, 74, 64);
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 123, 0);          // all notes off
+        r.flush();
+
+        r.noteOn (2, 62);
+        r.flush();
+        r.cc (2, 74, 70);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (62);
+        check (v != nullptr, "the note after the panic sounds");
+        if (v != nullptr)
+            checkNear (v->getTimbre(), 6.0f / 127.0f, 1e-3f,
+                       "and the panic did not move its rest either");
+    }
+
     // Unchanged: CC 121 does not reset the Y of a note that is sounding either.
     // Same rule, and the reason this case cannot be satisfied by zeroing every
     // voice's timbre instead of the channel memory.
@@ -3607,6 +3629,56 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
         checkNear (zv->getAftertouch(), 0.0f, 1e-3f,
                    "and the panic takes its pressure with it");
     }
+}
+
+// ── 72. Reset-all-controllers zeroes a machine note that is still sounding ──
+//      The other side of case 68. A sequencer's note has no finger on it, so
+//      nothing is holding its reading up: it follows the wheel live (case 60)
+//      and therefore follows the wheel's reset. Two narrower gates -- asking
+//      the voice's MPE tag instead of the predicate, and narrowing it to a key
+//      that is down -- both leave such a note standing at the last wheel value
+//      forever, and both pass every other case in this file.
+void caseResetAllControllersZeroesASoundingMachineNote()
+{
+    std::printf ("[72] reset-all-controllers zeroes a machine note that is still sounding\n");
+
+    Rig r;
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    set (PID::genSeqRunning, 0.0f);       // else it mirrors its own pattern in
+    r.run (2);
+
+    auto& seq = r.proc.getStepSequencer();
+    seq.setNumSteps (2);
+    seq.setStepNote (0, 60);
+    seq.setStepNote (1, 67);
+    seq.setStepEnabled (0, true);
+    seq.setStepEnabled (1, true);
+    seq.setStepBindMode (0, T5ynthStepSequencer::BindMode::Off);
+    seq.setStepBindMode (1, T5ynthStepSequencer::BindMode::Off);
+    set (PID::seqSteps, 2.0f);
+    set (PID::seqBpm, 40.0f);             // slow, so we stay inside step 0
+    set (PID::seqRunning, 1.0f);
+    r.run (10);
+
+    r.cc (1, 1, 110);                     // the wheel, which no finger owns
+    r.flush();
+    const auto* line = r.heldVoiceForNote (60);
+    check (line != nullptr, "the line's note sounds");
+    if (line != nullptr)
+    {
+        checkNear (line->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                   "and follows the wheel, having no finger of its own");
+        r.cc (1, 121, 0);
+        r.flush();
+        checkNear (line->getAftertouch(), 0.0f, 1e-3f,
+                   "so it follows the reset as well");
+    }
+    set (PID::seqRunning, 0.0f);
+    r.run (5);
 }
 
 // ── 73. Reset-all-controllers does not raise the instrument to full ────────
@@ -3730,6 +3802,7 @@ int main()
     caseResetAllControllersDoesNotCentreAFrozenBend();
     caseResetAllControllersDoesNotMoveTheNextNotesYOrigin();
     casePanicDoesNotFourOctaveANoteOnItsWayOut();
+    caseResetAllControllersZeroesASoundingMachineNote();
     caseResetAllControllersDoesNotRaiseTheInstrumentToFull();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

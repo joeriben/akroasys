@@ -767,8 +767,10 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
         if (! v.isActive())
         {
             // An idle slot holds nothing anyone can hear, and every note-on
-            // clears the per-note bend before it sounds anyway (:219, :271,
-            // :443). Housekeeping, not the seed of the next note.
+            // clears the per-note bend before it sounds anyway -- all five of
+            // them (:219, :271, :360, :443, :1769), and renderBlock clears it
+            // again the moment a slot goes idle. Housekeeping, not the seed of
+            // the next note.
             v.setPerVoicePitchBend(0.0f);
             continue;
         }
@@ -831,8 +833,14 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     // read 0.0000, and a controller that sends CC 74 only on change read its
     // first 6/127 of movement as 70/127. With Y -> Cutoff that is half the
     // filter range, finger at rest, after a transport stop. RP-015 does not list
-    // CC 74 among what Reset All Controllers resets. prepare()/reset() still
-    // fill it, where "nothing received yet" is the truth.
+    // CC 74 among what Reset All Controllers resets.
+    //
+    // That leaves the field exactly ONE bulk clear in the whole program:
+    // reset(), reached only from releaseResources(). prepare() does not clear it
+    // and should not -- changing the sample rate does not move the finger, and a
+    // fill there would fabricate the same false rest one layer down. Measured:
+    // CC 74 = 127, then prepareToPlay(48000), and the memory still reads
+    // 1.00000, which is where the finger actually is.
 }
 
 namespace
