@@ -317,7 +317,19 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
             // never blocks a real slide. (channel 0 == internal sequencer/arp.)
             const bool originMatches =
                 voiceMidiChannel_[static_cast<size_t>(i)] == effectiveMidiChannel;
-            if (vi.isActive() && sourceMatches && originMatches
+            // And it must still be SOUNDING. A step that slides to the next one
+            // schedules no gate-off at all (StepSequencer: samplesUntilGateOff =
+            // slidesToNext ? -1.0 : ...), so a legitimate slide always continues
+            // a voice whose gate is open -- refusing a releasing one cannot
+            // block a real one. What it blocks is a corpse: allNotesOff wipes
+            // voiceMidiChannel_ to 0 across every release tail, so after a panic
+            // a keyboard tail reads as internal (channel 0, sourceId -1) and
+            // satisfies originMatches. If the hand played after the line, that
+            // tail is also the NEWEST match, so the next sliding step took it --
+            // and unlike the mono legato branch, which re-holds what it takes,
+            // this one only calls glideToNote. The line did not come back after
+            // a transport stop; it faded out where it should have played.
+            if (vi.isActive() && ! vi.isReleasing() && sourceMatches && originMatches
                 && vi.noteOnTimestamp >= maxTs)
             {
                 maxTs = vi.noteOnTimestamp;

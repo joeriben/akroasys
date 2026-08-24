@@ -3015,6 +3015,90 @@ void casePanicEndsTheMachinesOwnNotesToo()
 }
 
 
+
+// ── 66. A sliding step does not continue a note the panic already ended ─────
+//      allNotesOff wipes voiceMidiChannel_ to 0 while every voice is still in
+//      its release tail. The poly bind/glide branch tells a step-sequencer slide
+//      apart from a held keyboard note by exactly that tag -- internal notes
+//      carry channel 0 -- so after a panic a keyboard tail looks internal and
+//      the slide takes it. And unlike the mono legato branch, which re-holds
+//      what it takes, the bind branch only calls glideToNote: it slides a corpse
+//      instead of striking. The line does not come back after a transport stop;
+//      it fades out where it should have played, for as long as the hijacked
+//      release lasts.
+//
+//      A step that slides to the next one schedules no gate-off at all
+//      (StepSequencer.cpp: samplesUntilGateOff = slidesToNext ? -1.0 : ...), so
+//      a legitimate slide always continues a voice whose gate is still open.
+//      Refusing a releasing one cannot block a real slide.
+void caseSlidingStepDoesNotContinueAPanickedTail()
+{
+    std::printf ("[66] a sliding step does not continue a note the panic ended\n");
+
+    Rig r;
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    set (PID::genSeqRunning, 0.0f);
+    r.run (2);
+
+    auto& seq = r.proc.getStepSequencer();
+    seq.setNumSteps (2);
+    seq.setStepNote (0, 84);
+    seq.setStepNote (1, 90);
+    seq.setStepEnabled (0, true);
+    seq.setStepEnabled (1, true);
+    seq.setStepBindMode (0, T5ynthStepSequencer::BindMode::Glide);
+    seq.setStepBindMode (1, T5ynthStepSequencer::BindMode::Glide);
+    set (PID::seqSteps, 2.0f);
+    set (PID::seqBpm, 200.0f);
+    set (PID::seqRunning, 1.0f);
+    r.run (40);                       // the line is going, lastPlayedNote is set
+
+    // The hand plays AFTER the line, so its voice is the NEWER one -- which is
+    // what the bind branch picks. Then the panic wipes both tags and puts both
+    // into release, and the line's next sliding step goes looking.
+    r.noteOn (2, 60);
+    r.flush();
+    const auto* hand = r.heldVoiceForNote (60);
+    check (hand != nullptr, "the hand's note sounds");
+    if (hand == nullptr) return;
+    r.noteOff (2, 60);
+    r.flush();
+    r.cc (1, 123, 0);
+    r.run (2);
+
+    // Watch THAT voice, by pointer. Counting "any releasing voice on one of the
+    // line's pitches" cannot work: the panic put the line's own notes into
+    // release too, so such a count is positive whatever the code does. The
+    // question is whether the hand's dying voice gets DRAGGED onto a pitch it
+    // never played -- which only glideToNote can do.
+    int draggedTo = -1, struck = 0;
+    for (int b = 0; b < 300; ++b)
+    {
+        r.run (1);
+        if (hand->isActive() && hand->getCurrentNote() != 60 && draggedTo < 0)
+            draggedTo = hand->getCurrentNote();
+        const auto& vm = r.proc.getVoiceManager();
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+        {
+            const auto& v = vm.getVoice (i);
+            if (v.isActive() && ! v.isReleasing() && v.getCurrentNote() >= 84)
+                ++struck;
+        }
+    }
+    check (struck > 0, "the sequencer's line sounds after the panic");
+    if (draggedTo >= 0)
+        std::printf ("      (the hand's dying voice was glided to note %d)\n", draggedTo);
+    check (draggedTo < 0, "and the hand's dying voice is not glided onto the line");
+
+    set (PID::seqRunning, 0.0f);
+    r.run (2);
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -3087,6 +3171,7 @@ int main()
     caseComputerKeyboardTailFreezesToo();
     caseSostenutoTailFreezesToo();
     casePanicEndsTheMachinesOwnNotesToo();
+    caseSlidingStepDoesNotContinueAPanickedTail();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
