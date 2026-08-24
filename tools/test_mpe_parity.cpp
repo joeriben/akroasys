@@ -3442,6 +3442,98 @@ void caseResetAllControllersDoesNotCentreAFrozenBend()
     }
 }
 
+// ── 70. Reset-all-controllers does not move where the NEXT note's Y sits ────
+//      channelTimbre_ is not a controller value this synth owns -- it is the
+//      record of what the channel last CARRIED, kept because a note's Y rest is
+//      the CC 74 in force when it began and MPE controllers send that BEFORE
+//      the note-on (VoiceManager.h, the field's own note). Filling it with
+//      kTimbreRest on CC 121 does not reset a controller; it asserts that the
+//      channel rests at 0 when the finger is somewhere else entirely, and
+//      nothing corrects the claim until the finger moves. RP-015 does not list
+//      CC 74 among what Reset All Controllers resets.
+//
+//      Both halves below are the SAME wipe, seen from the two orderings a real
+//      controller produces, so neither ordering can hide it.
+void caseResetAllControllersDoesNotMoveTheNextNotesYOrigin()
+{
+    std::printf ("[70] reset-all-controllers does not move where the next note's Y sits\n");
+
+    // Initial-64, CC 74 re-sent per note (the spec's own scheme). Measured
+    // before the fix: note 1 Y = 0.0000, the identical note after a CC 121
+    // Y = +0.5039 -- with Y -> Cutoff that is half the filter range brighter,
+    // finger at rest, after a transport stop.
+    {
+        Rig r;
+        r.cc (2, 74, 64);
+        r.noteOn (2, 60);
+        r.flush();
+        const auto* first = r.heldVoiceForNote (60);
+        check (first != nullptr, "the first note sounds");
+        if (first != nullptr)
+            checkNear (first->getTimbre(), 0.0f, 1e-4f, "and rests where the finger is");
+
+        r.noteOff (2, 60);
+        r.flush();
+        r.cc (1, 121, 0);
+        r.flush();
+
+        r.noteOn (2, 62);
+        r.flush();
+        r.cc (2, 74, 64);          // the same physical position, re-sent
+        r.flush();
+        const auto* second = r.heldVoiceForNote (62);
+        check (second != nullptr, "the note after the reset sounds");
+        if (second != nullptr)
+            checkNear (second->getTimbre(), 0.0f, 1e-4f,
+                       "and rests where the finger is, which has not moved");
+    }
+
+    // The other ordering: a controller that sends CC 74 only when it CHANGES.
+    // Here the wipe survives the note-on and shows up on the first movement --
+    // 6/127 of travel read as 70/127.
+    {
+        Rig r;
+        r.cc (2, 74, 64);
+        r.noteOn (2, 60);
+        r.flush();
+        r.noteOff (2, 60);
+        r.flush();
+        r.cc (1, 121, 0);
+        r.flush();
+
+        r.noteOn (2, 62);          // no fresh CC 74: nothing moved
+        r.flush();
+        r.cc (2, 74, 70);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (62);
+        check (v != nullptr, "the note sounds");
+        if (v != nullptr)
+            checkNear (v->getTimbre(), 6.0f / 127.0f, 1e-3f,
+                       "the first move is the distance the finger moved");
+    }
+
+    // Unchanged: CC 121 does not reset the Y of a note that is sounding either.
+    // Same rule, and the reason this case cannot be satisfied by zeroing every
+    // voice's timbre instead of the channel memory.
+    {
+        Rig h;
+        h.cc (2, 74, 0);
+        h.noteOn (2, 64);
+        h.flush();
+        h.cc (2, 74, 127);
+        h.flush();
+        const auto* v = h.heldVoiceForNote (64);
+        check (v != nullptr, "the leaning note sounds");
+        if (v != nullptr)
+        {
+            checkNear (v->getTimbre(), 1.0f, 1e-3f, "and is leaning");
+            h.cc (1, 121, 0);
+            h.flush();
+            checkNear (v->getTimbre(), 1.0f, 1e-3f, "and goes on leaning through the reset");
+        }
+    }
+}
+
 
 int main()
 {
@@ -3519,6 +3611,7 @@ int main()
     caseMonoKnowsAHandFromTheMachine();
     caseResetAllControllersDoesNotCutAFadingNote();
     caseResetAllControllersDoesNotCentreAFrozenBend();
+    caseResetAllControllersDoesNotMoveTheNextNotesYOrigin();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

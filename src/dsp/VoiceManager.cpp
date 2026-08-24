@@ -794,7 +794,19 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
             voiceExprChannel_[static_cast<size_t>(i)] = 0;
         }
     voiceMpePressure_.fill(0.0f);
-    channelTimbre_.fill(SynthVoice::kTimbreRest);
+    // NOT channelTimbre_. It is not a controller value this synth owns -- it is
+    // the record of what each channel last CARRIED, kept because a note's Y rest
+    // is the CC 74 in force when it BEGAN and MPE controllers send that before
+    // the note-on, when no voice holds the channel (the field's own note in the
+    // header). Filling it here reset no controller: it asserted that the channel
+    // rests at 0 while the finger was somewhere else, and nothing corrected the
+    // claim until the finger moved. Measured with a resting CC 74 of 64: the
+    // note after the message read Y = +0.5039 where the identical note before it
+    // read 0.0000, and a controller that sends CC 74 only on change read its
+    // first 6/127 of movement as 70/127. With Y -> Cutoff that is half the
+    // filter range, finger at rest, after a transport stop. RP-015 does not list
+    // CC 74 among what Reset All Controllers resets. prepare()/reset() still
+    // fill it, where "nothing received yet" is the truth.
 }
 
 namespace
