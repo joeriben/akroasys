@@ -124,12 +124,28 @@ namespace
         r.set (PID::seqRunning, 1.0f);
     }
 
-    void probe (const char* title, bool genMode)
+    void probe (const char* title, bool genMode, bool damper = false, bool manyStrands = false)
     {
         std::printf ("\n%s\n", title);
         Rig r;
+        if (damper)
+        {
+            r.midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 127), 0);
+            r.run (1);
+        }
         if (genMode)
         {
+            if (manyStrands)
+            {
+                // The flush is a LOOP for a reason: the generative sequencer
+                // pushes one note-off per sounding strand. With only strand 0
+                // enabled, a `break` after the first is indistinguishable from
+                // the loop -- and that mutation leaves the other strands stuck
+                // forever.
+                r.set (PID::gen2Enable, 1.0f);
+                r.set (PID::gen3Enable, 1.0f);
+                r.set (PID::gen4Enable, 1.0f);
+            }
             // genSeqRunning is the STEP<->GEN toggle, not the transport
             // (PluginProcessor.cpp: "PID::genSeqRunning is a STEP/GEN toggle,
             // not transport"). Without seqRunning as well, nothing plays and
@@ -146,16 +162,22 @@ namespace
         // Wait for the line to actually be INSIDE a note. Switching on during a
         // gap proves nothing, and a fixed block count lands in a gap as often as
         // not -- at 40 BPM one quarter is 281 blocks.
+        // With several strands enabled, wait for several to be gated AT ONCE:
+        // that is the only state in which "apply every flushed note-off" and
+        // "apply the first and stop" differ.
+        const int want = manyStrands ? 3 : 1;
         int note = -1;
         int waited = 0;
-        while (r.heldVoices (&note) == 0 && waited < 4000) { r.run (1); ++waited; }
+        while (r.heldVoices (&note) < want && waited < 8000) { r.run (1); ++waited; }
         const int sounding = r.heldVoices (&note);
-        std::printf ("   waited %d block(s) for a gated note\n", waited);
+        std::printf ("   waited %d block(s) for %d gated note(s)\n", waited, want);
         std::printf ("   the line is sounding:            %d held voice(s), note %d\n",
                      sounding, note);
-        if (sounding == 0)
+        if (sounding < want)
         {
-            std::printf ("   (nothing was gated at the switch-on -- this run says nothing)\n");
+            std::printf ("   (only %d of %d gated at the switch-on -- this run says nothing)\n",
+                         sounding, want);
+            ++gStuck;     // an inconclusive probe is a failed gate, not a pass
             return;
         }
 
@@ -175,6 +197,12 @@ namespace
         std::printf ("\n");
 
         r.run (2000);                            // ~10.7 s more
+        // The verdict is taken with the pedal STILL DOWN, and that is the point.
+        // A note the arpeggiator takes over is not a note a finger lifted, so the
+        // damper has no claim on it: a plain note-off would only MARK it
+        // sustained and leave it gated, which is the drone this edge exists to
+        // prevent -- and they accumulate over repeated toggles. Lifting the pedal
+        // first would end them and hide exactly that.
         const int late = r.heldVoices (&left);
         std::printf ("   another 10.7 s of silence later:  %d held voice(s)", late);
         if (late > 0) std::printf (", note %d  <<< STUCK", left);
@@ -182,6 +210,13 @@ namespace
         if (late > 0)
         {
             ++gStuck;
+            if (damper)
+            {
+                r.midi.addEvent (juce::MidiMessage::controllerEvent (1, 64, 0), 0);
+                r.run (200);
+                std::printf ("   after lifting the pedal:         %d held voice(s)"
+                             "  (so it was the damper holding it)\n", r.heldVoices());
+            }
             // A panic is the only thing that ends it -- worth showing, because
             // it is what a player has to reach for today.
             r.midi.addEvent (juce::MidiMessage::controllerEvent (1, 123, 0), 0);
@@ -201,6 +236,9 @@ int main()
 
     probe ("A. step sequencer, switch-on inside a gated step", false);
     probe ("B. generative sequencer, same gesture", true);
+    probe ("C. step sequencer, same gesture with the damper down", false, true);
+    probe ("D. generative sequencer, damper down, four strands sounding",
+           true, true, true);
 
     std::printf ("\n%s -- %d stuck note(s)\n\n",
                  gStuck == 0 ? "ALL CLEAR" : "FAILED", gStuck);

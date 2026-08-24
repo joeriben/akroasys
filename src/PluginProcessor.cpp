@@ -4320,12 +4320,22 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // same instant the stream would have used. sourceId and channel are the
         // event's own, which is what keeps an external key of the same pitch out
         // of it. resize() only shrinks -- no allocation on the audio thread.
+        //
+        // FORCED, like the held-keys loop nine lines down and for its reason:
+        // a step-sequencer note carries sourceId -1, so a plain note-off with
+        // the damper or the sostenuto down only MARKS it sustained and leaves it
+        // ringing -- which is exactly the drone this edge exists to prevent, and
+        // they accumulate: pedal down, arpeggiator toggled on and off six times
+        // over a running four-step line, four voices left gated open, surviving
+        // the transport stop. This note is being TAKEN AWAY by the synth, not
+        // lifted by a finger, which is what forceRelease means (VoiceManager.h).
+        // Playing over a sequencer with the damper down is ordinary.
         for (size_t i = flushFrom; i < internalNoteEvents_.size(); ++i)
         {
             const auto& flushed = internalNoteEvents_[i];
             if (flushed.type == VoiceEvent::Type::NoteOff)
                 voiceManager.noteOff(flushed.note, flushed.strandId,
-                                     /*forceRelease=*/false, flushed.mpeChannel);
+                                     /*forceRelease=*/true, flushed.mpeChannel);
         }
         internalNoteEvents_.resize(flushFrom);
 
