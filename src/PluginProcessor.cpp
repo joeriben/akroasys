@@ -5487,6 +5487,21 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     }
                     else if (msg.isAllNotesOff() || msg.isAllSoundOff())
                     {
+                        // The two are ONE path here and the MIDI spec separates
+                        // them: CC 120 All Sound Off asks for the envelopes to
+                        // go to zero as fast as possible, CC 123 All Notes Off
+                        // asks only that the notes be released -- "notes may
+                        // continue to sound if the damper is down or the
+                        // release is long". Both here release and both zero the
+                        // stored aftertouch of what they release
+                        // (resetPerformanceControllers, endingEveryNote = true),
+                        // so CC 123 cuts more than it should and CC 120 cuts
+                        // less. It shows on a routed aftertouch: with Z -> Pitch
+                        // at full, a note taken away at full level jumps by
+                        // -10.3937 semitones in one block where the same note
+                        // under a plain key-up jumps by +0.0000. Separating them
+                        // changes what the panic button does, so it is written
+                        // down here rather than done in passing.
                         voiceManager.allNotesOff();
                         // Keys + lead only. reset() here would clear lastPlayedNote
                         // while this block's already-queued arp NoteOn is still
