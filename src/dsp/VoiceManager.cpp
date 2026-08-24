@@ -729,6 +729,13 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     sostenutoReleasedVoice.fill(false);
     channelPressure = 0.0f;
     modWheelPressure = 0.0f;
+    // Breath is KEPT although CC 2 is not on RP-015's list either -- the same
+    // criterion the volume below is removed under, answered the other way, so
+    // the difference is written down rather than left looking like an oversight.
+    // A breath controller RESTS at 0, so zeroing it states where the player
+    // actually is; a volume fader rests wherever it was left, so zeroing that
+    // states something false. And breath feeds pressureForNote beside the mod
+    // wheel, which RP-015 does list.
     breathPressure = 0.0f;
     expressionGain = 1.0f;
     // NOT channelVolumeGain. RP-015 enumerates what Reset All Controllers
