@@ -3736,6 +3736,76 @@ void caseResetAllControllersDoesNotRaiseTheInstrumentToFull()
 }
 
 
+// ── 74. The rest of RP-015's list, which nothing held ──────────────────────
+//      Three of the values this message resets had no assertion anywhere:
+//      dropping the master-bend centring, the mod-wheel clear or the soft-pedal
+//      lift each passed all four gates. They are on RP-015's list and the code
+//      is right about them; what was missing was anything that would notice if
+//      it stopped being.
+//
+//      The master bend is deliberately NOT frozen per voice the way the
+//      per-note bend is (cases 69 and 71). It is zone-wide by construction --
+//      one global ratio every voice reads, with no per-voice state to freeze --
+//      so a dying note follows it, and follows it back. Measured: a panic moves
+//      a releasing note by -1.9998 semitones at the default master range and
+//      -24.0000 at range 48, where the same note under a plain key-up moves by
+//      +0.0000. That is the wheel being centred, which is what the message
+//      asks for, and it is the same motion the player's own hand makes.
+void caseTheRestOfTheResetList()
+{
+    std::printf ("[74] the rest of what this message resets, which nothing held\n");
+
+    {   // Pitch bend to centre, zone-wide.
+        Rig r;
+        r.noteOn (1, 60);
+        r.flush();
+        r.wheel (1, 16383);
+        r.flush();
+        checkNear (r.globalBendSemitones(), fullUpBend (r.masterBendRange()), 0.01f,
+                   "the master wheel bends the zone");
+        r.cc (1, 121, 0);
+        r.flush();
+        checkNear (r.globalBendSemitones(), 0.0f, 1e-4f, "and the reset centres it");
+    }
+
+    {   // The mod wheel as a pressure source. A key still down is zeroed by
+        // case 46; what that cannot see is the STORED value, which drives the
+        // next note through pressureForNote.
+        Rig r;
+        r.cc (1, 1, 110);
+        r.noteOn (2, 60);
+        r.flush();
+        const auto* first = r.heldVoiceForNote (60);
+        check (first != nullptr, "the note under the wheel sounds");
+        if (first != nullptr)
+            checkNear (first->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "and reads the wheel");
+        r.cc (1, 121, 0);
+        r.flush();
+        r.noteOn (2, 64);          // a fresh key, no fresh wheel
+        r.flush();
+        r.run (3);                 // long enough for a refresh to reach it
+        const auto* second = r.heldVoiceForNote (64);
+        check (second != nullptr, "the next note sounds");
+        if (second != nullptr)
+            checkNear (second->getAftertouch(), 0.0f, 1e-3f,
+                       "and is not driven by a wheel value the reset cleared");
+    }
+
+    {   // The soft pedal, the third multiplicand in performanceOutputGain.
+        Rig r;
+        r.cc (1, 67, 127);
+        r.flush();
+        checkNear (r.proc.getVoiceManager().performanceOutputGain(), 0.65f, 1e-3f,
+                   "the soft pedal lowers the instrument");
+        r.cc (1, 121, 0);
+        r.flush();
+        checkNear (r.proc.getVoiceManager().performanceOutputGain(), 1.0f, 1e-3f,
+                   "and the reset lifts it, which the message does ask for");
+    }
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -3816,6 +3886,7 @@ int main()
     casePanicDoesNotFourOctaveANoteOnItsWayOut();
     caseResetAllControllersZeroesASoundingMachineNote();
     caseResetAllControllersDoesNotRaiseTheInstrumentToFull();
+    caseTheRestOfTheResetList();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
