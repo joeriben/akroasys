@@ -583,16 +583,45 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
     updateGainTarget();
 }
 
-void VoiceManager::allNotesOff()
+void VoiceManager::allNotesOff(bool cutSound)
 {
-    for (auto& v : voices)
+    for (int i = 0; i < MAX_VOICES; ++i)
     {
-        if (v.isActive())
-            v.noteOff();
+        auto& v = voices[static_cast<size_t>(i)];
+        if (! v.isActive())
+            continue;
+        // CC 123 is every key coming up at once and nothing else, so it takes
+        // the same three steps a single key-up takes. The MIDI spec is explicit
+        // that this message is not a panic and that the damper may go on
+        // holding what it holds; CC 120 is the panic, and it is the branch
+        // below.
+        if (! cutSound)
+        {
+            if (v.isReleasing())
+                continue;                       // already on its way out
+            // The key is up, so the voice stops answering its member channel --
+            // the same line noteOff runs, for the same reason: a controller's
+            // reset burst must not land on the tail.
+            voiceExprChannel_[static_cast<size_t>(i)] = 0;
+            if (sostenutoPedalDown && sostenutoVoice[static_cast<size_t>(i)])
+            {
+                sostenutoReleasedVoice[static_cast<size_t>(i)] = true;
+                continue;
+            }
+            if (sustainPedalDown)
+            {
+                sustainedVoice[static_cast<size_t>(i)] = true;
+                continue;
+            }
+        }
+        v.noteOff();
     }
-    // Panic also ends a drone hold (DAW reset / host-driven silence).
+    // Both messages end a drone hold: it is a note, and neither message leaves
+    // notes standing on purpose.
     droneVoiceIndex = -1;
     droneNote = -1;
+    if (! cutSound)
+        return;
     sustainedVoice.fill(false);
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);

@@ -1794,7 +1794,7 @@ void casePanicUnderAHeldChordLeavesNothingStanding()
         p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // 0 = Off, 1 = Up
     r.run (40);
 
-    r.cc (1, 123, 0);             // all notes off, finger still down
+    r.cc (1, 120, 0);             // all SOUND off, finger still down
     r.run (10);
     r.polyPressure (1, 60, 127);  // the hand goes on leaning
     r.run (10);
@@ -2017,7 +2017,7 @@ void casePanicUnownsTheNotesItCutOff()
     check (v != nullptr, "the note is sounding on its member channel");
     if (v == nullptr) return;
 
-    r.cc (1, 123, 0);             // all notes off
+    r.cc (1, 120, 0);             // all sound off
     r.flush();
     check (v->isActive(), "and is in its release tail after the panic");
 
@@ -2778,7 +2778,7 @@ void casePanicDoesNotHandTheTailsBackToTheWheel()
         out[0] = r.heldVoiceForNote (60);
         out[1] = r.heldVoiceForNote (64);
         out[2] = r.heldVoiceForNote (67);
-        r.cc (1, 123, 0);            // all notes off
+        r.cc (1, 120, 0);            // all sound off
         r.flush();
     };
 
@@ -2966,7 +2966,7 @@ void casePanicEndsTheMachinesOwnNotesToo()
     check (line != nullptr, "the sequencer's line is sounding");
     if (line == nullptr) return;
 
-    r.cc (1, 123, 0);              // the panic a DAW sends on transport stop
+    r.cc (1, 120, 0);              // the cut: CC 120, not CC 123
     r.run (2);
     checkNear (line->getAftertouch(), 0.0f, 1e-3f, "the panic takes its pressure with it");
 
@@ -3067,7 +3067,7 @@ void caseSlidingStepDoesNotContinueAPanickedTail()
     if (hand == nullptr) return;
     r.noteOff (2, 60);
     r.flush();
-    r.cc (1, 123, 0);
+    r.cc (1, 120, 0);
     r.run (2);
 
     // Watch THAT voice, by pointer. Counting "any releasing voice on one of the
@@ -3130,7 +3130,7 @@ void caseSlidingStepDoesNotContinueAPanickedTail()
         check (q.heldVoiceForNote (84) != nullptr, "the hand's note on the line's pitch sounds");
         q.noteOff (2, 84);
         q.flush();
-        q.cc (1, 123, 0);
+        q.cc (1, 120, 0);
         q.run (2);
 
         int gated = 0;
@@ -3552,7 +3552,7 @@ void caseResetAllControllersDoesNotMoveTheNextNotesYOrigin()
         r.cc (2, 74, 64);
         r.noteOn (2, 60);
         r.flush();
-        r.cc (1, 123, 0);          // all notes off
+        r.cc (1, 120, 0);          // all sound off
         r.flush();
 
         r.noteOn (2, 62);
@@ -3615,7 +3615,7 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
     const float normBefore = v->getPerVoicePitchBendNorm();
     check (normBefore > 0.5f, "and X is deflected with it");
 
-    r.cc (1, 123, 0);              // all notes off, at full level
+    r.cc (1, 120, 0);              // all sound off, at full level
     r.flush();
     check (v->isActive() && v->isReleasing(), "the panic released it rather than cutting it");
     checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
@@ -3636,7 +3636,7 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
     if (zv != nullptr)
     {
         checkNear (zv->getAftertouch(), 110.0f / 127.0f, 1e-3f, "and is leaned on");
-        z.cc (1, 123, 0);
+        z.cc (1, 120, 0);
         z.flush();
         checkNear (zv->getAftertouch(), 0.0f, 1e-3f,
                    "and the panic takes its pressure with it");
@@ -3729,7 +3729,7 @@ void caseResetAllControllersDoesNotRaiseTheInstrumentToFull()
                "and the reset returns expression to full, which the message does ask for");
 
     // And a panic is no different: it takes notes away, not the mixer.
-    r.cc (1, 123, 0);
+    r.cc (1, 120, 0);
     r.flush();
     checkNear (vm.performanceOutputGain(), faderDown, 1e-3f,
                "a panic leaves the fader alone too");
@@ -3802,6 +3802,134 @@ void caseTheRestOfTheResetList()
         r.flush();
         checkNear (r.proc.getVoiceManager().performanceOutputGain(), 1.0f, 1e-3f,
                    "and the reset lifts it, which the message does ask for");
+    }
+}
+
+
+// ── 75. All Sound Off cuts; All Notes Off is every key coming up ───────────
+//      The MIDI spec separates CC 120 and CC 123 and this synth used to run
+//      both through one path. 120 asks for the envelopes to reach zero as fast
+//      as possible. 123 asks only that the notes be released, says outright
+//      that it is not to be used as a panic button, and says notes may go on
+//      sounding if the damper is down. So 123 is every key coming up at once
+//      and nothing else: it releases through the pedals, it freezes what the
+//      finger left, and it resets no controller -- that is CC 121's message.
+//
+//      What made it worth separating rather than recording: 123 zeroed the
+//      stored aftertouch of what it released, and pressure is one of four
+//      sources feeding seventeen targets, of which exactly one is loudness --
+//      and that one is off on a fresh patch. So on a default patch the zeroing
+//      changed the level by nothing while it moved a routed pitch by up to
+//      twelve semitones, unramped, on a note at full level.
+void caseAllSoundOffCutsAndAllNotesOffIsAKeyUp()
+{
+    std::printf ("[75] all-sound-off cuts, all-notes-off is every key coming up\n");
+
+    // The freeze. Same note, same lean, the two messages.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.pressure (2, 110);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (60);
+        check (v != nullptr, "the leaned-on note sounds");
+        if (v != nullptr)
+        {
+            r.cc (1, 123, 0);
+            r.flush();
+            check (v->isActive() && v->isReleasing(), "CC 123 releases it");
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "and it rings out with what the finger left it");
+        }
+
+        Rig c;
+        c.noteOn (2, 60);
+        c.flush();
+        c.pressure (2, 110);
+        c.flush();
+        const auto* cv = c.heldVoiceForNote (60);
+        check (cv != nullptr, "the same note sounds for the cut");
+        if (cv != nullptr)
+        {
+            c.cc (1, 120, 0);
+            c.flush();
+            checkNear (cv->getAftertouch(), 0.0f, 1e-3f,
+                       "where CC 120 takes it away");
+        }
+    }
+
+    // The tail is still unreachable afterwards -- the property the old
+    // zeroing was standing in for, which has to survive on its own.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.pressure (2, 110);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (60);
+        check (v != nullptr, "the note sounds");
+        if (v != nullptr)
+        {
+            r.cc (1, 123, 0);
+            r.flush();
+            r.cc (1, 1, 127);          // the wheel, over the dying note
+            r.pressure (1, 127);       // and zone-wide pressure
+            r.pressure (2, 127);       // and its own member channel
+            r.run (2);
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "and no live control raises it afterwards");
+        }
+    }
+
+    // The damper. "Notes may continue to sound if the damper is down" is the
+    // spec's own sentence about this message.
+    {
+        Rig r;
+        r.cc (1, 64, 127);
+        r.noteOn (2, 67);
+        r.flush();
+        r.cc (1, 123, 0);
+        r.flush();
+        const auto* held = r.heldVoiceForNote (67);
+        check (held != nullptr, "CC 123 leaves it under the pedal, still sounding");
+        r.cc (1, 64, 0);               // and lifting the pedal ends it, as a key-up does
+        r.run (2);
+        check (r.heldVoiceForNote (67) == nullptr, "and the pedal lifting ends it");
+
+        Rig c;
+        c.cc (1, 64, 127);
+        c.noteOn (2, 67);
+        c.flush();
+        c.cc (1, 120, 0);
+        c.flush();
+        check (c.heldVoiceForNote (67) == nullptr,
+               "where CC 120 goes through the pedal");
+    }
+
+    // And 123 resets nothing. Every value case 74 holds for CC 121 stays put.
+    {
+        Rig r;
+        r.cc (1, 7, 40);
+        r.cc (1, 67, 127);
+        r.noteOn (1, 60);
+        r.flush();
+        r.wheel (1, 16383);
+        r.flush();
+        const float bend = r.globalBendSemitones();
+        check (bend > 1.0f, "the master wheel is up");
+        r.cc (1, 123, 0);
+        r.flush();
+        checkNear (r.globalBendSemitones(), bend, 1e-4f,
+                   "CC 123 does not centre the master wheel");
+        checkNear (r.proc.getVoiceManager().performanceOutputGain(),
+                   (40.0f / 127.0f) * 0.65f, 1e-3f,
+                   "nor lift the soft pedal, nor touch the fader");
+
+        r.cc (1, 120, 0);
+        r.flush();
+        checkNear (r.globalBendSemitones(), 0.0f, 1e-4f,
+                   "where CC 120 does, because it resets the controllers");
     }
 }
 
@@ -3887,6 +4015,7 @@ int main()
     caseResetAllControllersZeroesASoundingMachineNote();
     caseResetAllControllersDoesNotRaiseTheInstrumentToFull();
     caseTheRestOfTheResetList();
+    caseAllSoundOffCutsAndAllNotesOffIsAKeyUp();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

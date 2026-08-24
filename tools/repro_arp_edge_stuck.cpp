@@ -218,8 +218,10 @@ namespace
                              "  (so it was the damper holding it)\n", r.heldVoices());
             }
             // A panic is the only thing that ends it -- worth showing, because
-            // it is what a player has to reach for today.
-            r.midi.addEvent (juce::MidiMessage::controllerEvent (1, 123, 0), 0);
+            // it is what a player has to reach for today. CC 120, not 123: since
+            // the two were separated, 123 is a key-up and the damper goes on
+            // holding what it holds.
+            r.midi.addEvent (juce::MidiMessage::controllerEvent (1, 120, 0), 0);
             r.run (200);
             std::printf ("   after a MIDI panic:              %d held voice(s)\n",
                          r.heldVoices());

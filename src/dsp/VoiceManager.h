@@ -51,7 +51,19 @@ public:
                             "any" used to do. Every caller that means an external
                             key therefore has to name its channel. */
     void noteOff(int note, int sourceId = -1, bool forceRelease = false, int mpeChannel = 0);
-    void allNotesOff();
+    /** End every sounding note.
+
+        @param cutSound  true = CC 120 All Sound Off, the GUI panic button, and
+               the replay transport: the notes are TAKEN AWAY, so this also
+               resets the performance controllers and zeroes the stored
+               expression of the tails (see resetPerformanceControllers).
+               false = CC 123 All Notes Off, which the MIDI spec defines as
+               every key coming up -- so it goes through the same steps a
+               single key-up does, damper and sostenuto included ("notes may
+               continue to sound if the damper is down"), it freezes the
+               expression instead of zeroing it, and it resets no controller:
+               that is CC 121's message, not this one. */
+    void allNotesOff(bool cutSound = true);
     void setSustainPedal(bool down);
     void setSostenutoPedal(bool down);
     void setSoftPedal(bool down);
@@ -64,10 +76,11 @@ public:
     void setPolyPressure(int note, float pressure, int sourceId = -1);
     /** Reset the performance controllers to rest.
 
-        @param endingEveryNote  true only from allNotesOff. A panic is TAKING
+        @param endingEveryNote  true only from allNotesOff(cutSound = true) --
+               CC 120, the panic button, the replay transport. That is TAKING
                the notes away, so it zeroes the stored pressure of every
                sounding voice, tails and pedal-held notes included -- cases 50
-               and 62 hold that. CC 121 is not that: it resets controller
+               and 62 hold that. CC 123 does not come here at all any more. CC 121 is not that: it resets controller
                VALUES while every note goes on sounding, so it may only reach
                the voices a live control is still allowed to move. Zeroing a
                tail there cut a decaying note off in one block instead of

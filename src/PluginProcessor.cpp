@@ -3688,8 +3688,10 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
     // ── MIDI Panic (StatusBar button) ────────────────────────────────────
     // GUI sets the flag from any thread; we consume it once here on the
-    // audio thread. Mirrors the CC120/123 path below — release all voices,
-    // clear sustain/sostenuto/drone, reset performance controllers.
+    // audio thread. Mirrors the CC 120 path below — release all voices through
+    // the pedals, clear sustain/sostenuto/drone, reset performance controllers.
+    // CC 120 and not CC 123: this button is the panic, and the MIDI spec says
+    // in as many words that 123 is not one.
     if (midiPanicRequested.exchange(false, std::memory_order_acq_rel))
     {
         voiceManager.allNotesOff();
@@ -5487,22 +5489,22 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     }
                     else if (msg.isAllNotesOff() || msg.isAllSoundOff())
                     {
-                        // The two are ONE path here and the MIDI spec separates
-                        // them: CC 120 All Sound Off asks for the envelopes to
-                        // go to zero as fast as possible, CC 123 All Notes Off
-                        // asks only that the notes be released -- "notes may
-                        // continue to sound if the damper is down or the
-                        // release is long". Both here release and both zero the
-                        // stored aftertouch of what they release
-                        // (resetPerformanceControllers, endingEveryNote = true),
-                        // so CC 123 cuts more than it should and CC 120 cuts
-                        // less. It shows on a routed aftertouch: with Z -> Pitch
-                        // at full, a note taken away at full level jumps by
-                        // -10.3937 semitones in one block where the same note
-                        // under a plain key-up jumps by +0.0000. Separating them
-                        // changes what the panic button does, so it is written
-                        // down here rather than done in passing.
-                        voiceManager.allNotesOff();
+                        // The MIDI spec separates the two and this used to be
+                        // one path. CC 120 All Sound Off asks for the envelopes
+                        // to reach zero as fast as possible; CC 123 All Notes
+                        // Off asks only that the notes be released, says
+                        // outright that it is not to be used as a panic button,
+                        // and that notes may go on sounding under the damper.
+                        // Sharing a path made 123 cut more than it should: it
+                        // released through the damper, zeroed the stored
+                        // aftertouch of what it released, and reset every
+                        // performance controller as well -- none of which the
+                        // message asks for. On a routed aftertouch that showed
+                        // as pitch: with Z -> Pitch at full, a note taken away
+                        // at full level jumped -10.3937 semitones in one block
+                        // where the same note under a plain key-up jumps
+                        // +0.0000.
+                        voiceManager.allNotesOff(/*cutSound=*/msg.isAllSoundOff());
                         // Keys + lead only. reset() here would clear lastPlayedNote
                         // while this block's already-queued arp NoteOn is still
                         // ahead of us in internalNoteEvents_ — that voice would
