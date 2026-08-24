@@ -229,6 +229,10 @@ public:
     // on the audio thread pass this instead of bp's dead field; the accessor
     // exists so they need not copy the whole BlockParams per MIDI sub-segment.
     float globalPitchBendRatio() const { return std::exp2(pitchBendSemitones / 12.0f); }
+    /** CC 7 * CC 11 * the soft pedal -- what every output sample is
+        multiplied by. Public for the same reason globalPitchBendRatio is:
+        the corpus has to be able to read it. */
+    float performanceOutputGain() const;
 
     // ── Engine data distribution ──
     void setEngineMode(SynthVoice::EngineMode mode);
@@ -490,7 +494,6 @@ private:
     // Effective Z for a voice = max(its note's aggregate pressure, its own MPE
     // member-channel pressure). Keeps per-note Z independent of zone-wide pressure.
     float pressureForVoice(int voiceIdx) const;
-    float performanceOutputGain() const;
     BlockParams applyPerformanceControllers(const BlockParams& bp) const;
     static constexpr float GAIN_RAMP_MS = 5.0f;
 };

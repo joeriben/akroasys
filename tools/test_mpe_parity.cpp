@@ -3609,6 +3609,49 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
     }
 }
 
+// ── 73. Reset-all-controllers does not raise the instrument to full ────────
+//      RP-015 enumerates what this message resets and Volume is deliberately
+//      not on the list -- a mixer setting is meant to survive it. Expression
+//      IS on the list. Resetting the volume here multiplied every output
+//      sample by 1.0 whatever the fader said: measured, CC 7 = 40 is a gain of
+//      0.31496, and CC 121 raised it to 1.0 in one unsmoothed block, +10.03 dB.
+void caseResetAllControllersDoesNotRaiseTheInstrumentToFull()
+{
+    std::printf ("[73] reset-all-controllers does not raise the instrument to full\n");
+
+    Rig r;
+    const auto& vm = r.proc.getVoiceManager();
+    const float faderDown = 40.0f / 127.0f;
+
+    r.cc (1, 7, 40);
+    r.flush();
+    checkNear (vm.performanceOutputGain(), faderDown, 1e-3f,
+               "the fader is where the player left it");
+
+    r.cc (1, 121, 0);
+    r.flush();
+    checkNear (vm.performanceOutputGain(), faderDown, 1e-3f,
+               "and the reset leaves it there");
+
+    // The half RP-015 DOES ask for, so this cannot be satisfied by making the
+    // message leave every gain alone.
+    r.cc (1, 11, 50);
+    r.flush();
+    checkNear (vm.performanceOutputGain(), faderDown * (50.0f / 127.0f), 1e-3f,
+               "expression multiplies the fader");
+    r.cc (1, 121, 0);
+    r.flush();
+    checkNear (vm.performanceOutputGain(), faderDown, 1e-3f,
+               "and the reset returns expression to full, which the message does ask for");
+
+    // And a panic is no different: it takes notes away, not the mixer.
+    r.cc (1, 123, 0);
+    r.flush();
+    checkNear (vm.performanceOutputGain(), faderDown, 1e-3f,
+               "a panic leaves the fader alone too");
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -3687,6 +3730,7 @@ int main()
     caseResetAllControllersDoesNotCentreAFrozenBend();
     caseResetAllControllersDoesNotMoveTheNextNotesYOrigin();
     casePanicDoesNotFourOctaveANoteOnItsWayOut();
+    caseResetAllControllersDoesNotRaiseTheInstrumentToFull();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

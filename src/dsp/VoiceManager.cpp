@@ -731,12 +731,21 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     modWheelPressure = 0.0f;
     breathPressure = 0.0f;
     expressionGain = 1.0f;
-    channelVolumeGain = 1.0f;
+    // NOT channelVolumeGain. RP-015 enumerates what Reset All Controllers
+    // resets -- modulation to 0, EXPRESSION to 127, the four pedals to 0,
+    // RPN/NRPN to null, pitch bend to centre, channel and poly pressure to 0 --
+    // and Volume is deliberately not on that list, so a mixer setting survives
+    // the message. Resetting it here multiplied every output sample by 1.0
+    // regardless of where the fader stood: measured, CC 7 = 40 gives 0.31496,
+    // and CC 121 raised the whole instrument to full in one unsmoothed block,
+    // +10.03 dB. A DAW sends CC 121 on transport stop and on locate. The
+    // expression half above stays, because RP-015 does list CC 11.
     pitchBendSemitones = 0.0f;
     polyPressureByNote.fill(0.0f);
-    // NOT keyDownChannels_. This runs for Reset All Controllers (CC 121), which
-    // releases no voice: the chord goes on sounding and the hand goes on
-    // leaning into it. Dropping the keys here would leave the reading gate shut
+    // NOT keyDownChannels_. This runs for Reset All Controllers (CC 121), whose
+    // own effect on notes is limited to lifting the pedals (the two calls at the
+    // top of this function, which RP-015 asks for): no key is released, the
+    // chord goes on sounding and the hand goes on leaning into it. Dropping the keys here would leave the reading gate shut
     // for every one of them until they are lifted and pressed again -- the
     // instrument deaf to pressure on a chord it is still playing. Resetting
     // controller VALUES is not the hand leaving the keys. A real panic clears
