@@ -35,6 +35,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 
 #include "../src/PluginProcessor.h"
+#include "../src/dsp/BlockParams.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -203,6 +204,43 @@ int main()
         r.run (400);                                      // the arp dispatching steps
         r.disarm();
         report ("400 blocks of a chord under the arpeggiator", r.sites);
+    }
+
+    {
+        // The arpeggiator's false->true EDGE, which the case above cannot see:
+        // it sets arpMode before warm(), so the edge fires unarmed and all 400
+        // armed blocks run with arpWasEnabled already true. The edge is where
+        // the sequencer flush lives, and StepSequencer::allNotesOff push_back()s
+        // without a capacity check -- so a deliberate allocation there passed
+        // every gate this suite had.
+        Rig r;
+        auto set = [&r] (const char* pid, float v)
+        {
+            if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        set (PID::genSeqRunning, 0.0f);
+        r.run (2);
+        auto& seq = r.proc.getStepSequencer();
+        seq.setNumSteps (4);
+        for (int i = 0; i < 4; ++i) { seq.setStepNote (i, 60 + 3 * i); seq.setStepEnabled (i, true); }
+        set (PID::seqSteps, 4.0f);
+        set (PID::seqBpm, 200.0f);
+        set (PID::seqGate, 0.95f);
+        set (PID::seqRunning, 1.0f);
+        warm (r);
+        r.noteOn (2, 72);
+        r.run (20);
+        r.arm();
+        for (int t = 0; t < 20; ++t)                      // 20 crossings of the edge
+        {
+            set (PID::arpMode, 1.0f);
+            r.run (6);
+            set (PID::arpMode, 0.0f);
+            r.run (6);
+        }
+        r.disarm();
+        report ("20 arpeggiator switch-ons over a running sequencer", r.sites);
     }
 
     std::printf ("\n%s\n\n", gFailures == 0 ? "ALL PASS" : "FAILED");

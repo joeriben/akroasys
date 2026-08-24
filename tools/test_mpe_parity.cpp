@@ -3096,6 +3096,63 @@ void caseSlidingStepDoesNotContinueAPanickedTail()
 
     set (PID::seqRunning, 0.0f);
     r.run (2);
+
+    // The same gesture with the hand playing ON one of the line's own pitches.
+    // Above, the line plays 84/90 and the hand plays 60, so a guard narrowed to
+    // "unless the releasing voice is already on the incoming pitch" slips
+    // through untouched -- and that narrowing is this case's own defect, just
+    // restricted to one note. Playing along on a pitch the line uses is the
+    // ordinary thing to do.
+    {
+        Rig q;
+        auto setq = [&q] (const char* pid, float v)
+        {
+            if (auto* p = q.proc.getValueTreeState().getParameter (pid))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        setq (PID::genSeqRunning, 0.0f);
+        q.run (2);
+        auto& s2 = q.proc.getStepSequencer();
+        s2.setNumSteps (2);
+        s2.setStepNote (0, 84);
+        s2.setStepNote (1, 90);
+        s2.setStepEnabled (0, true);
+        s2.setStepEnabled (1, true);
+        s2.setStepBindMode (0, T5ynthStepSequencer::BindMode::Glide);
+        s2.setStepBindMode (1, T5ynthStepSequencer::BindMode::Glide);
+        setq (PID::seqSteps, 2.0f);
+        setq (PID::seqBpm, 200.0f);
+        setq (PID::seqRunning, 1.0f);
+        q.run (40);
+
+        q.noteOn (2, 84);              // the hand plays one of the line's pitches
+        q.flush();
+        check (q.heldVoiceForNote (84) != nullptr, "the hand's note on the line's pitch sounds");
+        q.noteOff (2, 84);
+        q.flush();
+        q.cc (1, 123, 0);
+        q.run (2);
+
+        int gated = 0;
+        for (int b = 0; b < 400; ++b)
+        {
+            q.run (1);
+            const auto& vm = q.proc.getVoiceManager();
+            for (int i2 = 0; i2 < VoiceManager::MAX_VOICES; ++i2)
+            {
+                const auto& v = vm.getVoice (i2);
+                if (v.isActive() && ! v.isReleasing() && v.getCurrentNote() >= 84)
+                    { ++gated; break; }
+            }
+        }
+        // Striking gives a gated voice in nearly every block; dragging the
+        // corpse leaves the line silent wherever it should have struck.
+        if (gated <= 380)
+            std::printf ("      (the line was gated in only %d of 400 blocks)\n", gated);
+        check (gated > 380, "and the line strikes rather than fading on the hand's corpse");
+        setq (PID::seqRunning, 0.0f);
+        q.run (2);
+    }
 }
 
 
@@ -3213,6 +3270,96 @@ void caseMonoKnowsAHandFromTheMachine()
         set (PID::seqRunning, 0.0f);
         r.run (2);
     }
+
+    // NOT COVERED, said plainly rather than left to look covered: adding a
+    // sostenuto term to followsLivePressure -- which would freeze a
+    // sostenuto-caught sequencer note against the only control that drives it --
+    // survives this whole corpus. The damper version of that mutation is caught
+    // by the two blocks above; the sostenuto one is not. Two drafts of a case
+    // for it are worth recording as failures: leaning on the wheel just after
+    // the pedal catches the note never reaches the state at all, because
+    // sostenutoReleasedVoice is set at the note's OWN gate-off, not at the
+    // catch; and running past that gate-off at 200 BPM puts a fresh step's
+    // voice in the slot, so the assertion then reads a different note and fails
+    // against correct code. A case that fails on correct code is worse than no
+    // case, so there is none here yet.
+}
+
+
+
+// ── 68. Reset-all-controllers does not cut a note that is fading ────────────
+//      CC 121 releases nothing: the chord goes on sounding and the hand goes on
+//      leaning into it, which is why cases 46 and 49 hold that a key still DOWN
+//      is zeroed by it. What had no gate was everything else it reached. It
+//      zeroed the stored pressure of every sounding voice, so with aftertouch ->
+//      DCA at full a decaying note went from level 0.2851 to 0.0000 in one block
+//      -- 5.3 ms -- instead of fading, and a pedal-held note from 0.629. That is
+//      the second half of the criterion measure_at_gestures states: silent as a
+//      swell, very audible as a note cut off. A DAW sends CC 121 on transport
+//      stop and on locate.
+//
+//      A panic is the opposite and stays so: it is TAKING the notes away, so it
+//      zeroes tails too (cases 50 and 62).
+void caseResetAllControllersDoesNotCutAFadingNote()
+{
+    std::printf ("[68] reset-all-controllers does not cut a note that is fading\n");
+
+    // A tail.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.pressure (2, 110);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (60);
+        check (v != nullptr, "the note sounds");
+        if (v != nullptr)
+        {
+            r.noteOff (2, 60);
+            r.flush();
+            r.cc (1, 121, 0);
+            r.flush();
+            checkNear (v->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "the fading note keeps what its finger left it");
+        }
+    }
+
+    // A note the damper is holding.
+    {
+        Rig p;
+        p.cc (1, 64, 127);
+        p.noteOn (2, 67);
+        p.flush();
+        p.pressure (2, 110);
+        p.flush();
+        const auto* pedalled = p.heldVoiceForNote (67);
+        check (pedalled != nullptr, "the pedalled note sounds");
+        p.noteOff (2, 67);
+        p.flush();
+        p.cc (1, 121, 0);
+        p.flush();
+        if (pedalled != nullptr)
+            checkNear (pedalled->getAftertouch(), 110.0f / 127.0f, 1e-3f,
+                       "and so does the one the pedal is holding");
+    }
+
+    // Unchanged, and the reason this case cannot be satisfied by simply making
+    // CC 121 do nothing: a key still DOWN is zeroed, which is what the message
+    // asks for.
+    {
+        Rig h;
+        h.noteOn (2, 72);
+        h.flush();
+        h.pressure (2, 110);
+        h.flush();
+        const auto* held = h.heldVoiceForNote (72);
+        check (held != nullptr, "the held note sounds");
+        h.cc (1, 121, 0);
+        h.flush();
+        if (held != nullptr)
+            checkNear (held->getAftertouch(), 0.0f, 1e-3f,
+                       "while a key still down is reset, as the message asks");
+    }
 }
 
 
@@ -3290,6 +3437,7 @@ int main()
     casePanicEndsTheMachinesOwnNotesToo();
     caseSlidingStepDoesNotContinueAPanickedTail();
     caseMonoKnowsAHandFromTheMachine();
+    caseResetAllControllersDoesNotCutAFadingNote();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
