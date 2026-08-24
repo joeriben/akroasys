@@ -3377,7 +3377,8 @@ void caseResetAllControllersDoesNotCutAFadingNote()
 //      tag noteOff already cleared for exactly this reason -- so a tail snapped
 //      by the whole per-note range in one block, unramped, while its level went
 //      on decaying. Measured at the shipped +-48: a note bent to +47.9941 st,
-//      key lifted, CC 121 -> +0.0000 st. Four octaves, 5.3 ms, mid-release.
+//      key lifted, CC 121 -> +0.0000 st. Four octaves, one block, mid-release
+//      -- 5.805 ms at this file's 44.1 kHz.
 //
 //      It was inaudible before the pressure fix only because with aftertouch ->
 //      DCA at full the same block cut the note to silence. Restoring the level

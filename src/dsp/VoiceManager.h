@@ -393,9 +393,13 @@ private:
     std::array<int, MAX_VOICES> voiceSourceId {};
     // Did a HAND start this voice -- an external MIDI key, or the computer
     // keyboard? Set once where the voice is allocated, cleared when the slot is
-    // freed, and NOT cleared by allNotesOff or resetPerformanceControllers:
-    // a panic ends the notes, it does not retroactively unmake the hand that
-    // played them. followsLivePressure is the reader.
+    // freed, and never cleared out from under a voice that is still SOUNDING --
+    // not by allNotesOff, not by resetPerformanceControllers, both of which
+    // wipe voiceMidiChannel_ mid-tail on purpose. A panic ends the notes; it
+    // does not retroactively unmake the hand that played them. (The idle-slot
+    // loop in resetPerformanceControllers does clear it, alongside the two
+    // channel tags, for slots that hold nothing.) followsLivePressure is the
+    // reader.
     std::array<bool, MAX_VOICES> voiceStartedByHand_ {};
     std::array<int8_t, MAX_VOICES> voiceMidiChannel_ {};  // 0=unassigned, 1-16=MIDI channel
 

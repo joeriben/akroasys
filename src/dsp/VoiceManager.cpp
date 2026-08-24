@@ -745,8 +745,9 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     // NOT keyDownChannels_. This runs for Reset All Controllers (CC 121), whose
     // own effect on notes is limited to lifting the pedals (the two calls at the
     // top of this function, which RP-015 asks for): no key is released, the
-    // chord goes on sounding and the hand goes on leaning into it. Dropping the keys here would leave the reading gate shut
-    // for every one of them until they are lifted and pressed again -- the
+    // chord goes on sounding and the hand goes on leaning into it. Dropping
+    // the keys here would leave the reading gate shut for every one of them
+    // until they are lifted and pressed again -- the
     // instrument deaf to pressure on a chord it is still playing. Resetting
     // controller VALUES is not the hand leaving the keys. A real panic clears
     // the ledger where that belongs, beside the arpeggiator's own allKeysUp.
@@ -768,7 +769,7 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
         {
             // An idle slot holds nothing anyone can hear, and every note-on
             // clears the per-note bend before it sounds anyway -- all five of
-            // them (:219, :271, :360, :443, :1769), and renderBlock clears it
+            // them (:219, :271, :360, :443, :1803), and renderBlock clears it
             // again the moment a slot goes idle. Housekeeping, not the seed of
             // the next note.
             v.setPerVoicePitchBend(0.0f);
