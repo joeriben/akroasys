@@ -755,9 +755,29 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     for (int i = 0; i < MAX_VOICES; ++i)
     {
         auto& v = voices[static_cast<size_t>(i)];
-        if (v.isActive() && (endingEveryNote || followsLivePressure(i)))
+        if (! v.isActive())
+        {
+            // An idle slot holds nothing anyone can hear, and every note-on
+            // clears the per-note bend before it sounds anyway (:219, :271,
+            // :443). Housekeeping, not the seed of the next note.
+            v.setPerVoicePitchBend(0.0f);
+            continue;
+        }
+        if (endingEveryNote || followsLivePressure(i))
+        {
             v.setAftertouch(0.0f);
-        v.setPerVoicePitchBend(0.0f);
+            // RP-015 DOES list Pitch Bend among what this message resets, so a
+            // key still down is centred and stays so. The gate is the same one
+            // the pressure above uses, for the same reason and with a much
+            // bigger number: this reached every voice, so a note whose key was
+            // already up snapped by the whole per-note range in one block --
+            // measured 47.9941 semitones at the shipped +-48, four octaves,
+            // unramped, mid-release, while the level went on decaying. noteOff
+            // clears voiceExprChannel_ at the key-up precisely so a
+            // controller's between-note reset burst cannot do that (case 58);
+            // this writer went around the tag instead of asking it.
+            v.setPerVoicePitchBend(0.0f);
+        }
     }
     // Only voices that are not sounding. A channel tag is not a controller
     // value -- it is which finger owns the note -- and this runs for CC 121,

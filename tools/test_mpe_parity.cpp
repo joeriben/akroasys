@@ -3363,6 +3363,86 @@ void caseResetAllControllersDoesNotCutAFadingNote()
 }
 
 
+// ── 69. Reset-all-controllers does not centre a bend the finger already left ─
+//      RP-015 does list Pitch Bend among what Reset All Controllers resets, so
+//      a key still DOWN is centred by it and stays centred here. What had no
+//      gate was the same reach case 68 closed for pressure: this wrote EVERY
+//      voice's per-note bend, including one whose key is up and whose channel
+//      tag noteOff already cleared for exactly this reason -- so a tail snapped
+//      by the whole per-note range in one block, unramped, while its level went
+//      on decaying. Measured at the shipped +-48: a note bent to +47.9941 st,
+//      key lifted, CC 121 -> +0.0000 st. Four octaves, 5.3 ms, mid-release.
+//
+//      It was inaudible before the pressure fix only because with aftertouch ->
+//      DCA at full the same block cut the note to silence. Restoring the level
+//      is what makes this one audible, which is why it is closed in the same
+//      breath.
+void caseResetAllControllersDoesNotCentreAFrozenBend()
+{
+    std::printf ("[69] reset-all-controllers does not centre a bend the finger already left\n");
+
+    // A tail.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.wheel (2, 16383);
+        r.flush();
+        const auto* v = r.heldVoiceForNote (60);
+        check (v != nullptr, "the bent note sounds");
+        if (v != nullptr)
+        {
+            checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
+                       "and is bent before the key comes up");
+            r.noteOff (2, 60);
+            r.flush();
+            r.cc (1, 121, 0);
+            r.flush();
+            checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
+                       "the fading note keeps the pitch its finger left it at");
+        }
+    }
+
+    // A note the damper is holding -- still at full level, so this one is not
+    // a subtlety in the last few ms of a release.
+    {
+        Rig p;
+        p.cc (1, 64, 127);
+        p.noteOn (2, 67);
+        p.flush();
+        p.wheel (2, 16383);
+        p.flush();
+        const auto* pedalled = p.heldVoiceForNote (67);
+        check (pedalled != nullptr, "the pedalled note sounds");
+        p.noteOff (2, 67);
+        p.flush();
+        p.cc (1, 121, 0);
+        p.flush();
+        if (pedalled != nullptr)
+            checkNear (pedalled->getPerVoicePitchBend(), fullUpBend (p.noteBendRange()), 0.01f,
+                       "and so does the one the pedal is holding");
+    }
+
+    // Unchanged, and the reason this case cannot be satisfied by making CC 121
+    // leave every bend alone: a key still DOWN is centred, which is what the
+    // message asks for.
+    {
+        Rig h;
+        h.noteOn (2, 72);
+        h.flush();
+        h.wheel (2, 16383);
+        h.flush();
+        const auto* held = h.heldVoiceForNote (72);
+        check (held != nullptr, "the held note sounds");
+        h.cc (1, 121, 0);
+        h.flush();
+        if (held != nullptr)
+            checkNear (held->getPerVoicePitchBend(), 0.0f, 1e-4f,
+                       "while a key still down is centred, as the message asks");
+    }
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -3438,6 +3518,7 @@ int main()
     caseSlidingStepDoesNotContinueAPanickedTail();
     caseMonoKnowsAHandFromTheMachine();
     caseResetAllControllersDoesNotCutAFadingNote();
+    caseResetAllControllersDoesNotCentreAFrozenBend();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
