@@ -3324,7 +3324,13 @@ void caseResetAllControllersDoesNotCutAFadingNote()
         }
     }
 
-    // A note the damper is holding.
+    // A note that WAS under the damper. Not a second class: CC 121's own first
+    // act is to lift the pedals, which RP-015 asks for, so by the time the loop
+    // runs this voice is releasing exactly like the one above. Kept because it
+    // is the gesture a player makes, and because the pedal's release is where
+    // the level is still high -- but a damper-held-and-not-releasing voice is
+    // unreachable inside this function by construction, and case 58 is where
+    // that state is actually tested.
     {
         Rig p;
         p.cc (1, 64, 127);
@@ -3400,11 +3406,20 @@ void caseResetAllControllersDoesNotCentreAFrozenBend()
             r.flush();
             checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                        "the fading note keeps the pitch its finger left it at");
+            // The SAME gesture in the other unit. setPerVoicePitchBend carries
+            // two numbers: the semitones the pitch uses and a -1..+1 normalised
+            // copy, which is the X modulation source every X-routed target
+            // reads (SynthVoice.cpp:71) and what feeds the Cache and Snap bars.
+            // Centring one and not the other leaves the pitch back at rest
+            // while every X target still reads full deflection -- and nothing
+            // else in this file reads the norm on this path.
+            checkNear (v->getPerVoicePitchBendNorm(), 8191.0f / 8192.0f, 1e-3f,
+                       "and X reads the same in the unit the modulation uses");
         }
     }
 
-    // A note the damper is holding -- still at full level, so this one is not
-    // a subtlety in the last few ms of a release.
+    // A note that WAS under the damper -- see case 68's second part for why
+    // this is the same class as the tail above rather than a second one.
     {
         Rig p;
         p.cc (1, 64, 127);
@@ -3434,11 +3449,18 @@ void caseResetAllControllersDoesNotCentreAFrozenBend()
         h.flush();
         const auto* held = h.heldVoiceForNote (72);
         check (held != nullptr, "the held note sounds");
+        if (held != nullptr)
+            checkNear (held->getPerVoicePitchBend(), fullUpBend (h.noteBendRange()), 0.01f,
+                       "and is bent while the key is still down");
         h.cc (1, 121, 0);
         h.flush();
         if (held != nullptr)
+        {
             checkNear (held->getPerVoicePitchBend(), 0.0f, 1e-4f,
                        "while a key still down is centred, as the message asks");
+            checkNear (held->getPerVoicePitchBendNorm(), 0.0f, 1e-4f,
+                       "in both units");
+        }
     }
 }
 
@@ -3535,6 +3557,58 @@ void caseResetAllControllersDoesNotMoveTheNextNotesYOrigin()
 }
 
 
+// ── 71. A panic does not four-octave a note on its way out ─────────────────
+//      Case 69 gated CC 121; this is the same reach on the louder path.
+//      allNotesOff calls the same function with endingEveryNote = true, which
+//      exists so a panic still zeroes the PRESSURE of the notes it is taking
+//      away -- that makes them go quiet, and cases 50 and 62 hold it. Bend is
+//      where the two part company: allNotesOff releases the key at FULL level,
+//      so centring the bend does not make the note quieter, it makes it snap
+//      by the whole per-note range on the way out, unramped. Measured before
+//      the fix: +47.9941 -> +0.0000 semitones, key still down.
+void casePanicDoesNotFourOctaveANoteOnItsWayOut()
+{
+    std::printf ("[71] a panic does not four-octave a note on its way out\n");
+
+    Rig r;
+    r.noteOn (2, 60);
+    r.flush();
+    r.wheel (2, 16383);
+    r.flush();
+    const auto* v = r.heldVoiceForNote (60);
+    check (v != nullptr, "the bent note sounds");
+    if (v == nullptr) return;
+    checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
+               "and is bent with the key still down");
+
+    r.cc (1, 123, 0);              // all notes off, at full level
+    r.flush();
+    check (v->isActive() && v->isReleasing(), "the panic released it rather than cutting it");
+    checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
+               "and it rings out at the pitch it was taken away at");
+    checkNear (v->getPerVoicePitchBendNorm(), 8191.0f / 8192.0f, 1e-3f,
+               "in both units");
+
+    // The half that must NOT change: the panic still zeroes the pressure, so
+    // the note it is taking away goes quiet. That is what endingEveryNote is
+    // for, and dropping it from the pressure would pass a bend-only test.
+    Rig z;
+    z.noteOn (2, 64);
+    z.flush();
+    z.pressure (2, 110);
+    z.flush();
+    const auto* zv = z.heldVoiceForNote (64);
+    check (zv != nullptr, "the leaned-on note sounds");
+    if (zv != nullptr)
+    {
+        checkNear (zv->getAftertouch(), 110.0f / 127.0f, 1e-3f, "and is leaned on");
+        z.cc (1, 123, 0);
+        z.flush();
+        checkNear (zv->getAftertouch(), 0.0f, 1e-3f,
+                   "and the panic takes its pressure with it");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -3612,6 +3686,7 @@ int main()
     caseResetAllControllersDoesNotCutAFadingNote();
     caseResetAllControllersDoesNotCentreAFrozenBend();
     caseResetAllControllersDoesNotMoveTheNextNotesYOrigin();
+    casePanicDoesNotFourOctaveANoteOnItsWayOut();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

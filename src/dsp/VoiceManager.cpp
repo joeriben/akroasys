@@ -763,7 +763,13 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
             v.setPerVoicePitchBend(0.0f);
             continue;
         }
-        if (endingEveryNote || followsLivePressure(i))
+        // Inside THIS function the predicate collapses to "not releasing",
+        // because the two calls at the top have already released every voice
+        // the pedal flags could disagree about. It is written as the shared
+        // predicate anyway: the two must not drift apart, and a future caller
+        // that does not lift the pedals first would need the full test.
+        const bool followsALiveHand = followsLivePressure(i);
+        if (endingEveryNote || followsALiveHand)
         {
             v.setAftertouch(0.0f);
             // RP-015 DOES list Pitch Bend among what this message resets, so a
@@ -775,8 +781,19 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
             // unramped, mid-release, while the level went on decaying. noteOff
             // clears voiceExprChannel_ at the key-up precisely so a
             // controller's between-note reset burst cannot do that (case 58);
-            // this writer went around the tag instead of asking it.
-            v.setPerVoicePitchBend(0.0f);
+            // this writer went around the tag instead of asking it. One block
+            // is 5.805 ms at the corpus's 44.1 kHz, 5.333 at the gesture tool's
+            // 48 -- the pressure figures above are the gesture tool's.
+            //
+            // endingEveryNote is NOT in this test, and that is the one place
+            // where bend and pressure part company. A panic zeroing the
+            // pressure makes the note it is taking away go quiet, which is what
+            // a panic is for; a panic centring the bend makes it no quieter at
+            // all, only four octaves out of tune on its way. Measured on a key
+            // still down, which allNotesOff releases at full level rather than
+            // partway through a decay: +47.9941 -> +0.0000 in one block.
+            if (followsALiveHand)
+                v.setPerVoicePitchBend(0.0f);
         }
     }
     // Only voices that are not sounding. A channel tag is not a controller
