@@ -585,6 +585,12 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
 
 void VoiceManager::allNotesOff(bool cutSound)
 {
+    // The pitches this call actually ENDS, so the poly-aftertouch latch of each
+    // can be re-asked afterwards exactly as a key-up asks it. Fixed size, on the
+    // stack: this runs on the audio thread.
+    int endedNotes[MAX_VOICES];
+    int endedCount = 0;
+
     for (int i = 0; i < MAX_VOICES; ++i)
     {
         auto& v = voices[static_cast<size_t>(i)];
@@ -635,6 +641,7 @@ void VoiceManager::allNotesOff(bool cutSound)
                 }
             }
         }
+        endedNotes[endedCount++] = v.getCurrentNote();
         v.noteOff();
     }
     // Both messages end a drone hold: it is a note, and neither message leaves
@@ -644,7 +651,24 @@ void VoiceManager::allNotesOff(bool cutSound)
     droneVoiceIndex = -1;
     droneNote = -1;
     if (! cutSound)
+    {
+        // The same question a key-up asks, for every pitch this actually ended.
+        // The processor's own allKeysReleased() that follows covers the pitches
+        // a KEY was on -- and only those: it early-returns when no key is down,
+        // which is exactly the case a drone or a sequencer note creates. Before
+        // this, poly aftertouch pressed hard into a pitch the drone went on
+        // holding stayed latched at 0.9449 through CC 123. Not at the note's
+        // birth -- a voice is born at no pressure whatever the latch says, and
+        // only a writer pushes one in -- but refreshPerformancePressure pushes
+        // pressureForVoice into everything that followsLivePressure, and a
+        // handless drone, sequencer or arpeggiator note is exactly that. So the
+        // next touch of the wheel lifts it there in one block: measured 0.9449
+        // on a wheel asking for 0.0079. CC 120 clears the whole array through
+        // resetPerformanceControllers below.
+        for (int k = 0; k < endedCount; ++k)
+            clearPolyPressureIfReleased(endedNotes[k]);
         return;
+    }
     sustainedVoice.fill(false);
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);

@@ -3939,6 +3939,62 @@ void caseAllSoundOffCutsAndAllNotesOffIsAKeyUp()
 }
 
 
+// ── 77. What all-notes-off leaves behind ───────────────────────────
+//      The poly-aftertouch latch of every pitch the message ENDED. It is a
+//      floor under pressureForNote, and only a key-down on that pitch clears
+//      it, so a value left standing is a departed finger's pressure on every
+//      later sequencer, arpeggiator and drone note of that pitch. The
+//      processor's own allKeysReleased() covers the pitches a KEY was on and
+//      only those -- it early-returns when no key is down, which is exactly
+//      what a drone holding the pitch past the key-up produces.
+void caseWhatAllNotesOffLeavesBehind()
+{
+    std::printf ("[77] what all-notes-off leaves behind\n");
+
+    {
+        Rig r;
+        const auto& vm = r.proc.getVoiceManager();
+        r.noteOn (2, 60);
+        r.flush();
+        r.polyPressure (2, 60, 120);
+        r.flush();
+        checkNear (vm.pressureForHeldNote (60), 120.0f / 127.0f, 1e-3f,
+                   "the finger is readable");
+        r.proc.beginStepHoldPreview (60);   // the mouse takes the same pitch
+        r.run (2);
+        r.noteOff (2, 60);                  // and the finger leaves
+        r.flush();
+        check (r.proc.getVoiceManager().hasDrone(), "the drone holds that pitch on");
+        checkNear (vm.pressureForHeldNote (60), 120.0f / 127.0f, 1e-3f,
+                   "so the latch rightly stays, key or no key");
+
+        r.cc (1, 123, 0);
+        r.flush();
+        // Read straight off the latch, not off a fresh note of that pitch: a
+        // voice is born at no pressure whatever the latch says and only the
+        // next pressure message pushes it in, so a fresh note cannot tell the
+        // two states apart -- verified, that probe passed with the clear taken
+        // out. This one is the floor itself.
+        checkNear (vm.pressureForHeldNote (60), 0.0f, 1e-3f,
+                   "CC 123 ended that pitch, so the departed finger goes with it");
+
+        // And the audible consequence, which is the reason the floor matters:
+        // a later HANDLESS note of that pitch -- drone, sequencer, arpeggiator --
+        // follows live pressure, so the next wheel or channel-pressure move
+        // pushes the floor into it in one block.
+        r.proc.beginStepHoldPreview (60);
+        r.run (2);
+        r.cc (1, 1, 1);                     // the wheel barely off its rest
+        r.flush();
+        const auto* machineNote = r.heldVoiceForNote (60);
+        check (machineNote != nullptr, "a machine note takes that pitch afterwards");
+        if (machineNote != nullptr)
+            checkNear (machineNote->getAftertouch(), 1.0f / 127.0f, 1e-3f,
+                       "and answers the wheel from rest, not from the departed finger");
+    }
+}
+
+
 // ── 76. What all-notes-off does with the pedals and with the drone ─────────
 //      Three states the split left with no assertion at all, each of which a
 //      mutation of the shipped code reaches while the rest of this file stays
@@ -4121,6 +4177,7 @@ int main()
     caseTheRestOfTheResetList();
     caseAllSoundOffCutsAndAllNotesOffIsAKeyUp();
     caseAllNotesOffPedalsAndDrone();
+    caseWhatAllNotesOffLeavesBehind();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
