@@ -595,6 +595,14 @@ void VoiceManager::allNotesOff(bool cutSound)
         // that this message is not a panic and that the damper may go on
         // holding what it holds; CC 120 is the panic, and it is the branch
         // below.
+        //
+        // "The same steps" is exact for an external key and for the machine's
+        // own notes. It is NOT exact for the computer keyboard: noteOff gates
+        // both pedal branches on sourceId < 0 and the computer keyboard passes
+        // 15, so a real key-up there goes straight through the damper while
+        // this holds it. Measured, damper down: key-up 0 voices held, CC 123 1.
+        // The odd one out is the key-up -- a damper should hold those notes --
+        // so this is left as it is and the gap is recorded where it belongs.
         if (! cutSound)
         {
             if (v.isReleasing())
@@ -603,21 +611,36 @@ void VoiceManager::allNotesOff(bool cutSound)
             // the same line noteOff runs, for the same reason: a controller's
             // reset burst must not land on the tail.
             voiceExprChannel_[static_cast<size_t>(i)] = 0;
-            if (sostenutoPedalDown && sostenutoVoice[static_cast<size_t>(i)])
+            // The drone is not a key, so no pedal has a claim on it -- exactly
+            // the reason noteOff gates its own two pedal branches rather than
+            // applying them to everything. Letting a pedal keep it here left an
+            // ORPHAN: the handle below is cleared either way, and clearDroneNote
+            // early-returns on droneVoiceIndex < 0, so the mouse coming up --
+            // the drone's only control -- became a no-op. Measured: one voice
+            // still sounding with hasDrone() false, unreachable by the mouse,
+            // answering the wheel at Z = 1.0000 with nobody holding anything,
+            // a second one added by the next step pressed, and both ending only
+            // when a pedal they have nothing to do with was lifted.
+            if (i != droneVoiceIndex)
             {
-                sostenutoReleasedVoice[static_cast<size_t>(i)] = true;
-                continue;
-            }
-            if (sustainPedalDown)
-            {
-                sustainedVoice[static_cast<size_t>(i)] = true;
-                continue;
+                if (sostenutoPedalDown && sostenutoVoice[static_cast<size_t>(i)])
+                {
+                    sostenutoReleasedVoice[static_cast<size_t>(i)] = true;
+                    continue;
+                }
+                if (sustainPedalDown)
+                {
+                    sustainedVoice[static_cast<size_t>(i)] = true;
+                    continue;
+                }
             }
         }
         v.noteOff();
     }
     // Both messages end a drone hold: it is a note, and neither message leaves
-    // notes standing on purpose.
+    // notes standing on purpose. Clearing the handle is load-bearing on BOTH
+    // paths, not only the cut: in mono the drone reserves voice 0, and a stale
+    // index there makes the synth stop answering the keyboard altogether.
     droneVoiceIndex = -1;
     droneNote = -1;
     if (! cutSound)

@@ -3934,6 +3934,105 @@ void caseAllSoundOffCutsAndAllNotesOffIsAKeyUp()
 }
 
 
+// ── 76. What all-notes-off does with the pedals and with the drone ─────────
+//      Three states the split left with no assertion at all, each of which a
+//      mutation of the shipped code reaches while the rest of this file stays
+//      green. The worst is a permanent hung note.
+//
+//      NOT gated here, deliberately, because no player-visible difference
+//      could be constructed for either: the skip-if-releasing condition (a
+//      second noteOff on an already-releasing voice changed nothing
+//      measurable), and the ORDER of the two pedal branches
+//      (releaseSustainedVoices defers to sostenuto anyway). Written down
+//      rather than left looking covered.
+void caseAllNotesOffPedalsAndDrone()
+{
+    std::printf ("[76] all-notes-off, the pedals and the drone\n");
+
+    auto stillSounding = [] (Rig& rig)
+    {
+        const auto& vm = rig.proc.getVoiceManager();
+        int n = 0;
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+            if (vm.getVoice (i).isActive() && ! vm.getVoice (i).isReleasing())
+                ++n;
+        return n;
+    };
+
+    // The sostenuto pedal goes on holding, AND lifting it still ends the note.
+    // The second half is the hung one: marking the voice held without marking
+    // it key-released leaves releaseSostenutoVoices unable to reach it ever
+    // again -- measured 11.6 s of silence with the voice still active.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 66, 127);             // sostenuto catches what is sounding
+        r.flush();
+        check (r.heldVoiceForNote (60) != nullptr, "the sostenuto pedal has the note");
+        r.cc (1, 123, 0);
+        r.flush();
+        check (r.heldVoiceForNote (60) != nullptr, "and goes on holding it through CC 123");
+        r.cc (1, 66, 0);               // pedal up
+        r.run (2);
+        check (r.heldVoiceForNote (60) == nullptr, "and lifting it ends the note");
+        r.run (600);
+        check (r.activeVoiceCount() == 0, "with nothing left standing");
+    }
+
+    // The drone under a pedal. It is not a key, so no pedal has a claim on it,
+    // and the handle to it is cleared either way -- so a pedal keeping it here
+    // orphaned it: still sounding, hasDrone() false, the mouse coming up a
+    // no-op, and a second step adding a second one.
+    {
+        Rig r;
+        r.cc (1, 64, 127);             // damper down
+        r.flush();
+        r.proc.beginStepHoldPreview (60);
+        r.run (2);
+        check (r.proc.getVoiceManager().hasDrone(), "the mouse is holding a step");
+        check (stillSounding (r) == 1, "and it sounds");
+
+        r.cc (1, 123, 0);
+        r.flush();
+        check (! r.proc.getVoiceManager().hasDrone(), "CC 123 ends the drone hold");
+        check (stillSounding (r) == 0, "and leaves nothing sounding under the pedal");
+
+        r.proc.endStepHoldPreview();   // the mouse comes up
+        r.run (2);
+        check (stillSounding (r) == 0, "the mouse coming up finds nothing to end");
+
+        r.proc.beginStepHoldPreview (64);   // and the next step does not accumulate
+        r.run (2);
+        r.proc.endStepHoldPreview();
+        r.run (2);
+        check (stillSounding (r) == 0, "and the next step held does not pile up on it");
+        r.run (600);
+        check (r.activeVoiceCount() == 0, "with nothing left standing");
+    }
+
+    // Clearing the handle is load-bearing on the CC 123 path too, which is why
+    // the fix above is "let the drone through the pedal branches" and not
+    // "leave the handle alone": in mono the drone reserves voice 0, and a stale
+    // index there suppresses the keyboard's own note-ons.
+    {
+        Rig m;
+        if (auto* p = m.proc.getValueTreeState().getParameter (PID::voiceCount))
+            p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = mono
+        m.flush();
+        m.proc.beginStepHoldPreview (60);
+        m.run (2);
+        check (m.proc.getVoiceManager().hasDrone(), "the mouse is holding a step in mono");
+        m.cc (1, 123, 0);
+        m.flush();
+        m.noteOn (2, 67);
+        m.flush();
+        check (m.heldVoiceForNote (67) != nullptr,
+               "and the keyboard answers again afterwards");
+    }
+}
+
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -4016,6 +4115,7 @@ int main()
     caseResetAllControllersDoesNotRaiseTheInstrumentToFull();
     caseTheRestOfTheResetList();
     caseAllSoundOffCutsAndAllNotesOffIsAKeyUp();
+    caseAllNotesOffPedalsAndDrone();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
