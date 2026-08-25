@@ -1782,8 +1782,10 @@ void caseAftertouchInTheReleaseBufferDoesNotReArm()
 //      the same -- but the fingers are still on the keys and go on sending. The
 //      key-up that eventually comes finds nothing recorded and has nothing to
 //      clear with, so anything written in between would stand for good. A DAW
-//      sends CC123 on transport stop, so "stop while holding a chord, keep
-//      holding, lean in" is an ordinary gesture.
+//      sends one of these on transport stop, so "stop while holding a chord,
+//      keep holding, lean in" is an ordinary gesture. CC 120 here: since the
+//      two were separated it is the one that takes the notes away, and case 75
+//      holds what CC 123 does instead.
 void casePanicUnderAHeldChordLeavesNothingStanding()
 {
     std::printf ("[44] a panic under a held chord leaves nothing standing\n");
@@ -2932,8 +2934,9 @@ void caseSostenutoTailFreezesToo()
 //      everything else. A step-sequencer, generative, arpeggiator or drone voice
 //      has no hand, so it follows live controls -- and "for its whole sounding
 //      life" was taken to include the release tail a panic had just started. A
-//      DAW sends CC123 on transport stop, which is by definition the moment the
-//      sequencer was the thing playing: the line was cut, and the next wheel,
+//      DAW sends one of these on transport stop, which is by definition the
+//      moment the sequencer was the thing playing -- CC 120 here, the one that
+//      takes the notes away: the line was cut, and the next wheel,
 //      breath or channel-pressure move brought all of it back from silence to
 //      full level for the length of the release. Measured, four voices at once,
 //      still ringing 2.1 s later.
@@ -3544,9 +3547,11 @@ void caseResetAllControllersDoesNotMoveTheNextNotesYOrigin()
                        "the first move is the distance the finger moved");
     }
 
-    // The panic reaches this same function (allNotesOff passes
-    // endingEveryNote = true), so CC 123 has to hold it too -- and a version
-    // that restores the wipe on the panic path alone passes everything else.
+    // The cut reaches this same function (allNotesOff passes
+    // endingEveryNote = true), so CC 120 has to hold it too -- and a version
+    // that restores the wipe on the cut path alone passes everything else.
+    // CC 120 and not CC 123: since the two were separated, only the cut comes
+    // through resetPerformanceControllers at all.
     {
         Rig r;
         r.cc (2, 74, 64);
@@ -3817,7 +3822,7 @@ void caseTheRestOfTheResetList()
 //
 //      What made it worth separating rather than recording: 123 zeroed the
 //      stored aftertouch of what it released, and pressure is one of four
-//      sources feeding seventeen targets, of which exactly one is loudness --
+//      sources feeding sixteen targets, of which exactly one is loudness --
 //      and that one is off on a fresh patch. So on a default patch the zeroing
 //      changed the level by nothing while it moved a routed pitch by up to
 //      twelve semitones, unramped, on a note at full level.
