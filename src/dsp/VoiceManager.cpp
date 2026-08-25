@@ -638,6 +638,15 @@ void VoiceManager::allNotesOff(bool cutSound)
             // when a pedal they have nothing to do with was lifted.
             if (i != droneVoiceIndex)
             {
+                // Sostenuto is asked FIRST, and the order is not free: it is
+                // the order noteOff uses, and the two part company on
+                // "sostenuto down, damper down, then sostenuto up". Marking the
+                // voice sustained instead leaves releaseSostenutoVoices unable
+                // to reach it -- it wants sostenutoReleasedVoice, which the
+                // other branch never sets -- so the note is still sounding
+                // after the pedal it was caught by has come up. Measured: 1
+                // voice standing where this order leaves 0, and where noteOff
+                // on the identical gesture leaves 0.
                 if (sostenutoPedalDown && sostenutoVoice[static_cast<size_t>(i)])
                 {
                     sostenutoReleasedVoice[static_cast<size_t>(i)] = true;

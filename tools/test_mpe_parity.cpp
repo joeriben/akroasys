@@ -4050,12 +4050,11 @@ void caseWhatAllNotesOffLeavesBehind()
 //      mutation of the shipped code reaches while the rest of this file stays
 //      green. The worst is a permanent hung note.
 //
-//      NOT gated here, deliberately, because no player-visible difference
-//      could be constructed for either: the skip-if-releasing condition (a
-//      second noteOff on an already-releasing voice changed nothing
-//      measurable), and the ORDER of the two pedal branches
-//      (releaseSustainedVoices defers to sostenuto anyway). Written down
-//      rather than left looking covered.
+//      Two things this case said were "not gated because no player-visible
+//      difference could be constructed" turned out to have one each, so both
+//      are gated instead: the ORDER of the two pedal branches is at the end of
+//      this case, and the skip-if-releasing condition is case 77. Neither claim
+//      survived being tried harder than the author tried it.
 void caseAllNotesOffPedalsAndDrone()
 {
     std::printf ("[76] all-notes-off, the pedals and the drone\n");
@@ -4131,6 +4130,11 @@ void caseAllNotesOffPedalsAndDrone()
         if (auto* p = m.proc.getValueTreeState().getParameter (PID::voiceCount))
             p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = mono
         m.flush();
+        // Asserted, not assumed: with the rig in poly the mutation this block
+        // exists to catch lands on a slot findFreeVoice simply skips and both
+        // checks below pass anyway -- measured, by putting the rig in poly and
+        // running the mutation. The whole discriminating power is this line.
+        check (m.proc.getVoiceManager().getVoiceLimit() == 1, "the rig is in mono");
         m.proc.beginStepHoldPreview (60);
         m.run (2);
         check (m.proc.getVoiceManager().hasDrone(), "the mouse is holding a step in mono");
@@ -4140,6 +4144,68 @@ void caseAllNotesOffPedalsAndDrone()
         m.flush();
         check (m.heldVoiceForNote (67) != nullptr,
                "and the keyboard answers again afterwards");
+    }
+
+    // The SOSTENUTO pedal, which claims the drone just as readily: it marks
+    // every voice with sourceId < 0, and the drone is one. Guarding only the
+    // damper branch leaves the identical orphan one pedal over.
+    {
+        Rig r;
+        r.proc.beginStepHoldPreview (60);
+        r.run (2);
+        check (r.proc.getVoiceManager().hasDrone(), "the mouse is holding a step");
+        r.cc (1, 66, 127);             // sostenuto catches what is sounding
+        r.flush();
+        r.cc (1, 123, 0);
+        r.flush();
+        check (! r.proc.getVoiceManager().hasDrone(), "CC 123 ends it under sostenuto too");
+        check (stillSounding (r) == 0, "and leaves nothing sounding");
+        r.proc.endStepHoldPreview();
+        r.run (2);
+        check (stillSounding (r) == 0, "with the mouse coming up onto nothing");
+    }
+
+    // And the other direction, which is the whole capability the split exists
+    // to protect: a drone being held must not cost the damper its KEYS.
+    // "The drone is not a key" written as "there is no drone" reads the same
+    // and takes all of them away.
+    {
+        Rig r;
+        r.cc (1, 64, 127);             // damper down
+        r.flush();
+        r.noteOn (2, 60); r.noteOn (3, 64); r.noteOn (4, 67);
+        r.flush();
+        r.noteOff (2, 60); r.noteOff (3, 64); r.noteOff (4, 67);
+        r.flush();
+        check (stillSounding (r) == 3, "three keys, up, held by the pedal");
+        r.proc.beginStepHoldPreview (72);
+        r.run (2);
+        check (stillSounding (r) == 4, "and a step held under the mouse beside them");
+        r.cc (1, 123, 0);
+        r.flush();
+        check (stillSounding (r) == 3, "CC 123 takes the drone and leaves the pedal its keys");
+        r.cc (1, 64, 0);
+        r.run (2);
+        check (stillSounding (r) == 0, "which the pedal lifting then ends");
+    }
+
+    // The order of the two pedal branches, which this case used to call
+    // unguarded. Sostenuto first is the order noteOff uses; asking the damper
+    // first marks the voice sustained, and releaseSostenutoVoices then cannot
+    // reach it when the pedal that caught it comes up.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 66, 127);             // sostenuto catches it
+        r.cc (1, 64, 127);             // and the damper goes down over the top
+        r.flush();
+        r.cc (1, 123, 0);
+        r.flush();
+        check (stillSounding (r) == 1, "both pedals hold it through CC 123");
+        r.cc (1, 66, 0);               // sostenuto up FIRST -- where the orders part
+        r.run (2);
+        check (stillSounding (r) == 0, "and the pedal that caught it can still let go");
     }
 }
 
