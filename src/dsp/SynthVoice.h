@@ -30,6 +30,24 @@ public:
     // ── Note lifecycle ──
     void noteOn(int note, float velocity, bool legato);
     void noteOff();
+
+    /** All Sound Off (CC 120) and the panic button: the fastest stop this synth
+     *  has, which is not an instant one. The MIDI spec puts volume envelopes to
+     *  zero "as soon as possible"; a truly instant stop is a full-scale step and
+     *  clicks, which is the very thing KEY_GATE_MS and the envelope's own
+     *  MIN_RAMP_SEC exist to prevent -- both 3 ms, and this asks for neither
+     *  more nor less than that floor.
+     *
+     *  Unlike noteOff this is right to call on a voice ALREADY releasing: it
+     *  restarts the release from the current level over the floor, so it can
+     *  only shorten a tail. noteOff on such a voice restarts it over the
+     *  PATCH's release time and lengthens it, which is why allNotesOff skips
+     *  releasing voices on the key-up path and does not skip them here.
+     *
+     *  Both arms of the VCA are closed, because which one holds the level is a
+     *  patch decision (computeDcaGain): with the amp envelope on the DCA the
+     *  envelope is the level, otherwise the key gate is. */
+    void cutSound();
     void glideToNote(int note, float glideMs);
     // Csound voice bridge (Phase-1 spec §3, D7): advances the block-rate
     // csoundFreq_ smoother by samplesToAdvance (the number of samples rendered

@@ -205,6 +205,12 @@ namespace
         { midi.addEvent (juce::MidiMessage::noteOff (ch, note), pos); }
         void polyPressureAt (int ch, int note, int v7, int pos)
         { midi.addEvent (juce::MidiMessage::aftertouchChange (ch, note, v7), pos); }
+        void pressureAt (int ch, int v7, int pos)
+        { midi.addEvent (juce::MidiMessage::channelPressureChange (ch, v7), pos); }
+        void wheelAt (int ch, int value14, int pos)
+        { midi.addEvent (juce::MidiMessage::pitchWheel (ch, value14), pos); }
+        void ccAt (int ch, int number, int value, int pos)
+        { midi.addEvent (juce::MidiMessage::controllerEvent (ch, number, value), pos); }
 
         // RPN as a controller actually transmits it: parameter select, then
         // data entry MSB.
@@ -2019,14 +2025,15 @@ void casePanicUnownsTheNotesItCutOff()
     check (v != nullptr, "the note is sounding on its member channel");
     if (v == nullptr) return;
 
-    r.cc (1, 120, 0);             // all sound off
-    r.flush();
-    check (v->isActive(), "and is in its release tail after the panic");
-
-    r.pressure (3, 127);
-    r.wheel (3, 16383);
-    r.cc (3, 74, 127);
-    r.flush();
+    // Queued at 180 and the hand's messages at 220, one buffer: the panic cuts
+    // over the 132-sample declick floor, so a message in the NEXT buffer would
+    // arrive at an empty slot and this case would pass on nothing.
+    r.ccAt (1, 120, 0, 180);      // all sound off
+    r.pressureAt (3, 127, 220);
+    r.wheelAt (3, 16383, 225);
+    r.ccAt (3, 74, 127, 230);
+    r.run (1);
+    check (v->isActive(), "and is still being cut when the hand moves");
     checkNear (v->getAftertouch(), 0.0f, 1e-3f,
                "the tail does not swell to a hand still on the key");
     checkNear (v->getPerVoicePitchBend(), 0.0f, 1e-4f, "does not slide");
@@ -2771,6 +2778,12 @@ void casePanicDoesNotHandTheTailsBackToTheWheel()
 {
     std::printf ("[62] a panic does not hand the dying notes back to the wheel\n");
 
+    // Since 2026-08-25 the panic CUTS over the declick floor -- 3 ms, 132
+    // samples -- so a tail sent a message in the NEXT buffer would find no voice
+    // there at all, and every check below would pass on an empty slot. The panic
+    // is queued at sample 180 and left unrendered; each block adds its own
+    // disturbance at 220 and renders once, which puts the message 40 samples
+    // into a 132-sample ramp with the voice demonstrably still alive.
     auto killedChord = [] (Rig& r, const SynthVoice** out)
     {
         r.noteOn (2, 60); r.noteOn (3, 64); r.noteOn (4, 67);
@@ -2780,8 +2793,7 @@ void casePanicDoesNotHandTheTailsBackToTheWheel()
         out[0] = r.heldVoiceForNote (60);
         out[1] = r.heldVoiceForNote (64);
         out[2] = r.heldVoiceForNote (67);
-        r.cc (1, 120, 0);            // all sound off
-        r.flush();
+        r.ccAt (1, 120, 0, 180);     // all sound off -- NOT rendered yet
     };
 
     const char* names[3] = { "the first", "the second", "the third" };
@@ -2792,8 +2804,9 @@ void casePanicDoesNotHandTheTailsBackToTheWheel()
         check (v[0] != nullptr && v[1] != nullptr && v[2] != nullptr,
                "the chord sounded before the panic");
         if (v[0] == nullptr) return;
-        r.cc (1, 1, 127);            // the wheel, over the panicked tails
-        r.flush();
+        r.ccAt (1, 1, 127, 220);     // the wheel, over the tails being cut
+        r.run (1);
+        check (v[0]->isActive(), "and is still being cut when the wheel moves");
         for (int i = 0; i < 3; ++i)
             if (v[i] != nullptr)
             {
@@ -2806,34 +2819,39 @@ void casePanicDoesNotHandTheTailsBackToTheWheel()
         // The same door, reached by zone-wide channel pressure and by breath.
         Rig r; const SynthVoice* v[3] = {};
         killedChord (r, v);
-        r.pressure (1, 127);
-        r.flush();
+        r.pressureAt (1, 127, 220);
+        r.ccAt (1, 2, 127, 230);     // and breath, in the same ramp
+        r.run (1);
         if (v[0] != nullptr)
+        {
+            check (v[0]->isActive(), "and is still being cut when they arrive");
             checkNear (v[0]->getAftertouch(), 0.0f, 1e-3f,
-                       "nor does zone-wide pressure");
-        r.cc (1, 2, 127);            // breath
-        r.flush();
-        if (v[0] != nullptr)
-            checkNear (v[0]->getAftertouch(), 0.0f, 1e-3f,
-                       "nor the breath controller");
+                       "nor does zone-wide pressure, nor the breath controller");
+        }
     }
     {
         // And by poly aftertouch on a NEW key of the same pitch, which is how a
         // panicked tail can end up following a finger that was never on it.
         Rig r; const SynthVoice* v[3] = {};
         killedChord (r, v);
-        r.noteOn (5, 60);
-        r.flush();
-        r.polyPressure (5, 60, 127);
-        r.flush();
+        r.noteOnAt (5, 60, 100, 200);
+        r.polyPressureAt (5, 60, 127, 220);
+        r.run (1);
         if (v[0] != nullptr)
+        {
+            // The fresh note must not have been given THIS slot, or the check
+            // below would read the new note's own pressure and pass for it.
+            check (v[0]->isActive() && v[0] != r.heldVoiceForNote (60),
+                   "the tail is still being cut, and is not the fresh note");
             checkNear (v[0]->getAftertouch(), 0.0f, 1e-3f,
                        "nor a fresh finger on the same pitch");
+        }
     }
     {
         // Still a gate: after the panic, notes played fresh work normally.
         Rig r; const SynthVoice* v[3] = {};
         killedChord (r, v);
+        r.run (1);                   // let the cut finish; this half is about after
         r.noteOn (2, 72);
         r.flush();
         r.pressure (2, 100);
@@ -3621,9 +3639,10 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
     const float normBefore = v->getPerVoicePitchBendNorm();
     check (normBefore > 0.5f, "and X is deflected with it");
 
-    r.cc (1, 120, 0);              // all sound off, at full level
-    r.flush();
-    check (v->isActive() && v->isReleasing(), "the panic released it rather than cutting it");
+    r.ccAt (1, 120, 0, 180);       // all sound off, at full level
+    r.run (1);
+    check (v->isActive() && v->isReleasing(),
+           "the panic has it in the cut ramp, where it is still measurable");
     checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                "and it rings out at the pitch it was taken away at");
     checkNear (v->getPerVoicePitchBendNorm(), normBefore, 1e-6f,
@@ -3973,12 +3992,17 @@ void caseWhatAllNotesOffLeavesBehind()
         return -1;
     };
 
-    // A fading note is not hurried along by this message -- it is left alone.
-    // ADSREnvelope::beginRelease restarts the ramp from the CURRENT level, so
-    // calling noteOff on a voice that is already releasing makes the note ring
-    // LONGER. Backwards for CC 123, which is a key-up, and backwards for CC 120,
-    // which is defined as envelopes to zero as fast as possible -- so both
-    // paths skip it, and both are measured here.
+    // What each message does to a note it finds ALREADY fading, which is where
+    // the two part company and where both used to be wrong.
+    //
+    // CC 123 leaves it alone. ADSREnvelope::beginRelease restarts the ramp from
+    // the CURRENT level, so a second noteOff on a releasing voice does not hurry
+    // it along -- it starts the release over and the note rings LONGER, which
+    // for a message that means "every key came up" is backwards.
+    //
+    // CC 120 cuts it, which is the same restart used the other way round: from
+    // the current level over the declick floor instead of over the patch's
+    // release.
     {
         Rig a, b, c;
         for (Rig* r : { &a, &b, &c })
@@ -3998,20 +4022,15 @@ void caseWhatAllNotesOffLeavesBehind()
         check (plain > 100, "the tail is long enough to measure");
         check (after123 > 0 && std::abs (after123 - plain) <= 2,
                "CC 123 does not lengthen a tail it found already fading");
-        // One-sided on purpose, and the asymmetry is the finding. CC 120 does
-        // not cut anything today: measured on a 2 s release, a note whose key
-        // is still DOWN takes 341 blocks -- 1980 ms -- to go inactive with
-        // CC 120 sent, which is exactly what it takes with nothing sent at all.
-        // The message only calls noteOff, so a panic ends notes at their own
-        // release time, up to the amp release maximum of 10 s. The MIDI spec
-        // has it setting volume envelopes to zero as soon as possible, and the
-        // site comment in allNotesOff says so too. Asserting equality here
-        // would freeze that deviation: the day the cut is implemented, this
-        // gate would fail for being RIGHT. So it forbids only the direction
-        // that is wrong under either reading -- a message that ends notes must
-        // never make them last longer.
-        check (after120 > 0 && after120 <= plain + 2,
-               "and CC 120 does not lengthen one either");
+        // CC 120 goes the other way, and the asymmetry is the point of the
+        // split. It CUTS -- a tail already fading is exactly what it is for --
+        // over the synth's own declick floor and no longer. That floor is
+        // ADSREnvelope::MIN_RAMP_SEC and SynthVoice::KEY_GATE_MS, both 3 ms,
+        // which at 44100/256 is 132 samples: one block, two counting the one
+        // the message arrives in. Until 2026-08-25 this message called noteOff
+        // like any key-up and left 1980 ms of a 2 s release standing.
+        check (after120 > 0 && after120 <= 3,
+               "CC 120 cuts one, over the declick floor and no longer");
     }
 
     {

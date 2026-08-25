@@ -588,6 +588,14 @@ void VoiceManager::allNotesOff(bool cutSound)
     // The pitches this call actually ENDS, so the poly-aftertouch latch of each
     // can be re-asked afterwards exactly as a key-up asks it. Fixed size, on the
     // stack: this runs on the audio thread.
+    //
+    // The two messages part company on WHAT ending a note means. CC 123 is every
+    // key coming up: the pedals keep what they hold, a tail already fading is
+    // left alone. CC 120 is the stop: every sounding voice is cut over the
+    // synth's declick floor, no pedal is asked, and a tail already fading is cut
+    // too. Before that split existed both did the key-up, so a panic left up to
+    // ten seconds of release standing -- measured 1980 ms at a 2 s release, with
+    // the message and without it alike.
     int endedNotes[MAX_VOICES];
     int endedCount = 0;
 
@@ -596,7 +604,7 @@ void VoiceManager::allNotesOff(bool cutSound)
         auto& v = voices[static_cast<size_t>(i)];
         if (! v.isActive())
             continue;
-        // A voice already on its way out is left alone, on BOTH paths.
+        // A voice already on its way out is left alone on the KEY-UP path.
         // ADSREnvelope::beginRelease sets releaseStartLevel = currentLevel and
         // restarts the ramp from zero samples, so a second noteOff() here does
         // not hurry the note along -- it starts its release over. Measured with
@@ -604,20 +612,24 @@ void VoiceManager::allNotesOff(bool cutSound)
         // silence instead of 243, so the message LENGTHENED the fading chord by
         // 546 ms. Backwards for CC 123, which is meant to be a key-up, and
         // backwards for CC 120, which is defined as envelopes to zero as fast
-        // as possible.
-        //
-        // Which CC 120 does NOT do here, and the skip is not the reason -- the
-        // whole message is a noteOff, so a panic ends notes at their own
-        // release time. Measured on a 2 s release, a note whose key is still
-        // down: 341 blocks, 1980 ms, with the message and without it alike, and
-        // the amp release goes to 10 s. Pre-existing, not this guard's doing,
-        // and left standing rather than changed on the way past: making the
-        // panic actually cut is audible either way it is done (a hard stop
-        // clicks, a fast ramp does not) and is BJ's call. Case 77 asserts only
-        // that the message never LENGTHENS a note, so implementing the cut will
-        // not fail the gate.
-        if (v.isReleasing())
+        // as possible -- which is cutSound() below, and the reason this skip
+        // is on the key-up path only. A fading voice is exactly what the cut
+        // is FOR; it is only noteOff that must not be repeated on one.
+        if (! cutSound && v.isReleasing())
             continue;
+        if (cutSound)
+        {
+            // Every active voice, releasing or not, and no pedal is asked:
+            // both pedals are cleared below anyway, and a message that means
+            // "stop" cannot leave the damper an opinion. The note's pitch is
+            // still recorded so its poly-aftertouch latch is re-asked with the
+            // rest -- resetPerformanceControllers clears the whole array on
+            // this path, but the ledger the latch is judged against is the
+            // processor's, and it is asked the same way on both paths.
+            endedNotes[endedCount++] = v.getCurrentNote();
+            v.cutSound();
+            continue;
+        }
         // CC 123 is every key coming up at once and nothing else, so it takes
         // the same three steps a single key-up takes. The MIDI spec is explicit
         // that this message is not a panic and that the damper may go on

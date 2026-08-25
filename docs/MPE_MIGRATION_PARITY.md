@@ -408,13 +408,21 @@ because what it would pin is the library's, not this synth's.
 **Two deviations found by the same pass, both pre-existing, both left standing
 and written at their site rather than changed in passing:**
 
-* **All Sound Off does not cut.** CC 120 calls `noteOff` and nothing else, so a
-  panic ends notes at their own release time. Measured on a 2 s release with the
-  key still down: 341 blocks, 1980 ms, with the message and without it alike,
-  and `amp_release` reaches 10 s. The MIDI spec has this message setting volume
-  envelopes to zero as soon as possible, and `allNotesOff`'s own comment says so.
-  Case 77 therefore asserts only that the message never LENGTHENS a note, so
-  implementing the cut will not fail the gate.
+* **All Sound Off did not cut — fixed 2026-08-25.** CC 120 called `noteOff` and
+  nothing else, so a panic ended notes at their own release time: measured on a
+  2 s release with the key still down, 341 blocks / 1980 ms with the message and
+  without it alike, and `amp_release` reaches 10 s. `SynthVoice::cutSound` now
+  closes both arms of the VCA over the synth's declick floor — the envelope's
+  `MIN_RAMP_SEC` and `KEY_GATE_MS`, both 3 ms — which is what "as soon as
+  possible" can mean without a full-scale step. One block, measured. It is the
+  only place `allNotesOff` does NOT skip a voice already releasing: a fading
+  tail is exactly what a cut is for.
+
+  Three cases were built on the old tail and had to be moved inside the new
+  ramp: 50, 62 and 71 now queue the panic at sample 180 and the hand's messages
+  at 220, one buffer, which puts them 40 samples into a 132-sample cut with the
+  voice demonstrably still alive. In the next buffer there is no voice left and
+  all three would have passed on an empty slot.
 * **Lifting sostenuto ends a note the damper is still holding.**
   `releaseSostenutoVoices` never consults `sustainPedalDown`. Not what a piano
   does; case 76 pins it as it is because it is exactly what a plain key-up does

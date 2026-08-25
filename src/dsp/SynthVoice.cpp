@@ -374,6 +374,20 @@ void SynthVoice::noteOff()
     for (auto& e : modEnvs) e.noteOff();
 }
 
+void SynthVoice::cutSound()
+{
+    if (! active) return;
+    noteHeld = false;               // the key gate closes over KEY_GATE_MS
+    // 0 rather than a number of my own: ADSREnvelope::beginRelease floors every
+    // release at MIN_RAMP_SEC, so this asks for the floor and there is exactly
+    // one place that says what the floor is. The value does not leak into the
+    // patch -- beginRelease has already captured releaseTotalSamples, and both
+    // noteOn and configureForBlock re-apply the patch's own times anyway.
+    ampEnv.setRelease(0.0f);
+    ampEnv.noteOff();
+    for (auto& e : modEnvs) e.noteOff();
+}
+
 void SynthVoice::glideToNote(int note, float glideMs)
 {
     currentNote = note;
