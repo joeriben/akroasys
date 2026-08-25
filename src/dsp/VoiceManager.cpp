@@ -832,13 +832,23 @@ void VoiceManager::setPolyPressure(int note, float pressure, int sourceId)
 
 void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
 {
-    if (sustainPedalDown)
-        releaseSustainedVoices();
-    if (sostenutoPedalDown)
-        releaseSostenutoVoices();
+    // The pedals come UP first, and the order is load-bearing. Each release
+    // function defers to the other pedal while that pedal is still down --
+    // releaseSustainedVoices hands its voices to sostenuto, releaseSostenutoVoices
+    // hands its voices to the damper -- so calling them with both flags still
+    // true passes a voice held by both from one to the other and back, after
+    // which the fill(false) below takes the flags away and nothing can ever
+    // release it. RP-015 puts all four pedals at 0 anyway, which is what these
+    // two lines say; here they also have to be said BEFORE the calls.
+    const bool sustainWasDown = sustainPedalDown;
+    const bool sostenutoWasDown = sostenutoPedalDown;
     sustainPedalDown = false;
     sostenutoPedalDown = false;
     softPedalDown = false;
+    if (sustainWasDown)
+        releaseSustainedVoices();
+    if (sostenutoWasDown)
+        releaseSostenutoVoices();
     sustainedVoice.fill(false);
     sostenutoVoice.fill(false);
     sostenutoReleasedVoice.fill(false);
@@ -1741,9 +1751,23 @@ void VoiceManager::releaseSostenutoVoices()
         {
             if (hasCurrentBlockParams_)
                 v.configureForBlock(applyPerformanceControllers(currentBlockParams_));
-            const int releasedNote = v.getCurrentNote();
-            v.noteOff();
-            clearPolyPressureIfReleased(releasedNote);
+            // The damper still has it. On a piano the two pedals are two
+            // INDEPENDENT claims on the same string: the damper falls back only
+            // when none of them holds -- key up, damper pedal up, and sostenuto
+            // not holding that string. The right pedal lifts every damper
+            // physically, and the middle one coming up cannot put one back.
+            // This released the note anyway, so holding the damper through and
+            // letting the middle pedal go silenced what the damper was holding.
+            // The mirror image of releaseSustainedVoices above, which has always
+            // handed its voices to sostenuto this way.
+            if (sustainPedalDown)
+                sustainedVoice[static_cast<size_t>(i)] = true;
+            else
+            {
+                const int releasedNote = v.getCurrentNote();
+                v.noteOff();
+                clearPolyPressureIfReleased(releasedNote);
+            }
         }
         sostenutoVoice[static_cast<size_t>(i)] = false;
         sostenutoReleasedVoice[static_cast<size_t>(i)] = false;

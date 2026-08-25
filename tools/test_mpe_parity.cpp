@@ -4108,11 +4108,14 @@ void caseWhatAllNotesOffLeavesBehind()
 //      mutation of the shipped code reaches while the rest of this file stays
 //      green. The worst is a permanent hung note.
 //
-//      Two things this case said were "not gated because no player-visible
-//      difference could be constructed" turned out to have one each, so both
-//      are gated instead: the ORDER of the two pedal branches is at the end of
-//      this case, and the skip-if-releasing condition is case 77. Neither claim
-//      survived being tried harder than the author tried it.
+//      This case once said the ORDER of the two pedal branches was "not gated
+//      because no player-visible difference could be constructed". One could,
+//      and it was gated here. Since case 83 made the two release functions
+//      mirrors -- each defers to the other pedal while that pedal is down --
+//      the two orders converge again and the blocks at the end assert the
+//      OUTCOME instead: the note belongs to whichever pedal is still down and
+//      ends with the last of them. The other claim of that sentence, the
+//      skip-if-releasing condition, is case 77.
 void caseAllNotesOffPedalsAndDrone()
 {
     std::printf ("[76] all-notes-off, the pedals and the drone\n");
@@ -4248,10 +4251,10 @@ void caseAllNotesOffPedalsAndDrone()
         check (stillSounding (r) == 0, "which the pedal lifting then ends");
     }
 
-    // The order of the two pedal branches, which this case used to call
-    // unguarded. Sostenuto first is the order noteOff uses; asking the damper
-    // first marks the voice sustained, and releaseSostenutoVoices then cannot
-    // reach it when the pedal that caught it comes up.
+    // CC 123 under both pedals, and then each of them coming up on its own.
+    // The note belongs to whichever pedal is still down, in either order, and
+    // ends only with the last of them -- see case 83, which is the same claim
+    // on the plain key-up path this one is meant to agree with.
     {
         Rig r;
         r.noteOn (2, 60);
@@ -4262,14 +4265,139 @@ void caseAllNotesOffPedalsAndDrone()
         r.cc (1, 123, 0);
         r.flush();
         check (stillSounding (r) == 1, "both pedals hold it through CC 123");
-        // Lifting sostenuto ends the note although the DAMPER is still down,
-        // which is not what a piano does -- releaseSostenutoVoices never
-        // consults sustainPedalDown. Pinned as it is because it is exactly
-        // what a plain key-up does today, so this gate holds the two paths in
-        // agreement; it is not a claim that the behaviour is right.
-        r.cc (1, 66, 0);               // sostenuto up FIRST -- where the orders part
+        r.cc (1, 66, 0);               // the middle pedal up, the right still down
         r.run (2);
-        check (stillSounding (r) == 0, "and the pedal that caught it can still let go");
+        check (stillSounding (r) == 1, "the damper keeps it when sostenuto lets go");
+        r.cc (1, 64, 0);
+        r.run (2);
+        check (stillSounding (r) == 0, "and the last pedal up ends it");
+    }
+    {
+        // The same, the other way round.
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 66, 127);
+        r.cc (1, 64, 127);
+        r.flush();
+        r.cc (1, 123, 0);
+        r.flush();
+        r.cc (1, 64, 0);               // the right pedal up, the middle still down
+        r.run (2);
+        check (stillSounding (r) == 1, "sostenuto keeps it when the damper lets go");
+        r.cc (1, 66, 0);
+        r.run (2);
+        check (stillSounding (r) == 0, "and the last pedal up ends it here too");
+    }
+}
+
+// ── 83. Two pedals are two claims on the same note, not one owner ──────────
+//      A piano's damper falls back only when NOTHING holds the string: the key
+//      is up, the damper pedal is up, and sostenuto is not holding that string.
+//      The right pedal lifts every damper physically and the middle one coming
+//      up cannot put one back.
+//
+//      This synth had first-claim-wins. releaseSostenutoVoices released the
+//      note whatever the damper was doing, so holding the right pedal through
+//      and letting the middle one go silenced what the right pedal was holding
+//      -- measured on the plain key-up path, no all-notes-off anywhere.
+//      releaseSustainedVoices had always deferred the other way; the two are
+//      mirrors of each other now.
+void casePedalsAreTwoClaims()
+{
+    std::printf ("[83] two pedals are two claims on one note, not one owner\n");
+
+    auto sounding = [] (Rig& rig)
+    {
+        const auto& vm = rig.proc.getVoiceManager();
+        int n = 0;
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+            if (vm.getVoice (i).isActive() && ! vm.getVoice (i).isReleasing())
+                ++n;
+        return n;
+    };
+
+    // Sostenuto catches it, the damper joins, the key comes up. Then the middle
+    // pedal alone.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 66, 127);
+        r.flush();
+        r.cc (1, 64, 127);
+        r.flush();
+        r.noteOff (2, 60);
+        r.flush();
+        check (sounding (r) == 1, "the key is up and two pedals are holding it");
+        r.cc (1, 66, 0);
+        r.run (2);
+        check (sounding (r) == 1, "sostenuto letting go leaves it to the damper");
+        r.cc (1, 64, 0);
+        r.run (2);
+        check (sounding (r) == 0, "and the damper letting go ends it");
+    }
+
+    // The damper down FIRST, then sostenuto over the top -- a different flag
+    // order through noteOff, the same claim.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 64, 127);
+        r.flush();
+        r.cc (1, 66, 127);
+        r.flush();
+        r.noteOff (2, 60);
+        r.flush();
+        r.cc (1, 66, 0);
+        r.run (2);
+        check (sounding (r) == 1, "sostenuto letting go leaves it to the damper here too");
+        r.cc (1, 64, 0);
+        r.run (2);
+        check (sounding (r) == 0, "and the damper ends it");
+    }
+
+    // And the direction that already worked, so the mirror cannot be broken by
+    // "fixing" the other half.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 66, 127);
+        r.cc (1, 64, 127);
+        r.flush();
+        r.noteOff (2, 60);
+        r.flush();
+        r.cc (1, 64, 0);               // the damper first
+        r.run (2);
+        check (sounding (r) == 1, "the damper letting go leaves it to sostenuto");
+        r.cc (1, 66, 0);
+        r.run (2);
+        check (sounding (r) == 0, "and sostenuto ends it");
+    }
+
+    // Neither hand-over may outlive the pedals themselves. Reset All
+    // Controllers puts all four at 0, and each release function defers to the
+    // OTHER pedal while it is still down -- so with both flags still true a
+    // voice held by both is passed from one to the other and back, and the
+    // flag arrays are then wiped with the note still sounding and nothing left
+    // that could ever release it.
+    {
+        Rig r;
+        r.noteOn (2, 60);
+        r.flush();
+        r.cc (1, 66, 127);
+        r.cc (1, 64, 127);
+        r.flush();
+        r.noteOff (2, 60);
+        r.flush();
+        check (sounding (r) == 1, "both pedals are holding it");
+        r.cc (1, 121, 0);              // reset all controllers
+        r.run (2);
+        check (sounding (r) == 0, "and reset-all-controllers takes both pedals with it");
+        r.run (600);
+        check (r.activeVoiceCount() == 0, "with nothing left standing");
     }
 }
 
@@ -4576,6 +4704,7 @@ int main()
     caseChannel16WheelStaysAMemberBend();
     caseUnclaimedCc6ReachesABinding();
     caseAllSoundOffClosesEveryArm();
+    casePedalsAreTwoClaims();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");
