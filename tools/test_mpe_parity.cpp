@@ -4228,6 +4228,136 @@ void caseAllNotesOffPedalsAndDrone()
     }
 }
 
+// ── 78. The NRPN bit is per channel, not one for the instrument ────────────
+//      Capability 21 is the migration's own headline: the RPN selection was
+//      ONE global pair where the spec has sixteen, and the old code's comment
+//      named that as a defect. The library fixed the RPN register; the NRPN
+//      bit beside it is this synth's own and had no test, so collapsing the
+//      sixteen bits onto one passed all 387 assertions -- the exact defect the
+//      row claims to have left behind.
+//
+//      Discriminating because it INTERLEAVES two channels. One channel selects
+//      an NRPN, another then selects an RPN, and the first channel's data byte
+//      arrives afterwards: with sixteen bits it is still an NRPN byte and is
+//      refused; with one, the second channel's RPN selection cleared it and the
+//      byte lands on the first channel's latched RPN 0.
+void caseNrpnSelectionIsPerChannel()
+{
+    std::printf ("[78] an NRPN selected on one channel does not follow another\n");
+    Rig r;
+    r.rpn (5, 0, 0, 12);          // ch5: RPN 0 = 12, and RPN 0 stays latched there
+    r.flush();
+    r.cc (5, 98, 6);              // ch5 selects an NRPN
+    r.cc (7, 101, 0);             // ch7 selects an RPN -- a DIFFERENT channel
+    r.cc (7, 100, 0);
+    r.flush();
+    r.cc (5, 6, 40);              // ch5's data byte: an NRPN's, not a bend range
+    r.flush();
+
+    r.noteOn (5, 64);
+    r.flush();
+    r.wheel (5, 16383);
+    r.flush();
+    const auto* v = r.voiceForNote (64);
+    check (v != nullptr, "the voice is alive");
+    if (v == nullptr) return;
+    checkNear (v->getPerVoicePitchBend(), 12.0f * 8191.0f / 8192.0f, 0.01f,
+               "the range is the 12 ch5 was given, not the 40 its NRPN carried");
+}
+
+// ── 79. A declared zone outlives a panic and a controller reset ────────────
+//      Capability 5 lists four things a layout must survive: prepareToPlay,
+//      preset load, panic and Reset All Controllers. Only prepareToPlay was
+//      gated (case 16). Wiping the layout inside the CC 120 branch passed all
+//      387 assertions. A zone describes the DEVICE that is plugged in; a
+//      transport stop is not the player unplugging it, and a controller only
+//      sends its MCM once, at connection.
+void caseZoneOutlivesPanicAndReset()
+{
+    std::printf ("[79] a declared zone outlives a panic and a controller reset\n");
+    Rig r;
+    r.rpn (16, 0, 6, 1);          // upper zone, one member: ch16 is its master
+    r.flush();
+    r.cc (1, 120, 0);             // panic
+    r.flush();
+    r.cc (1, 121, 0);             // reset all controllers
+    r.flush();
+
+    r.noteOn (1, 60);
+    r.noteOn (5, 64);
+    r.flush();
+    r.pressure (16, 127);         // zone-wide only while ch16 is still a master
+    r.flush();
+    const auto* a = r.voiceForNote (60);
+    const auto* b = r.voiceForNote (64);
+    check (a != nullptr && b != nullptr, "both voices alive");
+    if (a == nullptr || b == nullptr) return;
+    checkNear (a->getAftertouch(), 1.0f, 1e-4f,
+               "channel 16 is still the upper zone's master after both messages");
+    checkNear (b->getAftertouch(), 1.0f, 1e-4f,
+               "and its pressure is still zone-wide");
+}
+
+// ── 80. Channel 16's wheel stays a MEMBER bend under a declared upper zone ──
+//      Capability 11, and the one expression that deliberately does not ask
+//      isMpeMasterChannel: pressure and CC74 on a declared master are zone-wide,
+//      the wheel there is not, because routing it through the predicate would
+//      turn a declared upper zone's master bend global -- every sequencer and
+//      arpeggiator voice sliding with it. The site says so; nothing measured
+//      it, and making that substitution passed all 387 assertions.
+void caseChannel16WheelStaysAMemberBend()
+{
+    std::printf ("[80] channel 16's wheel is a member bend under a declared upper zone\n");
+    Rig r;
+    r.rpn (16, 0, 6, 1);          // ch16 becomes the upper zone's master
+    r.flush();
+    r.noteOn (16, 60);
+    r.noteOn (1, 67);             // and an untouched voice to watch the global bend on
+    r.flush();
+    r.wheel (16, 16383);
+    r.flush();
+
+    const auto* v = r.voiceForNote (60);
+    check (v != nullptr, "the voice is alive");
+    if (v == nullptr) return;
+    check (v->getPerVoicePitchBend() > 1.0f,
+           "the wheel bent that note per-note, master or not");
+    checkNear (12.0f * std::log2 (r.proc.getVoiceManager().globalPitchBendRatio()), 0.0f, 1e-3f,
+               "and left the global bend where it was");
+}
+
+// ── 81. A CC6 that completes no RPN still reaches a user binding ───────────
+//      Capability 22, and the reason handleMpeRpnByte returns a bool at all:
+//      an else-if cannot both consume a message and decline it. Swallowing
+//      every CC6 passed all 387 assertions, and a bound fader on CC6 would
+//      simply have gone dead.
+void caseUnclaimedCc6ReachesABinding()
+{
+    std::printf ("[81] a CC6 that completes no RPN still reaches a binding\n");
+    Rig r;
+    auto* p = r.proc.getValueTreeState().getParameter (PID::ampAttack);
+    check (p != nullptr, "the parameter exists");
+    if (p == nullptr) return;
+
+    r.proc.startMidiLearn (PID::ampAttack);
+    r.cc (5, 6, 10);              // channel 5 has no RPN selected: this completes nothing
+    r.flush();
+    pump (40);                    // the learn is finished by an AsyncUpdater
+    check (r.proc.findBoundCc (PID::ampAttack) == 6,
+           "the learn bound CC6, so the byte reached the binding layer at all");
+    r.cc (5, 6, 10);
+    r.flush();
+    r.run (4);
+    const float low = p->getValue();
+    r.cc (5, 6, 120);
+    r.flush();
+    r.run (4);
+    const float high = p->getValue();
+    check (high > low + 0.5f,
+           "the bound parameter followed the fader, so the byte was not swallowed");
+}
+
+
 
 int main()
 {
@@ -4313,6 +4443,10 @@ int main()
     caseAllSoundOffCutsAndAllNotesOffIsAKeyUp();
     caseAllNotesOffPedalsAndDrone();
     caseWhatAllNotesOffLeavesBehind();
+    caseNrpnSelectionIsPerChannel();
+    caseZoneOutlivesPanicAndReset();
+    caseChannel16WheelStaysAMemberBend();
+    caseUnclaimedCc6ReachesABinding();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

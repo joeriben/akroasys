@@ -271,7 +271,7 @@ decides: the read-out is the element that has to give.
 
 ## 5. The gate
 
-`tools/test_mpe_parity.cpp` is the frozen corpus: 234 assertions driven as raw
+`tools/test_mpe_parity.cpp` is the frozen corpus: 398 assertions driven as raw
 MIDI through the real `T5ynthProcessor::processBlock`, reading the result off
 the voices. It was written against the hand-written code and was green on it
 before the library was introduced — that is what makes it a record of the old
@@ -379,3 +379,46 @@ revision that had the defect, cases 21, 23 and 24 all fail.
 Not reachable from an offline harness, and stated in the tool rather than
 skipped quietly: the Launch Control XL DAW-mode exemptions, because
 `dawModeActive_` is only set when a real XL output device is opened.
+
+### 5a. The coverage pass, 2026-08-25
+
+Every row above was checked the only way that answers the question: break the
+shipped code where the row lives and see whether the suite notices. Four rows
+turned out to have no gate at all — the mutation passed all 387 assertions —
+and all four are in the RPN and zone half of the file, the part the corpus was
+thinnest on because most of its cases start from "no zone declared".
+
+| Row | The mutation that passed everything | Now |
+|---|---|---|
+| 21, 21a | The sixteen `mpeNrpnSelected_` bits collapsed onto one global bit — which is precisely the defect row 21 names as the *old* code's | Case 78 |
+| 5 | The declared zone layout wiped inside the CC 120 branch. A zone describes the device that is plugged in; a transport stop is not the player unplugging it. Preset load is untouched by the corpus altogether | Case 79 |
+| 11 | Channel 16's pitch wheel routed through `isMpeMasterChannel`, so a declared upper zone's master bend goes global and drags every sequencer and arpeggiator voice with it | Case 80 |
+| 22 | Every CC6 swallowed, whether or not it completed an RPN — a bound fader on CC6 simply goes dead | Case 81 |
+
+Case 78 discriminates only because it INTERLEAVES two channels: one selects an
+NRPN, another then selects an RPN, and the first channel's data byte arrives
+afterwards. Every earlier NRPN case used one channel per fixture, which is why
+a single global bit satisfied all of them.
+
+Row 4 — declaring one zone shrinks the other where they would overlap — is
+`MPEZoneLayout::setZone`'s behaviour and no case here declares both zones, so
+it has no characterisation test. Left as a known hole rather than closed,
+because what it would pin is the library's, not this synth's.
+
+**Two deviations found by the same pass, both pre-existing, both left standing
+and written at their site rather than changed in passing:**
+
+* **All Sound Off does not cut.** CC 120 calls `noteOff` and nothing else, so a
+  panic ends notes at their own release time. Measured on a 2 s release with the
+  key still down: 341 blocks, 1980 ms, with the message and without it alike,
+  and `amp_release` reaches 10 s. The MIDI spec has this message setting volume
+  envelopes to zero as soon as possible, and `allNotesOff`'s own comment says so.
+  Case 77 therefore asserts only that the message never LENGTHENS a note, so
+  implementing the cut will not fail the gate.
+* **Lifting sostenuto ends a note the damper is still holding.**
+  `releaseSostenutoVoices` never consults `sustainPedalDown`. Not what a piano
+  does; case 76 pins it as it is because it is exactly what a plain key-up does
+  today, which keeps the two paths in agreement.
+
+Both need a decision before they are touched: each is audible, and the first has
+a second question inside it (a hard stop clicks, a fast ramp does not).
