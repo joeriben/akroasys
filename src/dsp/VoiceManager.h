@@ -84,7 +84,7 @@ public:
                VALUES while every note goes on sounding, so it may only reach
                the voices a live control is still allowed to move. Zeroing a
                tail there cut a decaying note off in one block instead of
-               letting it fade -- measured, level 0.2851 to 0.0000 in 5.3 ms,
+               letting it fade -- measured, level 0.2851 to 0.0000 in 5.8 ms,
                and a pedal-held note from 0.629. A key still DOWN is zeroed
                either way, which is what the message asks for. */
     void resetPerformanceControllers(bool endingEveryNote = false);

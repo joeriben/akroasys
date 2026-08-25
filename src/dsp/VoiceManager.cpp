@@ -856,7 +856,7 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     // follows, and this was the one that did not: a decaying note and a note the
     // pedal is holding were zeroed too. With aftertouch -> DCA at full that is a note cut off in
     // one block instead of fading -- measured, a hand's tail from level 0.2851
-    // to 0.0000 in 5.3 ms, a pedal-held note from 0.629, a sequencer's tail from
+    // to 0.0000 in 5.8 ms, a pedal-held note from 0.629, a sequencer's tail from
     // 0.219. It is the second half of the criterion the gesture tool states:
     // silent as a swell, very audible as a decaying note cut off.
     //

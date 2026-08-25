@@ -3296,7 +3296,7 @@ void caseMonoKnowsAHandFromTheMachine()
 //      is zeroed by it. What had no gate was everything else it reached. It
 //      zeroed the stored pressure of every sounding voice, so with aftertouch ->
 //      DCA at full a decaying note went from level 0.2851 to 0.0000 in one block
-//      -- 5.3 ms -- instead of fading, and a pedal-held note from 0.629. That is
+//      -- 5.8 ms -- instead of fading, and a pedal-held note from 0.629. That is
 //      the second half of the criterion measure_at_gestures states: silent as a
 //      swell, very audible as a note cut off. A DAW sends CC 121 on transport
 //      stop and on locate.
@@ -4072,7 +4072,8 @@ void caseAllNotesOffPedalsAndDrone()
     // The sostenuto pedal goes on holding, AND lifting it still ends the note.
     // The second half is the hung one: marking the voice held without marking
     // it key-released leaves releaseSostenutoVoices unable to reach it ever
-    // again -- measured 11.6 s of silence with the voice still active.
+    // again -- measured 3.48 s of silence with the voice still active, which
+    // is as long as the run below listens.
     {
         Rig r;
         r.noteOn (2, 60);
