@@ -422,7 +422,21 @@ and written at their site rather than changed in passing:**
   ramp: 50, 62 and 71 now queue the panic at sample 180 and the hand's messages
   at 220, one buffer, which puts them 40 samples into a 132-sample cut with the
   voice demonstrably still alive. In the next buffer there is no voice left and
-  all three would have passed on an empty slot.
+  all three would have passed on an empty slot. Two `static_assert`s guard that
+  window at the top of the file: below a 231-sample block those messages are
+  never dispatched at all and the three cases pass on an empty buffer.
+
+  The first cut floored only the amp envelope, and case 82 exists because the
+  whole CC 120 corpus had run the stock patch — amp envelope on the DCA, every
+  mod-envelope target None — so two of the three things the cut closes had no
+  assertion anywhere. Which envelope holds the LEVEL is a patch decision
+  (`computeDcaGain`: the amp envelope where it is routed to the DCA, the key
+  gate otherwise), and a mod envelope pointed at the delay, the reverb or an LFO
+  rate keeps `stillModulating` true, which holds the slot allocated and goes on
+  sweeping the master effects — 4 s by default, 10 at the maximum — after a
+  message called All Sound Off. Case 71 also pins that the cut is a RAMP: every
+  other assertion measures duration, and a step straight to zero satisfies all
+  of them while being the exact click the floor exists to prevent.
 * **Lifting sostenuto ends a note the damper is still holding.**
   `releaseSostenutoVoices` never consults `sustainPedalDown`. Not what a piano
   does; case 76 pins it as it is because it is exactly what a plain key-up does

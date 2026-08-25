@@ -71,6 +71,19 @@ namespace
 {
     constexpr double kSampleRate = 44100.0;
     constexpr int    kBlockSize  = 256;
+    // Cases 50, 62 and 71 put the panic at sample 180 and the hand's messages at
+    // 220-230, because the cut they measure lasts 132 samples and is over before
+    // the next buffer. processBlock caps its sub-block walk at numSamples and
+    // stops at the first event past it, so in a SHORTER block those messages are
+    // silently never dispatched -- and every assertion in those cases ("still
+    // active", "reads 0") holds when nothing was sent at all. They would pass on
+    // an empty buffer instead of failing.
+    static_assert (kBlockSize > 230, "cases 50, 62 and 71 need room for a message at 230");
+    // And the other end: the cut must NOT be finished in the 76 samples left
+    // after 180, or the voice is gone before the hand's message arrives. 3 ms of
+    // ramp is 76 samples at 25.3 kHz, so every real rate has margin and the
+    // margin grows with the rate.
+    static_assert (kSampleRate > 25400.0, "the cut must outlast the tail of the block");
 
     // ── The MPE fallbacks ────────────────────────────────────────────────────
     // Pinned at COMPILE time against the constants themselves, and read at RUN
@@ -3643,6 +3656,19 @@ void casePanicDoesNotFourOctaveANoteOnItsWayOut()
     r.run (1);
     check (v->isActive() && v->isReleasing(),
            "the panic has it in the cut ramp, where it is still measurable");
+    // A RAMP and not a step. Everything else about the cut is measured in
+    // duration, and a mutation that simply zeroed the level and went idle would
+    // reach silence in the same one block and satisfy all of it -- the full-scale
+    // step the declick floor exists to prevent, passing the test for the floor.
+    // 76 of the 132 samples have run here, so the level is part-way down: not
+    // still at the top, and not at the bottom either.
+    // 76 of the ramp's 132 samples have run at the end of this block, and the
+    // default release bend is concave, so the level is already well down --
+    // measured 0.0370. The window is wide on purpose: what it separates is a
+    // ramp from a STEP, which reads exactly 0.0000.
+    const float midCut = v->getAmpEnvLevel();
+    check (midCut > 0.005f && midCut < 0.95f,
+           "and is part-way down a ramp, not at the bottom of a step");
     checkNear (v->getPerVoicePitchBend(), fullUpBend (r.noteBendRange()), 0.01f,
                "and it rings out at the pitch it was taken away at");
     checkNear (v->getPerVoicePitchBendNorm(), normBefore, 1e-6f,
@@ -4377,6 +4403,89 @@ void caseUnclaimedCc6ReachesABinding()
 }
 
 
+// ── 82. What "All Sound Off" has to switch off besides the amp envelope ────
+//      The corpus's CC 120 cases all run the stock patch: amp envelope on the
+//      DCA, every mod envelope target None. That leaves two of the three things
+//      cutSound closes with no assertion at all, and the first cut shipped with
+//      one of them wrong.
+//
+//      Which envelope holds the LEVEL is a patch decision (computeDcaGain): the
+//      amp envelope where it is routed to the DCA, the KEY GATE otherwise. And a
+//      mod envelope whose target is outside the voice -- delay, reverb, the LFO
+//      rates (EnvTarget::isOutsideTheVoice) -- keeps renderBlock's
+//      stillModulating true, which holds the slot allocated and goes on driving
+//      the master delay and reverb long after the message. Default mod release
+//      is 4 s and reaches 10.
+void caseAllSoundOffClosesEveryArm()
+{
+    std::printf ("[82] all-sound-off closes every arm, not only the amp envelope\n");
+
+    auto set = [] (Rig& r, const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    auto blocksToSilence = [] (Rig& r, int limit)
+    {
+        for (int b = 0; b < limit; ++b)
+        {
+            r.run (1);
+            if (r.activeVoiceCount() == 0)
+                return b + 1;
+        }
+        return -1;
+    };
+
+    // The key-gate arm: the amp envelope points at the filter, so the KEY is the
+    // level and closing the envelope alone would leave the voice open.
+    {
+        Rig r;
+        set (r, PID::ampTarget, (float) EnvTarget::Filter);
+        set (r, PID::ampRelease, 4000.0f);
+        r.flush();
+        r.noteOn (2, 60);
+        r.run (10);
+        check (r.activeVoiceCount() == 1, "a voice whose LEVEL is the key gate sounds");
+        r.cc (1, 120, 0);
+        const int blocks = blocksToSilence (r, 2000);
+        check (blocks > 0 && blocks <= 3, "and the panic closes the gate, not just the envelope");
+    }
+
+    // The outside-the-voice arm: a mod envelope on the master delay's mix, with
+    // a long release. Nothing of this voice can be heard after the cut, but the
+    // SLOT is held and the delay goes on being swept from it.
+    {
+        Rig r;
+        set (r, PID::mod1Target, (float) EnvTarget::DelayMix);
+        set (r, PID::mod1Release, 4000.0f);
+        set (r, PID::mod1Amount, 1.0f);
+        r.flush();
+        r.noteOn (2, 60);
+        r.run (10);
+        check (r.activeVoiceCount() == 1, "a voice modulating the delay sounds");
+        r.cc (1, 120, 0);
+        const int blocks = blocksToSilence (r, 2000);
+        check (blocks > 0 && blocks <= 3,
+               "and the panic ends it instead of sweeping the delay for four seconds");
+    }
+
+    // And the counter-check, so the two above cannot be satisfied by a cut that
+    // simply ends every voice on sight: CC 123 is still a key-up, and a key
+    // still DOWN goes on sounding under it in both patches.
+    {
+        Rig r;
+        set (r, PID::mod1Target, (float) EnvTarget::DelayMix);
+        set (r, PID::mod1Release, 4000.0f);
+        r.flush();
+        r.noteOn (2, 60);
+        r.run (10);
+        r.cc (1, 123, 0);
+        r.run (2);
+        check (r.activeVoiceCount() == 1, "CC 123 leaves it to its own release");
+    }
+}
+
+
 
 int main()
 {
@@ -4466,6 +4575,7 @@ int main()
     caseZoneOutlivesPanicAndReset();
     caseChannel16WheelStaysAMemberBend();
     caseUnclaimedCc6ReachesABinding();
+    caseAllSoundOffClosesEveryArm();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

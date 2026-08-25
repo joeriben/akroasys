@@ -585,9 +585,10 @@ void VoiceManager::noteOff(int note, int sourceId, bool forceRelease, int mpeCha
 
 void VoiceManager::allNotesOff(bool cutSound)
 {
-    // The pitches this call actually ENDS, so the poly-aftertouch latch of each
-    // can be re-asked afterwards exactly as a key-up asks it. Fixed size, on the
-    // stack: this runs on the audio thread.
+    // The pitches the KEY-UP path ends, so the poly-aftertouch latch of each can
+    // be re-asked afterwards exactly as a key-up asks it. Fixed size, on the
+    // stack: this runs on the audio thread. The cut path does not fill it --
+    // there the whole array goes at once, through resetPerformanceControllers.
     //
     // The two messages part company on WHAT ending a note means. CC 123 is every
     // key coming up: the pedals keep what they hold, a tail already fading is
@@ -621,12 +622,9 @@ void VoiceManager::allNotesOff(bool cutSound)
         {
             // Every active voice, releasing or not, and no pedal is asked:
             // both pedals are cleared below anyway, and a message that means
-            // "stop" cannot leave the damper an opinion. The note's pitch is
-            // still recorded so its poly-aftertouch latch is re-asked with the
-            // rest -- resetPerformanceControllers clears the whole array on
-            // this path, but the ledger the latch is judged against is the
-            // processor's, and it is asked the same way on both paths.
-            endedNotes[endedCount++] = v.getCurrentNote();
+            // "stop" cannot leave the damper an opinion. No pitch is recorded
+            // here -- the latch is not asked note by note on this path,
+            // resetPerformanceControllers clears the whole array below.
             v.cutSound();
             continue;
         }

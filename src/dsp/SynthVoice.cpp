@@ -385,7 +385,22 @@ void SynthVoice::cutSound()
     // noteOn and configureForBlock re-apply the patch's own times anyway.
     ampEnv.setRelease(0.0f);
     ampEnv.noteOff();
-    for (auto& e : modEnvs) e.noteOff();
+    // The mod envelopes to the SAME floor, not to the patch's release. Two
+    // reasons, and the second is the one that bites. beginRelease restarts from
+    // the current level over whatever releaseMs says, and configureForBlock has
+    // just re-applied the patch's -- so a plain noteOff() here LENGTHENS a mod
+    // envelope that was already falling, measured +580 ms on a 2 s release,
+    // which is the very thing the key-up path skips releasing voices to avoid.
+    // And a mod envelope whose target is outside the voice (delay, reverb, the
+    // LFO rates -- EnvTarget::isOutsideTheVoice) holds `stillModulating` true
+    // in renderBlock, so the slot stays allocated and goes on sweeping the
+    // master delay and reverb for its whole release: default 4 s, up to 10,
+    // after a message whose name is All Sound Off.
+    for (auto& e : modEnvs)
+    {
+        e.setRelease(0.0f);
+        e.noteOff();
+    }
 }
 
 void SynthVoice::glideToNote(int note, float glideMs)
