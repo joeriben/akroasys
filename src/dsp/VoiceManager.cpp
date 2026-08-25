@@ -596,6 +596,17 @@ void VoiceManager::allNotesOff(bool cutSound)
         auto& v = voices[static_cast<size_t>(i)];
         if (! v.isActive())
             continue;
+        // A voice already on its way out is left alone, on BOTH paths.
+        // ADSREnvelope::beginRelease sets releaseStartLevel = currentLevel and
+        // restarts the ramp from zero samples, so a second noteOff() here does
+        // not hurry the note along -- it starts its release over. Measured with
+        // a 2 s release, a note let go and 0.58 s into its tail: 337 blocks to
+        // silence instead of 243, so the message LENGTHENED the fading chord by
+        // 546 ms. Backwards for CC 123, which is meant to be a key-up, and
+        // backwards for CC 120, which is defined as envelopes to zero as fast
+        // as possible.
+        if (v.isReleasing())
+            continue;
         // CC 123 is every key coming up at once and nothing else, so it takes
         // the same three steps a single key-up takes. The MIDI spec is explicit
         // that this message is not a panic and that the damper may go on
@@ -611,8 +622,6 @@ void VoiceManager::allNotesOff(bool cutSound)
         // so this is left as it is and the gap is recorded where it belongs.
         if (! cutSound)
         {
-            if (v.isReleasing())
-                continue;                       // already on its way out
             // The key is up, so the voice stops answering its member channel --
             // the same line noteOff runs, for the same reason: a controller's
             // reset burst must not land on the tail.

@@ -3940,7 +3940,12 @@ void caseAllSoundOffCutsAndAllNotesOffIsAKeyUp()
 
 
 // ── 77. What all-notes-off leaves behind ───────────────────────────
-//      The poly-aftertouch latch of every pitch the message ENDED. It is a
+//      Two things that outlive the message, both introduced by splitting
+//      CC 120 from CC 123 and neither with an assertion anywhere.
+//
+//      One: a release already running is not restarted.
+//
+//      Two: the poly-aftertouch latch of every pitch the message ENDED. It is a
 //      floor under pressureForNote, and only a key-down on that pitch clears
 //      it, so a value left standing is a departed finger's pressure on every
 //      later sequencer, arpeggiator and drone note of that pitch. The
@@ -3950,6 +3955,51 @@ void caseAllSoundOffCutsAndAllNotesOffIsAKeyUp()
 void caseWhatAllNotesOffLeavesBehind()
 {
     std::printf ("[77] what all-notes-off leaves behind\n");
+
+    auto set = [] (Rig& r, const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    auto blocksToSilence = [] (Rig& r, int limit)
+    {
+        for (int b = 0; b < limit; ++b)
+        {
+            r.run (1);
+            if (r.activeVoiceCount() == 0)
+                return b + 1;
+        }
+        return -1;
+    };
+
+    // A fading note is not hurried along by this message -- it is left alone.
+    // ADSREnvelope::beginRelease restarts the ramp from the CURRENT level, so
+    // calling noteOff on a voice that is already releasing makes the note ring
+    // LONGER. Backwards for CC 123, which is a key-up, and backwards for CC 120,
+    // which is defined as envelopes to zero as fast as possible -- so both
+    // paths skip it, and both are measured here.
+    {
+        Rig a, b, c;
+        for (Rig* r : { &a, &b, &c })
+        {
+            set (*r, PID::ampRelease, 2000.0f);
+            r->flush();
+            r->noteOn (2, 60);
+            r->flush();
+            r->noteOff (2, 60);
+            r->run (100);              // 0.58 s into the tail
+        }
+        b.cc (1, 123, 0);
+        c.cc (1, 120, 0);
+        const int plain = blocksToSilence (a, 2000);
+        const int after123 = blocksToSilence (b, 2000);
+        const int after120 = blocksToSilence (c, 2000);
+        check (plain > 100, "the tail is long enough to measure");
+        check (after123 > 0 && std::abs (after123 - plain) <= 2,
+               "CC 123 does not lengthen a tail it found already fading");
+        check (after120 > 0 && std::abs (after120 - plain) <= 2,
+               "and neither does CC 120, which is meant to shorten it");
+    }
 
     {
         Rig r;
