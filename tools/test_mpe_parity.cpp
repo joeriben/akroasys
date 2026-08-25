@@ -3296,7 +3296,8 @@ void caseMonoKnowsAHandFromTheMachine()
 //      is zeroed by it. What had no gate was everything else it reached. It
 //      zeroed the stored pressure of every sounding voice, so with aftertouch ->
 //      DCA at full a decaying note went from level 0.2851 to 0.0000 in one block
-//      -- 5.8 ms -- instead of fading, and a pedal-held note from 0.629. That is
+//      -- 5.3 ms, this figure being measure_at_gestures' own 48 kHz block --
+//      instead of fading, and a pedal-held note from 0.629. That is
 //      the second half of the criterion measure_at_gestures states: silent as a
 //      swell, very audible as a note cut off. A DAW sends CC 121 on transport
 //      stop and on locate.
@@ -3997,8 +3998,20 @@ void caseWhatAllNotesOffLeavesBehind()
         check (plain > 100, "the tail is long enough to measure");
         check (after123 > 0 && std::abs (after123 - plain) <= 2,
                "CC 123 does not lengthen a tail it found already fading");
-        check (after120 > 0 && std::abs (after120 - plain) <= 2,
-               "and neither does CC 120, which is meant to shorten it");
+        // One-sided on purpose, and the asymmetry is the finding. CC 120 does
+        // not cut anything today: measured on a 2 s release, a note whose key
+        // is still DOWN takes 341 blocks -- 1980 ms -- to go inactive with
+        // CC 120 sent, which is exactly what it takes with nothing sent at all.
+        // The message only calls noteOff, so a panic ends notes at their own
+        // release time, up to the amp release maximum of 10 s. The MIDI spec
+        // has it setting volume envelopes to zero as soon as possible, and the
+        // site comment in allNotesOff says so too. Asserting equality here
+        // would freeze that deviation: the day the cut is implemented, this
+        // gate would fail for being RIGHT. So it forbids only the direction
+        // that is wrong under either reading -- a message that ends notes must
+        // never make them last longer.
+        check (after120 > 0 && after120 <= plain + 2,
+               "and CC 120 does not lengthen one either");
     }
 
     {
@@ -4204,6 +4217,11 @@ void caseAllNotesOffPedalsAndDrone()
         r.cc (1, 123, 0);
         r.flush();
         check (stillSounding (r) == 1, "both pedals hold it through CC 123");
+        // Lifting sostenuto ends the note although the DAMPER is still down,
+        // which is not what a piano does -- releaseSostenutoVoices never
+        // consults sustainPedalDown. Pinned as it is because it is exactly
+        // what a plain key-up does today, so this gate holds the two paths in
+        // agreement; it is not a claim that the behaviour is right.
         r.cc (1, 66, 0);               // sostenuto up FIRST -- where the orders part
         r.run (2);
         check (stillSounding (r) == 0, "and the pedal that caught it can still let go");

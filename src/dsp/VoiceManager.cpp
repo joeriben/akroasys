@@ -605,6 +605,17 @@ void VoiceManager::allNotesOff(bool cutSound)
         // 546 ms. Backwards for CC 123, which is meant to be a key-up, and
         // backwards for CC 120, which is defined as envelopes to zero as fast
         // as possible.
+        //
+        // Which CC 120 does NOT do here, and the skip is not the reason -- the
+        // whole message is a noteOff, so a panic ends notes at their own
+        // release time. Measured on a 2 s release, a note whose key is still
+        // down: 341 blocks, 1980 ms, with the message and without it alike, and
+        // the amp release goes to 10 s. Pre-existing, not this guard's doing,
+        // and left standing rather than changed on the way past: making the
+        // panic actually cut is audible either way it is done (a hard stop
+        // clicks, a fast ramp does not) and is BJ's call. Case 77 asserts only
+        // that the message never LENGTHENS a note, so implementing the cut will
+        // not fail the gate.
         if (v.isReleasing())
             continue;
         // CC 123 is every key coming up at once and nothing else, so it takes
@@ -856,7 +867,7 @@ void VoiceManager::resetPerformanceControllers(bool endingEveryNote)
     // follows, and this was the one that did not: a decaying note and a note the
     // pedal is holding were zeroed too. With aftertouch -> DCA at full that is a note cut off in
     // one block instead of fading -- measured, a hand's tail from level 0.2851
-    // to 0.0000 in 5.8 ms, a pedal-held note from 0.629, a sequencer's tail from
+    // to 0.0000 in 5.3 ms, a pedal-held note from 0.629, a sequencer's tail from
     // 0.219. It is the second half of the criterion the gesture tool states:
     // silent as a swell, very audible as a decaying note cut off.
     //
