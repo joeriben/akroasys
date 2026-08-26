@@ -488,11 +488,74 @@ fingers that make no voice at all between steps, and the instrument-wide path
 already repairs that gap through `pressureForHeldNote`); and the moments before
 the positions are prepared.
 
-**Snap is not converted.** A snapshot slot is a whole patch — filter, envelopes,
-effects, the panel — and the instrument has one of those by construction. The
-bar stays instrument-wide and says so.
+**Snap is converted too, and its AUDIO half only.** Asked whether per note
+applied to the Snap bar as well, the player: *"ja, natürlich nur die
+audio-hälfte. ich meine dasselbe verhalten wie nun beim Cache. MPE per note
+fährt durch die Audios."* So each of the four stored snapshots' audio becomes a
+position like a cache entry — indices 16–19 beside the cache's 0–15, prepared by
+the same pass, pointed at by the same call.
 
-Case 84 is the gate, and it asserts the smallest thing a mono construction
+The patch half does not travel, and while the per-note path is in charge it is
+**not recalled at all** — not per note and not instrument-wide either. That is
+the point rather than a gap in it. A snapshot carries a whole APVTS tree; the
+instrument has exactly one of those; so a finger travelling snapshots while
+recalling patches would re-cut the filter, the envelopes and the routing under
+every other finger on the keyboard — the very defect this conversion exists to
+remove, arriving through the other half of the same control. Per note the bar
+moves audio and leaves the patch where the player set it. The instrument-wide
+bar still recalls both halves and is what a patch gets on the language
+oscillator, under the arpeggiator, and with nothing held. **Case 84b is the
+gate.**
+
+The four slots live in `MainPanel` and nothing repopulates them when the window
+is reopened, so closing it drops the processor's copies with the panel's. That
+is not a new limit: nulling `onSnapshotRequested` in the same destructor already
+took the instrument-wide half of the bar away with the window.
+
+Three things follow, and each is a fact about the instrument rather than an
+implementation detail:
+
+- **A slot with a patch and no audio is not a destination.** Preset slots saved
+  before the audio half existed are exactly that. With NO slot holding audio the
+  per-note path does not apply at all and the instrument-wide bar recalls patches
+  as it always did. In a MIXED row the bar goes per note — a bar is one or the
+  other for a whole block, and which slot the finger is on is only known after
+  the per-note pass has run — and travelling into a patch-only slot leaves each
+  note playing what it has.
+- **The gate asks the SURFACE, not the engine.** Which snapshot a long press
+  stores and a recall restores is decided by the panel the player is looking at
+  (`oscEasyMode`), and the language-oscillator panel can sit in front of a neural
+  engine for a whole session. Asked of the engine, the bar went per note on the
+  LRO surface and crossfaded held notes onto whatever neural audio an earlier
+  session had left in the slots, while the orchestras just stored there were
+  never reached — the LRO branch of the store never writes snapshot audio, so
+  `restoreLcoSnapshot` on the instrument-wide path is the only thing that can
+  recall them.
+- **Whose hand is on a voice is the VOICE's record, not a bar's.** Kept per bar
+  it went stale in every gap — a bar at rest, a bar at zero, a bar whose per-note
+  path did not apply, all stop tracking — and that bar's first pass back read its
+  own staleness as "this voice changed hands" and threw away the shared record of
+  where the voice points and who owns it, under the other bar's motionless
+  finger. Storing a snapshot with keys held was enough to do it.
+
+**Two bars, one voice.** Cache and Snap run in the same block, over the same held
+keys, into the one record of where each voice points — a voice has one set of
+engine masters, so a per-bar record would go stale the moment the other bar
+moved the voice. That shared record needs an owner, or the bar that happens to
+run second silently wins every block (Cache runs after Snap, so Snap's travel
+would be dead whenever Cache was engaged) and the two of them re-point the same
+voice back and forth on every buffer with nobody moving — a crossfade restarted
+at block rate, with an async update posted alongside it. **Ownership is claimed
+by MOVING:** a bar takes a voice on the block its own zone changes under the
+finger, keeps it while it is the only one travelling, and hands it over the
+moment the other bar's zone changes. Last gesture wins, which is the only
+reading that matches what the player did. **Case 84c is the gate**, and it wires
+the two bars to different axes so the discriminator is exact: a move on X cannot
+change the pressure bar's reading, so a landing after an X-only move can only
+have come from Snap.
+
+Case 84 is the cache bar's gate, and it asserts the smallest thing a mono
+construction
 cannot satisfy: two keys held at two lateral positions follow two DIFFERENT
 masters, holding DIFFERENT audio (the four fixtures differ in length as well as
 pitch, so an implementation that prepared every position from one entry would

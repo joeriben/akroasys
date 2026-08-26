@@ -3167,6 +3167,15 @@ MainPanel::~MainPanel()
     processorRef.onMidiLearnStateChanged = nullptr;
     processorRef.onGenerateRequested = nullptr;
     processorRef.onSnapshotRequested = nullptr;
+    // ...and with it the audio the Snap bar travels per note. The four
+    // snapshots live in THIS panel (mainSnapshots) and nothing repopulates them
+    // when the window is opened again - only a preset load or a long press
+    // does. Nulling the callback above already takes the instrument-wide half of
+    // the Snap bar away with the window; leaving the processor's copies standing
+    // would have left the per-note half crossfading held notes onto audio the
+    // instrument can no longer reach by any other route.
+    for (int i = 0; i < static_cast<int>(kNumSnapshotSlots); ++i)
+        processorRef.clearSnapshotAudio(i);
     processorRef.onCacheToggleRequested = nullptr;
     processorRef.onCachePositionRequested = nullptr;
     processorRef.onLroCachePositionRequested = nullptr;
@@ -3673,6 +3682,11 @@ void MainPanel::applySnapshotsFromLoad(const std::vector<PresetFormat::SnapshotS
     // preset are populated. Slot index from JSON is authoritative; values
     // outside [0, kNumSnapshotSlots) are ignored defensively.
     for (auto& s : mainSnapshots) s = {};
+    // ...and the processor's copy of the audio half with them, or a preset that
+    // stores fewer snapshots than the last one would leave the missing slots
+    // travellable per note with the PREVIOUS preset's sound in them.
+    for (int i = 0; i < kNumSnapshotSlots; ++i)
+        processorRef.clearSnapshotAudio(i);
     // The LCO slots go too, and for a sharper reason than symmetry: a preset
     // brings its own orchestra, and a slot left over from before the load still
     // reads as filled while holding the PREVIOUS session's orchestra and its
@@ -3734,6 +3748,12 @@ void MainPanel::applySnapshotsFromLoad(const std::vector<PresetFormat::SnapshotS
         dst.pointsLocked   = src.pointsLocked;
 
         mainSnapshots[static_cast<size_t>(src.slot)] = std::move(dst);
+        // The AUDIO half goes to the processor, which prepares a per-note
+        // position from it - a held key travels the four snapshots exactly as it
+        // travels the cache. The patch half stays here: the instrument has one
+        // parameter tree, so only the sound can be per note.
+        const auto& stored = mainSnapshots[static_cast<size_t>(src.slot)];
+        processorRef.setSnapshotAudio(src.slot, stored.audio, stored.sampleRate);
     }
     syncSnapshotUi();
 }
@@ -3795,6 +3815,11 @@ void MainPanel::storeSnapshotFromPress(int slot)
 
     mainSnapshots[static_cast<size_t>(slot - 1)] = std::move(pending);
     pending = {};
+    {
+        // See applySnapshotsFromLoad: the audio half becomes a per-note position.
+        const auto& stored = mainSnapshots[static_cast<size_t>(slot - 1)];
+        processorRef.setSnapshotAudio(slot - 1, stored.audio, stored.sampleRate);
+    }
     processorRef.forgetSnapTraversalClaim();   // see the LRO branch above
     activeSnapshotIndex = slot;
     syncSnapshotUi();

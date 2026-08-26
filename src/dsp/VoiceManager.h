@@ -337,6 +337,22 @@ public:
              ? voiceSamplerMaster_[static_cast<size_t>(voice)].load(std::memory_order_relaxed)
              : nullptr;
     }
+    /** The other two of the triple. setVoiceEngineMasters writes all three as
+     *  separate stores, so a reader that has to be sure a voice holds NO claim
+     *  into a range of positions must ask all three - the sampler alone can be
+     *  null while the other two still point into it. */
+    const WavetableOscillator* voiceOscMaster(int voice) const
+    {
+        return (voice >= 0 && voice < MAX_VOICES)
+             ? voiceOscMaster_[static_cast<size_t>(voice)].load(std::memory_order_relaxed)
+             : nullptr;
+    }
+    const FreezeTextureEngine* voiceFreezeMaster(int voice) const
+    {
+        return (voice >= 0 && voice < MAX_VOICES)
+             ? voiceFreezeMaster_[static_cast<size_t>(voice)].load(std::memory_order_relaxed)
+             : nullptr;
+    }
 
     // ── Query ──
     int getActiveVoiceCount() const;

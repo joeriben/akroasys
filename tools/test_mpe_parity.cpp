@@ -4898,6 +4898,251 @@ void caseCacheIsTravelledPerNote()
 }
 
 
+// ── 84b. Snap travels per note too, and only its AUDIO ──────────────────────
+// BJ, 26.08.2026, asked whether per note applies to Snap as well: "ja, natuerlich
+// nur die audio-haelfte. ich meine dasselbe verhalten wie nun beim Cache. MPE per
+// note faehrt durch die Audios."
+//
+// So the four stored snapshots' audio are positions like the sixteen cache
+// entries, and two keys leaning differently sound two of them. What does NOT
+// travel is the patch half: a snapshot also carries a whole APVTS tree, and the
+// instrument has exactly one of those - two held keys cannot sit on two filter
+// settings, so the parameter recall stays the instrument-wide bar's.
+//
+// Snap is independent of the cache here on purpose: the fixture stores snapshot
+// audio with the inference cache switched OFF, because a player may well use one
+// bar without the other and an implementation that built Snap positions only
+// alongside a full cache would pass a joint test and fail this one.
+void caseSnapIsTravelledPerNoteToo()
+{
+    std::printf ("[84b] the Snap bar travels the stored snapshots per note\n");
+
+    auto tone = [] (float hz, int samples)
+    {
+        juce::AudioBuffer<float> b (1, samples);
+        for (int i = 0; i < samples; ++i)
+            b.setSample (0, i, 0.5f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                                * hz * (float) i / 44100.0f));
+        return b;
+    };
+
+    Rig r;
+    // Four snapshot audios, distinct in pitch AND length, no inference cache.
+    for (int k = 0; k < 4; ++k)
+        r.proc.setSnapshotAudio (k, tone (180.0f * (float) (k + 1), 22050 + k * 11025), 44100.0);
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    set (PID::aftertouchAmtSnap, 1.0f);
+    set (PID::exprSrcSnap, (float) ExprSource::X);
+    r.run (2);
+    for (int i = 0; i < 60; ++i) { pump (25); r.run (2); }
+
+    auto wheelForX = [] (const Rig& rig, float x)
+    {
+        const float centered = x * rig.xFullScale() / rig.noteBendRange();
+        return juce::jlimit (0, 16383, 8192 + (int) std::lround (centered * 8192.0f));
+    };
+    auto voiceIndexForNote = [] (const Rig& rig, int note)
+    {
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+            if (rig.proc.getVoiceManager().getVoice (i).isActive()
+                && rig.proc.getVoiceManager().getVoice (i).getCurrentNote() == note)
+                return i;
+        return -1;
+    };
+
+    r.noteOn (5, 60);
+    r.noteOn (6, 64);
+    r.flush();
+    // Both fingers out to the far end, then ONE back towards the middle: the
+    // zone is resolved from the MAGNITUDE of the reading, so two fingers leaning
+    // opposite ways would land on the same slot and prove nothing.
+    r.wheel (5, wheelForX (r, 1.0f));
+    r.wheel (6, wheelForX (r, 1.0f));
+    r.run (6);
+    r.wheel (6, wheelForX (r, 0.15f));
+    r.run (6);
+
+    const int va = voiceIndexForNote (r, 60);
+    const int vb = voiceIndexForNote (r, 64);
+    const auto* ma = va >= 0 ? r.proc.getVoiceManager().voiceSamplerMaster (va) : nullptr;
+    const auto* mb = vb >= 0 ? r.proc.getVoiceManager().voiceSamplerMaster (vb) : nullptr;
+
+    check (ma != nullptr, "the key at one end follows a snapshot of its own");
+    check (mb != nullptr, "the key nearer the middle follows one of its own");
+    check (ma != nullptr && mb != nullptr && ma != mb,
+           "and they are NOT the same snapshot -- Snap is per note as well");
+    if (ma != nullptr && mb != nullptr)
+        check (ma->estimateReferenceLengthSamples() != mb->estimateReferenceLengthSamples(),
+               "the two voices really carry different audio, not two views of one");
+
+    // The patch half did NOT travel: a per-note Snap gesture must not recall a
+    // parameter tree, because there is only one and it belongs to the whole
+    // instrument. activeSnapshotIndex lives in the panel, so what is checked
+    // here is the processor side of it - no slot was posted to the message
+    // thread while the per-note path was in charge.
+    check (r.proc.getVoiceManager().hasVoiceEngineMasters(),
+           "the voices hold per-note masters, so the per-note path was in charge");
+}
+
+
+// ── 84c. Two bars on one voice: the one that MOVED wins, and neither churns ──
+// Cache and Snap run in the same block, over the same held keys, into the one
+// record of where each voice points. So the question this case asks is not
+// "does each bar work" (84 and 84b) but "what happens when BOTH are wired and
+// both are engaged on the same finger", and it has exactly two failure modes,
+// both silent:
+//
+//   the bar that happens to run SECOND overwrites the first one's landing every
+//   block, so one of the two controls is dead whenever the other is engaged -
+//   deterministically, with nothing in the sound to say which one lost;
+//
+//   and the pair re-point the same voice back and forth on every buffer with
+//   nobody moving, which restarts a crossfade at block rate and posts an async
+//   update with it.
+//
+// The two bars ride DIFFERENT axes here (cache on Z, snap on X), because that is
+// what makes the discriminator exact: a move on X cannot change the cache bar's
+// reading, so if the voice still lands somewhere new after an X-only move, it
+// was the Snap bar that put it there.
+void caseTwoBarsOnOneVoiceLastMovedWins()
+{
+    std::printf ("[84c] cache and snap on one voice: the bar that moved wins\n");
+
+    auto tone = [] (float hz, int samples)
+    {
+        juce::AudioBuffer<float> b (1, samples);
+        for (int i = 0; i < samples; ++i)
+            b.setSample (0, i, 0.5f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                                * hz * (float) i / 44100.0f));
+        return b;
+    };
+
+    Rig r;
+    // Cache entries short, snapshots long, with a gap no estimate can fall into:
+    // the LENGTH is what says which FAMILY of positions the voice landed in, and
+    // a pointer alone would not.
+    r.proc.setInferenceCacheCapacity (4);
+    for (int k = 0; k < 4; ++k)
+        r.proc.addInferenceCacheEntry (tone (220.0f * (float) (k + 1),
+                                             22050 + k * 11025), 44100.0);
+    for (int k = 0; k < 4; ++k)
+        r.proc.setSnapshotAudio (k, tone (180.0f * (float) (k + 1),
+                                          88200 + k * 11025), 44100.0);
+
+    auto set = [&r] (const char* pid, float v)
+    {
+        if (auto* p = r.proc.getValueTreeState().getParameter (pid))
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+    };
+    set (PID::aftertouchAmtCache, 1.0f);
+    set (PID::exprSrcCache, (float) ExprSource::Z);   // pressure
+    set (PID::aftertouchAmtSnap,  1.0f);
+    set (PID::exprSrcSnap,  (float) ExprSource::X);   // the wheel
+    r.run (2);
+    for (int i = 0; i < 60; ++i) { pump (25); r.run (2); }
+    check (r.proc.isInferenceCacheFull(), "the cache is full, so both bars can travel");
+
+    auto wheelForX = [] (const Rig& rig, float x)
+    {
+        const float centered = x * rig.xFullScale() / rig.noteBendRange();
+        return juce::jlimit (0, 16383, 8192 + (int) std::lround (centered * 8192.0f));
+    };
+    auto voiceIndexForNote = [] (const Rig& rig, int note)
+    {
+        const auto& vm = rig.proc.getVoiceManager();
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+            if (vm.getVoice (i).isActive() && ! vm.getVoice (i).isReleasing()
+                && vm.getVoice (i).getCurrentNote() == note)
+                return i;
+        return -1;
+    };
+    auto masterOf = [&voiceIndexForNote] (const Rig& rig, int note)
+        -> const SamplePlayer*
+    {
+        const int v = voiceIndexForNote (rig, note);
+        return v >= 0 ? rig.proc.getVoiceManager().voiceSamplerMaster (v) : nullptr;
+    };
+    // Cache audio tops out at 55125 samples, snapshots start at 88200.
+    auto isSnapFamily = [] (const SamplePlayer* m)
+    {
+        return m != nullptr && m->estimateReferenceLengthSamples() > 70000;
+    };
+    auto isCacheFamily = [] (const SamplePlayer* m)
+    {
+        return m != nullptr && m->estimateReferenceLengthSamples() <= 70000;
+    };
+
+    r.noteOn (5, 60);
+    r.flush();
+
+    // 1. Only the wheel moves. Pressure is still 0, so the cache bar is sitting
+    //    on the zone it took its bearing in and has claimed nothing.
+    r.wheel (5, wheelForX (r, 1.0f));
+    r.run (6);
+    const auto* mSnapA = masterOf (r, 60);
+    check (isSnapFamily (mSnapA), "the wheel alone carries the voice to a snapshot");
+
+    // 2. Now the pressure moves and the wheel does not. The cache bar is the one
+    //    travelling, so it takes the voice.
+    r.pressure (5, 127);
+    r.run (6);
+    const auto* mCache = masterOf (r, 60);
+    check (isCacheFamily (mCache), "then the pressure alone carries it to a cache entry");
+
+    // 3. ...and back. THE case: the cache bar is still fully engaged and still
+    //    runs after Snap in the same block, but its reading has not moved, so it
+    //    must not take the voice back. Without an owner it does, every block,
+    //    and this control is dead for as long as the other one is leaned on.
+    r.wheel (5, wheelForX (r, 0.15f));
+    r.run (6);
+    const auto* mSnapB = masterOf (r, 60);
+    check (isSnapFamily (mSnapB),
+           "and the wheel takes it back although the cache bar is still engaged");
+    check (mSnapB != nullptr && mCache != nullptr && mSnapB != mCache,
+           "-- the bar that moved won, not the bar that runs last");
+
+    // 4. Nobody moves. Both bars are engaged, both resolve a position every
+    //    block, and the voice must be re-pointed at NONE of them.
+    const auto* settled = masterOf (r, 60);
+    bool churned = false;
+    for (int i = 0; i < 40 && ! churned; ++i)
+    {
+        r.run (1);
+        churned = (masterOf (r, 60) != settled);
+    }
+    check (! churned, "with both fingers at rest the voice is not re-pointed at all");
+
+    // 5. THE TIE, pinned as a decision rather than left to run order. Wire both
+    //    bars to the SAME axis and every zone crossing moves both in one block.
+    //    A voice has one set of engine masters, so this configuration has asked
+    //    for something that cannot both happen; the CACHE bar takes it, because
+    //    it is the larger surface and the instrument's own material. Asserted so
+    //    a later reordering of the two blocks cannot flip it in silence.
+    set (PID::exprSrcSnap, (float) ExprSource::Z);
+    r.run (4);
+    r.pressure (5, 0);
+    r.run (6);
+    r.pressure (5, 127);
+    r.run (6);
+    check (isCacheFamily (masterOf (r, 60)),
+           "both bars on one axis: the cache bar takes the voice, by decision");
+
+    // 6. And a snapshot stored mid-phrase leaves the cache traveller alone. One
+    //    stamp for all twenty positions made this a rebuild of everything: the
+    //    held note was handed back off its cache position and the bar went
+    //    instrument-wide for ~100 ms, for an event on four slots it was not on.
+    const auto* before = masterOf (r, 60);
+    r.proc.setSnapshotAudio (2, tone (500.0f, 99225), 44100.0);
+    for (int i = 0; i < 12; ++i) { pump (25); r.run (2); }
+    check (before != nullptr && masterOf (r, 60) == before,
+           "storing a snapshot does not disturb a note travelling the cache");
+}
+
+
 // ── 85. Two masters never share a bank generation ───────────────────────────
 // The tripwire for the defect that made case 84 pass while the sound did not
 // change. Both morph guards ask ONE question - "is this the same published bank
@@ -5043,6 +5288,8 @@ int main()
     caseAllSoundOffClosesEveryArm();
     casePedalsAreTwoClaims();
     caseCacheIsTravelledPerNote();
+    caseSnapIsTravelledPerNoteToo();
+    caseTwoBarsOnOneVoiceLastMovedWins();
     caseTwoMastersNeverShareAGeneration();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",

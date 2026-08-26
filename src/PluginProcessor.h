@@ -939,11 +939,30 @@ private:
         double sourceRate = 44100.0;
     };
     static constexpr int kMaxCachePositions = 16;   // sanitizeCacheCapacity's ceiling
-    std::array<std::unique_ptr<CachePositionEngines>, kMaxCachePositions> cachePosEngines_;
+    /** The Snap bar's four slots are positions too, and the SAME kind: a stored
+     *  snapshot's AUDIO travels per note exactly as a cache entry does. Only the
+     *  audio - a snapshot also carries a whole parameter tree, and the
+     *  instrument has one of those by construction, so the patch half stays
+     *  instrument-wide and is recalled by the instrument-wide bar as before.
+     *  They live after the cache's sixteen in one array so that one builder, one
+     *  ready mask and one set of prepared engines serve both bars. */
+    static constexpr int kNumSnapAudioSlots = 4;
+    static constexpr int kSnapPosBase       = kMaxCachePositions;
+    static constexpr int kMaxPositions      = kMaxCachePositions + kNumSnapAudioSlots;
+    std::array<std::unique_ptr<CachePositionEngines>, kMaxPositions> cachePosEngines_;
     // Bit k: position k holds audio prepared from cache entry k under the
     // CURRENT stamp. Written on the build thread, read on the audio thread.
     std::atomic<juce::uint32> cachePosReadyMask_ { 0 };
-    juce::uint64 cachePosStampBuilt_ = 0;     // build thread only
+    /** ONE stamp per RANGE, not one for all twenty positions. The sixteen cache
+     *  positions and the four Snap slots are built from independent sources, and
+     *  a single stamp made every change to either discard both: storing a
+     *  snapshot - a long press, an ordinary performance gesture - handed every
+     *  held note back off its CACHE position and left that bar inert for the
+     *  ~100 ms a full rebuild takes. Each range's stamp carries the shared
+     *  transport bits as well, so a control that changes what every position
+     *  would contain still rebuilds all twenty. Build thread only. */
+    juce::uint64 cachePosStampBuiltCache_ = 0;
+    juce::uint64 cachePosStampBuiltSnap_  = 0;
     int          cachePosNextToBuild_ = 0;    // build thread only
     // The host's rate and block size, written by prepareToPlay and read by the
     // build thread. Part of the stamp, so a rate change invalidates what is
@@ -953,6 +972,39 @@ private:
     std::atomic<double> cachePosHostRate_ { 0.0 };
     std::atomic<int>    cachePosHostBlock_ { 0 };
 
+    /** One stored snapshot's AUDIO, mirrored onto the processor so the position
+     *  builder can reach it. The panel owns the snapshot itself (audio plus the
+     *  whole patch); this is the half a held note can travel. Guarded by
+     *  cacheEntriesMutex_, like the cache entries and for the same reason: the
+     *  message thread writes it, the build thread reads it, the audio thread
+     *  never touches it. */
+    struct SnapAudioSlot
+    {
+        juce::AudioBuffer<float> audio;
+        double sampleRate = 44100.0;
+        bool   valid      = false;
+    };
+    std::array<SnapAudioSlot, kNumSnapAudioSlots> snapAudio_;
+    /** Bumped by every mutation of the four slots above - the stamp's handle on
+     *  them, exactly as inferenceCacheGeneration_ is the cache's. */
+    std::atomic<unsigned> snapAudioGeneration_ { 0 };
+    /** WHICH snapshot slots hold audio, as a lock-free mirror of the same
+     *  question cachePositionStamp asks under cacheEntriesMutex_. The audio
+     *  thread needs it: a snapshot may carry a patch and no audio at all (older
+     *  presets do), and with nothing to travel the Snap bar's per-note path does
+     *  not APPLY - the instrument-wide bar handles it and goes on recalling the
+     *  patch. Without this the bar would sit waiting for positions that are
+     *  never coming and do nothing at all. */
+    std::atomic<unsigned> snapAudioValidMask_ { 0 };
+
+public:
+    /** The panel telling the processor that snapshot slot `slot0` (0-based) now
+     *  holds this audio, or none. Message thread. Only the audio: the patch half
+     *  never leaves the panel. */
+    void setSnapshotAudio (int slot0, const juce::AudioBuffer<float>& audio, double sampleRate);
+    void clearSnapshotAudio (int slot0);
+
+private:
     /** Guards inferenceCacheEntries and inferenceCacheCapacity between the
      *  message thread that fills them and the position builder that reads them.
      *  NOT getCallbackLock(): the audio thread never touches this vector (it
@@ -963,7 +1015,17 @@ private:
     mutable std::mutex cacheEntriesMutex_;
     /** What the positions must match to be current. Cheap enough to call per
      *  block; message/audio thread safe (atomics and parameter reads only). */
-    juce::uint64 cachePositionStamp() const;
+    /** @param snapRange false for the cache positions (0..15), true for the four
+     *  Snap slots (16..19). Returns 0 when that range has nothing to build. */
+    juce::uint64 cachePositionStamp(bool snapRange) const;
+    /** Is ANY position in [lo, hiExclusive) built and current? */
+    bool positionsReadyInRange(int lo, int hiExclusive) const;
+    /** Take back every voice claim pointing into [lo, hiExclusive). Caller holds
+     *  getCallbackLock(); the engines in that range are about to be refilled. */
+    void revokeVoiceClaimsInRange(int lo, int hiExclusive);
+    /** Drop [lo, hiExclusive) from the ready mask, take the claims back and hand
+     *  those voices to the instrument-wide masters by crossfade. */
+    void invalidatePositionRange(int lo, int hiExclusive);
     /** Build at most one position. Returns true if it did work. Runs on
      *  samplerReprepareThread; publishes under getCallbackLock(). */
     bool serviceCachePositionEngines();
@@ -982,20 +1044,53 @@ private:
      *  is not (yet) current. Audio-thread safe. */
     const CachePositionEngines* readyCachePosition(int index) const;
     /** Per-note traversal state - the instrument-wide atCacheZone_/BaseZone_/
-     *  Engaged_ triple, once per voice. Audio thread only. */
-    std::array<int16_t, VoiceManager::MAX_VOICES> atVoiceCacheZone_ {};
-    std::array<int16_t, VoiceManager::MAX_VOICES> atVoiceCacheBase_ {};
-    std::array<int16_t, VoiceManager::MAX_VOICES> atVoiceCacheIdx_ {};
-    std::array<bool,    VoiceManager::MAX_VOICES> atVoiceCacheEngaged_ {};
-    // Whose gesture the state above belongs to: the voice's fresh-strike epoch
-    // and the member channel it answers. A voice changes hands in two ways that
-    // are otherwise invisible from here - a STEAL (a fresh strike on a voice
-    // whose old key was still down) and the mono LEGATO hand-off (a new finger
-    // on a new member channel, deliberately without a fresh strike) - and in
-    // both the gesture standing here belongs to a finger that is gone.
-    std::array<juce::uint64, VoiceManager::MAX_VOICES> atVoiceCacheEpoch_ {};
-    std::array<int,          VoiceManager::MAX_VOICES> atVoiceCacheChan_ {};
-    bool atVoiceCacheActive_ = false;   // the per-note path was in charge last block
+     *  Engaged_ triple, once per voice. One of these per BAR: the Cache bar and
+     *  the Snap bar each track their own gesture, because a finger can be
+     *  travelling one while standing still on the other. Audio thread only. */
+    struct VoiceBarState
+    {
+        std::array<int16_t, VoiceManager::MAX_VOICES> zone {};
+        std::array<int16_t, VoiceManager::MAX_VOICES> base {};
+        std::array<bool,    VoiceManager::MAX_VOICES> engaged {};
+        // Whose gesture the state above belongs to: the voice's fresh-strike
+        // epoch and the member channel it answers. A voice changes hands in two
+        // ways that are otherwise invisible from here - a STEAL (a fresh strike
+        // on a voice whose old key was still down) and the mono LEGATO hand-off
+        // (a new finger on a new member channel, deliberately without a fresh
+        // strike) - and in both the gesture standing here belongs to a finger
+        // that is gone.
+        bool active = false;            // this bar's per-note path was in charge
+    };
+    VoiceBarState atVoiceCache_;
+    VoiceBarState atVoiceSnap_;
+    /** WHOSE HAND is on each voice, tracked once per block for BOTH bars. A
+     *  property of the voice, not of a bar - and it has to be recorded whether
+     *  or not either bar is steering. Kept per bar it went stale in every gap: a
+     *  bar at rest, or one whose amount was zero, stopped recording epochs, and
+     *  its FIRST pass after coming back read that staleness as "this voice
+     *  changed hands" and threw away the SHARED record of where the voice points
+     *  and who owns it - under the other bar's finger, which had not moved.
+     *  Storing a snapshot with keys held was enough to do it. */
+    std::array<juce::uint64, VoiceManager::MAX_VOICES> atVoiceEpoch_ {};
+    std::array<int,          VoiceManager::MAX_VOICES> atVoiceChan_ {};
+    /** WHICH position each voice is pointed at, -1 for the instrument-wide
+     *  master. SHARED by both bars, deliberately: a voice has one set of engine
+     *  masters, so if each bar remembered its own landed index the other bar
+     *  could re-point the voice and leave that memory stale - and the first bar
+     *  would then read "already pointed there" and refuse to act when the finger
+     *  came back to it. One voice, one position, one record of it. */
+    std::array<int16_t, VoiceManager::MAX_VOICES> atVoicePosIdx_ {};
+    /** WHICH BAR last moved this voice, and therefore owns where it points:
+     *  0 nobody, 1 the cache bar, 2 the Snap bar. Both bars run in the same
+     *  block, over the same voices, into the one record above - so without an
+     *  owner the second one to run wins every block regardless of which finger
+     *  actually moved, and the two of them re-point the same voice back and
+     *  forth on every buffer with no hand moving at all. Claimed by MOVING: a
+     *  bar takes a voice on the block its own zone changes under it, keeps it
+     *  while it is the only one travelling, and hands it over the moment the
+     *  other bar's zone changes. Last gesture wins, which is the only reading
+     *  that matches what the player did. */
+    std::array<int8_t, VoiceManager::MAX_VOICES> atVoiceBarOwner_ {};
     // At least one voice was pointed at a new position and the message thread
     // has work to finish for it. TWO things, both of which only it may do:
     //
@@ -1028,14 +1123,49 @@ private:
      *  voice keeps its old landed index, that index still matches the zone the
      *  motionless finger is standing in, and the bar simply stops working under
      *  that finger until it leaves the zone and comes back. */
-    std::atomic<bool> voiceCacheRearmReq_ { false };
+    /** WHICH RANGE of claims the audio thread must take back: bit 0 the sixteen
+     *  cache positions, bit 1 the four Snap slots. A bitmask rather than a flag
+     *  because the two ranges are rebuilt independently, and a snapshot store
+     *  must not hand back the notes travelling the cache. */
+    std::atomic<unsigned> voiceCacheRevokeReq_ { 0 };
+    /** One bar's per-note pass. `posBase` is where that bar's positions start in
+     *  cachePosEngines_ (0 for the Cache, kSnapPosBase for Snap); everything
+     *  else is the same gesture rule for both. Audio thread. */
+    /** Every voice that changed hands since the last block loses BOTH bars'
+     *  gesture, the shared record of where it points and its ownership. Run
+     *  unconditionally, above both bars and above every early return - see
+     *  atVoiceEpoch_. Audio thread. */
+    void updateVoiceHandChanges();
+    void updateVoiceBarPositions(VoiceBarState& st, float amt, int src, int zones,
+                                 int posBase, bool& repointed);
+    /** Ask the message thread for the half of a re-point it alone may do - the
+     *  granular crossfade and the sampler reclaim drain. */
+    void requestVoiceCacheService();
     /** Whether the arpeggiator is on AND holding keys - the condition under
      *  which the cache bar must stay instrument-wide, because an arpeggiated
      *  chord makes no voice to read per note. */
     bool arpIsHoldingKeys() const;
     void updateVoiceCachePositions(float cacheAmt, int cacheSrc, int zones);
-    /** Forget where every voice stood without taking its sample away. */
-    void rearmVoiceCacheTraversal();
+    /** The Snap bar's per-note pass. Four positions, the stored snapshots'
+     *  AUDIO - the patch half of a snapshot never travels per note, because the
+     *  instrument has one parameter tree by construction. */
+    void updateVoiceSnapPositions(float snapAmt, int snapSrc);
+    /** Forget where every voice stood without taking its sample away. Both bars,
+     *  and the shared landed index with them. */
+    /** Forget ONE bar's gesture and nothing else - not the other bar's, not
+     *  where any voice points. For the events that change what a bar MEANS
+     *  (its axis) rather than what the positions CONTAIN. */
+    void rearmVoiceBar(VoiceBarState& st);
+    /** Drop the record of where voices point for positions in [lo, hiExclusive),
+     *  and clear those voices' masters. Ranged, because a cache being replaced
+     *  is not an event on the four Snap slots and a finger mid-slide across
+     *  them must not lose its travel for it. Audio thread. */
+    void forgetPositionIndices(int lo, int hiExclusive);
+    /** A bar that is no longer steering gives its voices back - see the body. */
+    void dropVoiceBarOwnership(const VoiceBarState& st);
+    /** ONE bar going to rest: forget that bar's gesture, keep every sample and
+     *  leave the other bar's gesture alone. */
+    void releaseVoiceBar(VoiceBarState& st);
     void releaseVoiceCachePositions();
     std::thread samplerReprepareThread;
     std::atomic<bool> samplerReprepareThreadShouldExit { false };
