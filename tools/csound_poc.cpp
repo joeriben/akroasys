@@ -29,7 +29,7 @@
 //   echo -I$PWD/build_clean/_deps/signalsmith_stretch-src >> "$SCRATCH/h.rsp"
 //   clang++ -std=c++17 -O2 @"$SCRATCH/h.rsp" -I"$CSOUND_PREFIX/include" \
 //     tools/csound_poc.cpp \
-//     build_clean/T5ynth_artefacts/Release/libT5ynth_SharedCode.a \
+//     build_clean/T5ynth_artefacts/Release/lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] \
 //     -F"$CSOUND_PREFIX/Frameworks" -framework CsoundLib64 \
 //     -Wl,-rpath,"$CSOUND_PREFIX/Frameworks" \
 //     -framework Accelerate -framework AudioToolbox -framework Cocoa -framework CoreAudio \

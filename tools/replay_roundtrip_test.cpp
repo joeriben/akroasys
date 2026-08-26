@@ -12,7 +12,7 @@
 //   3. the note + generation events survive with correct fields.
 //
 // Build (same recipe as the other tools/*.cpp — flags.make response file +
-// libT5ynth_SharedCode.a). Exits non-zero on any failed assertion.
+// lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this]). Exits non-zero on any failed assertion.
 #include "JuceHeader.h"
 #include "eventlog/EventLog.h"
 #include "eventlog/EventLogWriterThread.h"

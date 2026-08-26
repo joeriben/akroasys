@@ -17,7 +17,7 @@
 // path is not bit-exact or still spikes at wraps.
 //
 // Build: same recipe as audition_dco_bake.cpp (flags.make response file +
-// libT5ynth_SharedCode.a). Run from the repo root:
+// lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this]). Run from the repo root:
 //   /tmp/dco_pp <recipe.json> [outDir=tools/dco_audition_out]
 #include "JuceHeader.h"
 #include "dsp/DcoBaker.h"

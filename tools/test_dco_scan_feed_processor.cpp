@@ -8,7 +8,7 @@
 // "nothing morphs" is a real feed bug. Also asserts the display-mode flags
 // (hasNewWtDisplay / isWavetableMode / isDcoTableActive) that gate the fan.
 //
-// Build (flags.make response file + libT5ynth_SharedCode.a, like the other
+// Build (flags.make response file + lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this], like the other
 // tools/ harnesses). Run from repo root; no args, no Python backend needed.
 #include "JuceHeader.h"
 #include "PluginProcessor.h"

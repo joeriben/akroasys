@@ -39,7 +39,7 @@
 // (never <csound/csound.h> directly -- that header is pimpl'd specifically so
 // callers never need the framework's own headers), so no extra -I is needed
 // for csound.h; the framework is only needed at LINK time for the symbols
-// CsoundEngine.cpp (already compiled into libT5ynth_SharedCode.a) calls.
+// CsoundEngine.cpp (already compiled into lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this]) calls.
 //
 // IMPORTANT: verify the scraped CXX_DEFINES actually contains
 // -DT5YNTH_HAS_CSOUND=1 before compiling -- if the framework weren't found at

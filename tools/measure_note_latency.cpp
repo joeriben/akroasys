@@ -34,7 +34,7 @@
 //   CSOUND_FW="$(brew --prefix csound)/Frameworks"
 //   clang++ -std=c++17 -O2 @/tmp/h.rsp \
 //     tools/measure_note_latency.cpp \
-//     build_clean/T5ynth_artefacts/Release/libT5ynth_SharedCode.a \
+//     build_clean/T5ynth_artefacts/Release/lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] \
 //     -F"$CSOUND_FW" -framework CsoundLib64 -Wl,-rpath,"$CSOUND_FW" \
 //     -framework Accelerate -framework AudioToolbox -framework Cocoa -framework CoreAudio \
 //     -framework CoreAudioKit -framework CoreMIDI -framework DiscRecording -framework Foundation \

@@ -61,7 +61,7 @@
 //   mkdir -p tools/csound_preset_roundtrip_out
 //   clang++ -std=c++17 -O2 @/tmp/h.rsp \
 //     tools/test_csound_preset_roundtrip.cpp \
-//     build_clean/T5ynth_artefacts/Release/libT5ynth_SharedCode.a \
+//     build_clean/T5ynth_artefacts/Release/lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] \
 //     build_clean/libT5ynthData.a \
 //     -F"$CSOUND_FW" -framework CsoundLib64 -Wl,-rpath,"$CSOUND_FW" \
 //     -framework Accelerate -framework AudioToolbox -framework Cocoa -framework CoreAudio \

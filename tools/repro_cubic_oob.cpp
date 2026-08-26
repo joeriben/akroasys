@@ -19,7 +19,7 @@
 //   { grep -m1 CXX_DEFINES "$FLAGS"; grep -m1 CXX_INCLUDES "$FLAGS"; } \
 //     | sed 's/^CXX_[A-Z]* = //' > /tmp/h.rsp
 //   echo -I$PWD/build_clean/_deps/signalsmith_stretch-src >> /tmp/h.rsp
-//   cp build_clean/T5ynth_artefacts/Release/libT5ynth_SharedCode.a /tmp/lib_noSP.a
+//   cp build_clean/T5ynth_artefacts/Release/lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] /tmp/lib_noSP.a
 //   ar d /tmp/lib_noSP.a SamplePlayer.cpp.o
 //   clang++ -std=c++17 -g -O1 -fsanitize=address @/tmp/h.rsp \
 //     tools/repro_cubic_oob.cpp src/dsp/SamplePlayer.cpp /tmp/lib_noSP.a \

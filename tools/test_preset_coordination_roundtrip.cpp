@@ -12,7 +12,7 @@
 //      index 0 = independent via choiceFromKey's unknown-key fallback
 //
 // Build: same recipe as the other tools/*.cpp (flags.make → h.rsp,
-// link libT5ynth_SharedCode.a + mac frameworks) PLUS
+// link lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] + mac frameworks) PLUS
 // build_clean/libT5ynthData.a — processor-level tools need BinaryData
 // (plate IRs etc. referenced from prepareToPlay). Exits non-zero on failure.
 #include "JuceHeader.h"

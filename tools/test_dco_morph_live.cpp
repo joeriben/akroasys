@@ -11,7 +11,7 @@
 //   { grep -m1 CXX_DEFINES "$FLAGS"; grep -m1 CXX_INCLUDES "$FLAGS"; } \
 //     | sed 's/^CXX_[A-Z]* = //' > /tmp/wt.rsp
 //   clang++ -std=c++17 -O2 @/tmp/wt.rsp tools/test_dco_morph_live.cpp \
-//     build_clean/T5ynth_artefacts/Release/libT5ynth_SharedCode.a \
+//     build_clean/T5ynth_artefacts/Release/lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] \
 //     -framework Accelerate -framework AudioToolbox -framework Cocoa -framework CoreAudio \
 //     -framework CoreAudioKit -framework CoreMIDI -framework DiscRecording -framework Foundation \
 //     -framework IOKit -framework QuartzCore -framework Security -framework WebKit \

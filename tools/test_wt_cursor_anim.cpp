@@ -8,7 +8,7 @@
 // pinned, the cursor is frozen. Also writes a horizontal filmstrip PNG to
 // eyeball the sweeping bright wave + its morphing shape.
 //
-// Build: flags.make response file + libT5ynth_SharedCode.a (as the other tools).
+// Build: flags.make response file + lib<product>_SharedCode.a  [tools/build_offline_tool.sh does this] (as the other tools).
 //   /tmp/wt_anim   (run from repo root; writes tools/wt_display_out/anim_strip.png)
 #include "JuceHeader.h"
 #include "dsp/DcoBaker.h"
