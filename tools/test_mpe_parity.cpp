@@ -4615,6 +4615,343 @@ void caseAllSoundOffClosesEveryArm()
 
 
 
+// ── 84. The cache is travelled PER NOTE ─────────────────────────────────────
+// The complaint this exists for, in the player's words: "das ist keine
+// Poly-Funktion. Der Cache wird wie mit einem primitiven Mono_AT abgefahren.
+// D.h. bei 2 gehaltenen Noten wechselt das Sample für alle synchron."
+//
+// It was true, and not at one site: maxHeldExpression folded every held voice
+// into ONE reading, one zone state followed it, one index was posted and one
+// instrument-wide load installed it. Everything a per-note controller sends
+// arrived and was averaged away at the first stage.
+//
+// What this asserts is the smallest observable a mono construction cannot
+// satisfy: two keys held at two lateral positions follow two DIFFERENT masters.
+// Plus the counter-check, because "always different" would satisfy that
+// assertion and be just as wrong.
+void caseCacheIsTravelledPerNote()
+{
+    std::printf ("[84] two held keys at two lateral positions play two samples\n");
+    Rig r;
+
+    // Distinct in PITCH and in LENGTH. The length is what makes this a check on
+    // the sound rather than on two addresses: a build that prepared every
+    // position from the same entry would hand the two keys two different objects
+    // holding the same audio, and an assertion on pointers alone would pass it.
+    auto tone = [] (float hz, int samples)
+    {
+        juce::AudioBuffer<float> b (1, samples);
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            b.setSample (0, i, 0.5f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                                * hz * (float) i / 44100.0f));
+        return b;
+    };
+
+    // Four entries: enough that two engaged fingers can stand in different zones
+    // without one of them sitting on the step it landed on (a finger that has
+    // not moved is deliberately still on the instrument-wide master, and a case
+    // that read one would pass for the wrong reason).
+    auto fill = [&tone] (Rig& rig)
+    {
+        rig.proc.setInferenceCacheCapacity (4);
+        for (int k = 0; k < 4; ++k)
+            rig.proc.addInferenceCacheEntry (tone (220.0f * (float) (k + 1),
+                                                   22050 + k * 11025), 44100.0);
+        auto set = [&rig] (const char* pid, float v)
+        {
+            if (auto* p = rig.proc.getValueTreeState().getParameter (pid))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        set (PID::aftertouchAmtCache, 1.0f);      // full depth: the bar spans all four
+        set (PID::exprSrcCache, (float) ExprSource::X);
+        rig.run (2);
+        // The positions are prepared on a background thread. Give it time, and
+        // do not wait on a flag the implementation sets - if it never prepares
+        // them the checks below fail, which is the point.
+        for (int i = 0; i < 60; ++i)
+        {
+            pump (25);
+            rig.run (2);
+        }
+    };
+
+    // X as a MODULATION source is the bend in semitones measured against the X
+    // full scale, not the wheel fraction -- so the wheel value for a wanted
+    // reading depends on both settings. Derived from what is actually in force
+    // rather than assumed, so a calibration change fails this loudly instead of
+    // quietly moving which zone the gesture reaches.
+    auto wheelForX = [] (const Rig& rig, float x)
+    {
+        const float centered = x * rig.xFullScale() / rig.noteBendRange();
+        return juce::jlimit (0, 16383, 8192 + (int) std::lround (centered * 8192.0f));
+    };
+
+    auto voiceIndexForNote = [] (const Rig& rig, int note)
+    {
+        const auto& vm = rig.proc.getVoiceManager();
+        for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+            if (vm.getVoice (i).isActive() && ! vm.getVoice (i).isReleasing()
+                && vm.getVoice (i).getCurrentNote() == note)
+                return i;
+        return -1;
+    };
+
+    fill (r);
+    check (r.proc.isInferenceCacheFull(), "the cache is full, so the bar can travel it");
+
+    r.noteOn (5, 60);
+    r.noteOn (7, 64);
+    r.flush();
+    r.run (2);
+
+    const int va = voiceIndexForNote (r, 60);
+    const int vb = voiceIndexForNote (r, 64);
+    check (va >= 0 && vb >= 0 && va != vb, "two keys, two voices");
+    if (va < 0 || vb < 0)
+        return;
+
+    // Both fingers travel to the far end, so both engage; then one comes back
+    // most of the way. Two hands, two places in the cache, at the same instant.
+    r.wheel (5, wheelForX (r, 1.0f));
+    r.wheel (7, wheelForX (r, 1.0f));
+    r.run (4);
+    r.wheel (7, wheelForX (r, 0.15f));
+    r.run (4);
+
+    const auto& vm = r.proc.getVoiceManager();
+    const auto* ma = vm.voiceSamplerMaster (va);
+    const auto* mb = vm.voiceSamplerMaster (vb);
+    check (ma != nullptr, "the key at one end follows a cache position of its own");
+    check (mb != nullptr, "the key nearer the middle follows one of its own");
+    check (ma != mb, "and they are NOT the same position -- the whole complaint");
+    if (ma != nullptr && mb != nullptr)
+        check (ma->estimateReferenceLengthSamples() != mb->estimateReferenceLengthSamples(),
+               "and the two positions hold different AUDIO, not just different addresses");
+
+    // The counter-check. Same reading, same position: a bar that simply handed
+    // every voice a master of its own would satisfy the assertion above and be
+    // no more polyphonic than the mono construction it replaced.
+    Rig s;
+    fill (s);
+    s.noteOn (5, 60);
+    s.noteOn (7, 64);
+    s.flush();
+    s.run (2);
+    s.wheel (5, wheelForX (s, 1.0f));
+    s.wheel (7, wheelForX (s, 1.0f));   // both leaning the same way, the same distance
+    s.run (6);
+
+    const auto& svm = s.proc.getVoiceManager();
+    const int sa = voiceIndexForNote (s, 60);
+    const int sb = voiceIndexForNote (s, 64);
+    if (sa >= 0 && sb >= 0)
+    {
+        check (svm.voiceSamplerMaster (sa) != nullptr, "both are engaged");
+        check (svm.voiceSamplerMaster (sa) == svm.voiceSamplerMaster (sb),
+               "two keys at the SAME position play the same sample");
+    }
+
+    // And a released key hands its position back, so the next note on that voice
+    // starts from the instrument-wide master rather than inheriting a stranger's
+    // finger position.
+    r.noteOff (5, 60);
+    r.run (4);
+    r.noteOn (5, 62);
+    r.flush();
+    const int vc = voiceIndexForNote (r, 62);
+    if (vc >= 0)
+        check (r.proc.getVoiceManager().voiceSamplerMaster (vc) == nullptr,
+               "a fresh key starts on the instrument-wide master, not on a stranger's position");
+
+    // TWO ways a voice changes hands with a key still down, and they want
+    // OPPOSITE things. Neither passes the not-held branch that forgets a
+    // gesture, which is why both are here.
+
+    // (a) MONO LEGATO. Same voice, sounding continuously, one finger sliding to
+    // the next pitch: it must go on playing the sample it is playing. The mono
+    // note-on's clearVoiceEngineMasters sits AFTER the legato branch returns,
+    // deliberately - clearing here would crossfade the slide back onto the
+    // instrument-wide sample, i.e. the slide would change the sound.
+    {
+        Rig t;
+        if (auto* p = t.proc.getValueTreeState().getParameter (PID::voiceCount))
+            p->setValueNotifyingHost (p->convertTo0to1 (0.0f));   // index 0 = 1 voice
+        t.run (2);
+        fill (t);
+        check (t.proc.getVoiceManager().getVoiceLimit() == 1, "mono, so the next key slides");
+
+        t.noteOn (5, 60);
+        t.flush();
+        t.wheel (5, wheelForX (t, 1.0f));       // engage, out at the far end
+        t.run (6);
+        const int t0 = voiceIndexForNote (t, 60);
+        check (t0 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (t0) != nullptr,
+               "the first key reaches a position");
+        const auto* held = t0 >= 0 ? t.proc.getVoiceManager().voiceSamplerMaster (t0) : nullptr;
+
+        t.noteOn (7, 67);                       // legato slide, wheel left where it was
+        t.flush();
+        t.run (2);
+        const int t1 = voiceIndexForNote (t, 67);
+        check (t1 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (t1) == held,
+               "and a legato slide keeps the sample it is sliding on");
+    }
+
+    // (b) A STEAL. A different finger, a fresh strike, on a voice whose old key
+    // was still down. Here the position MUST go: it belongs to the hand that
+    // has left. Two voices, both engaged, so whichever the policy takes is
+    // carrying one.
+    {
+        Rig t;
+        if (auto* p = t.proc.getValueTreeState().getParameter (PID::voiceCount))
+            p->setValueNotifyingHost (p->convertTo0to1 (1.0f));   // index 1 = 4 voices
+        t.run (2);
+        fill (t);
+        check (t.proc.getVoiceManager().getVoiceLimit() == 4, "four voices, so the fifth key steals");
+
+        // Fill the pool and engage every one of them, so whichever the stealing
+        // policy takes is carrying a position that belongs to a hand that left.
+        const int notes[] = { 60, 62, 64, 65 };
+        for (int k = 0; k < 4; ++k)
+            t.noteOn (5 + k, notes[k]);
+        t.flush();
+        for (int k = 0; k < 4; ++k)
+            t.wheel (5 + k, wheelForX (t, 1.0f));
+        t.run (6);
+        int engaged = 0;
+        for (int k = 0; k < 4; ++k)
+        {
+            const int vi = voiceIndexForNote (t, notes[k]);
+            if (vi >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (vi) != nullptr)
+                ++engaged;
+        }
+        check (engaged == 4, "all four keys reach a position");
+
+        // Steal, with the wheels left exactly where they were. The new key has
+        // not moved, so it must claim nothing...
+        t.noteOn (9, 67);
+        t.flush();
+        t.run (2);
+        const int t1 = voiceIndexForNote (t, 67);
+        check (t1 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (t1) == nullptr,
+               "the key that stole the voice claims nothing until IT has moved");
+
+        // ...and once it does move, it must be able to reach a position again. A
+        // stolen voice that kept the old finger's index would find every position
+        // it resolves to already claimed and never re-point - stuck on the
+        // instrument-wide master for the rest of the phrase.
+        t.wheel (9, wheelForX (t, 0.15f));
+        t.run (6);
+        t.wheel (9, wheelForX (t, 1.0f));
+        t.run (6);
+        const int t2 = voiceIndexForNote (t, 67);
+        check (t2 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (t2) != nullptr,
+               "and it is not stuck: once it travels, it reaches one");
+    }
+
+    // (c) THE PLATFORM INVARIANT, which per-note breaks unless it is handed
+    // back: a HELD note always plays the CURRENT sample. A voice pointed at a
+    // cache position followed THAT master unconditionally, so a regenerate
+    // under a held key never reached it and the note went deaf to Regenerate
+    // for the rest of its life - with A/B drift, which regenerates continuously
+    // under held notes, that is the whole feature gone. The claim says which of
+    // the OLD sounds the key plays; it does not outrank a new one.
+    {
+        Rig t;
+        fill (t);
+        t.noteOn (5, 60);
+        t.flush();
+        t.wheel (5, wheelForX (t, 1.0f));
+        t.run (6);
+        const int v0 = voiceIndexForNote (t, 60);
+        check (v0 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (v0) != nullptr,
+               "the held key is on a position of its own");
+
+        // A regenerate: fresh audio into the instrument-wide master, nothing to
+        // do with the cache (so the cache generation does not move, and the
+        // positions stay current - the claim is what has to give, not them).
+        juce::AudioBuffer<float> fresh (1, 44100);
+        for (int i = 0; i < fresh.getNumSamples(); ++i)
+            fresh.setSample (0, i, 0.5f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                                    * 111.0f * (float) i / 44100.0f));
+        t.proc.loadGeneratedAudio (fresh, 44100.0);
+        t.run (4);
+        const int v1 = voiceIndexForNote (t, 60);
+        check (v1 == v0 && v1 >= 0,
+               "the same voice is still holding the note");
+        check (v1 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (v1) == nullptr,
+               "and the regenerate takes the claim back, so the held note follows it");
+
+        // ...and the bar still works afterwards. Taking the claim back without
+        // re-arming the GESTURE leaves the voice's last landed index standing;
+        // that index still matches the zone the motionless finger is in, so
+        // every following pass reads "already pointed there" and the bar is
+        // simply dead under that finger until it leaves the zone and returns.
+        t.wheel (5, wheelForX (t, 0.15f));
+        t.run (6);
+        t.wheel (5, wheelForX (t, 1.0f));
+        t.run (6);
+        const int v2 = voiceIndexForNote (t, 60);
+        check (v2 >= 0 && t.proc.getVoiceManager().voiceSamplerMaster (v2) != nullptr,
+               "and the finger can travel again without having to leave and return");
+    }
+}
+
+
+// ── 85. Two masters never share a bank generation ───────────────────────────
+// The tripwire for the defect that made case 84 pass while the sound did not
+// change. Both morph guards ask ONE question - "is this the same published bank
+// I already hold?" - and answer it by comparing a generation NUMBER across
+// instances. The counters were per instance, so every freshly built master
+// stamped generation 1, and sixteen cache positions all claimed to be the same
+// bank as each other:
+//
+//   Wavetable: morphToFramesFrom sees sameActive and returns. The voice keeps
+//              the sound it had. Silent, and case 84's pointer assertion is
+//              satisfied the whole time.
+//   Freeze:    morphToBufferFrom takes its "same buffer - harmless" branch and
+//              republishes genuinely different audio under a sounding voice.
+//              That is a hard swap mid-grain, i.e. the one thing the Regen
+//              XFade contract forbids.
+//
+// Checked here on the engines directly rather than through the synth, because
+// the property is the engines' own and a per-instance counter reintroduced
+// anywhere would fail this in a line.
+void caseTwoMastersNeverShareAGeneration()
+{
+    std::printf ("[85] two engine instances never stamp the same bank generation\n");
+
+    auto tone = [] (float hz, int samples)
+    {
+        juce::AudioBuffer<float> b (1, samples);
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            b.setSample (0, i, 0.5f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                                * hz * (float) i / 44100.0f));
+        return b;
+    };
+    const auto a = tone (220.0f, 22050);
+    const auto b = tone (330.0f, 33075);
+
+    {
+        FreezeTextureEngine fa, fb;
+        auto sa = fa.prepareBufferLoad (a, 44100.0);
+        auto sb = fb.prepareBufferLoad (b, 44100.0);
+        check (sa != nullptr && sb != nullptr, "two freeze engines both prepare");
+        if (sa != nullptr && sb != nullptr)
+            check (sa->generation != sb->generation,
+                   "and their snapshots do not claim to be the same buffer");
+    }
+    {
+        WavetableOscillator oa, ob;
+        auto ma = oa.prepareContiguousFrames (a, 44100.0, 0.0f, 1.0f);
+        auto mb = ob.prepareContiguousFrames (b, 44100.0, 0.0f, 1.0f);
+        check (ma != nullptr && mb != nullptr, "two wavetable oscillators both prepare");
+        if (ma != nullptr && mb != nullptr)
+            check (ma->generation != mb->generation,
+                   "and their banks do not claim to be the same bank");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -4705,6 +5042,8 @@ int main()
     caseUnclaimedCc6ReachesABinding();
     caseAllSoundOffClosesEveryArm();
     casePedalsAreTwoClaims();
+    caseCacheIsTravelledPerNote();
+    caseTwoMastersNeverShareAGeneration();
 
     std::printf ("\n%d checks, %d failures -- %s\n\n",
                  gChecks, gFailures, gFailures == 0 ? "ALL PASS" : "FAILED");

@@ -209,7 +209,14 @@ private:
     SnapshotPtr retiredPublished_;
     SnapshotPtr retiredMorphFrom_;
 
-    juce::uint64 nextGeneration_ = 1;
+    // PROCESS-WIDE - see WavetableOscillator::nextPublishedGeneration_ for the
+    // full reasoning. morphToBufferFrom compares this number across INSTANCES
+    // (a voice's current snapshot against a master's), so a per-instance counter
+    // made two different buffers from two different masters compare equal, and
+    // the "same buffer, harmless" branch then republished genuinely different
+    // audio under a sounding voice - a hard swap mid-grain, which is precisely
+    // what the Regen XFade contract forbids.
+    static std::atomic<juce::uint64> nextGeneration_;
 
     double playbackSampleRate_ = 44100.0;
     int maxBlockSize_ = 512;

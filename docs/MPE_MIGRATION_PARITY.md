@@ -271,7 +271,7 @@ decides: the read-out is the element that has to give.
 
 ## 5. The gate
 
-`tools/test_mpe_parity.cpp` is the frozen corpus: 398 assertions driven as raw
+`tools/test_mpe_parity.cpp` is the frozen corpus: 443 assertions driven as raw
 MIDI through the real `T5ynthProcessor::processBlock`, reading the result off
 the voices. It was written against the hand-written code and was green on it
 before the library was introduced — that is what makes it a record of the old
@@ -444,3 +444,112 @@ and written at their site rather than changed in passing:**
 
 Both need a decision before they are touched: each is audible, and the first has
 a second question inside it (a hard stop clicks, a fast ramp does not).
+
+### 5b. Per note, 2026-08-26
+
+The two expression targets added last — **Cache** and **Snap**, the ones that
+travel a row of whole sounds rather than move a number — arrived
+instrument-wide, and that is the one thing MPE is not. Reported by the player:
+*"das ist keine Poly-Funktion. Der Cache wird wie mit einem primitiven Mono_AT
+abgefahren. D.h. bei 2 gehaltenen Noten wechselt das Sample für alle synchron."*
+
+It was not one site. `VoiceManager::maxHeldExpression` folded every held voice
+into ONE reading, one zone state followed that reading, one index went into one
+mailbox, and one `loadGeneratedAudio` installed one sample for every voice.
+Everything a per-note controller sends did arrive; it was averaged away at the
+first stage.
+
+**What changed, on the neural oscillator's Cache bar.** Every cache entry now
+gets a prepared master of its own — a `SamplePlayer`, a `FreezeTextureEngine`
+and a `WavetableOscillator`, built through the same conditioning and prepare
+calls `loadGeneratedAudio` uses for the live one, one position per pass of the
+existing `samplerReprepareThread`. A held key resolves its own position out of
+its own reading and is pointed at that master; the three `distribute*` functions
+morph or share each voice from ITS master instead of the single one they were
+handed. The crossfade is unchanged — the same Regen XFade that carries a
+regenerate — because it is the same call, pointed at a different master.
+
+**And the claim ends where a NEW sound begins.** A held note always plays the
+current sample; that is the platform invariant, and A/B drift — which
+regenerates continuously under held notes — is the feature it exists for. A
+voice following a cache position followed it *unconditionally*, so a regenerate
+never reached it and the note went deaf to Regenerate for the rest of its life.
+The hand's claim says which of the OLD sounds this key plays; it does not
+outrank a new one. So every instrument-wide publish takes the claims back before
+it distributes, and so does a stamp change that is about to refill the position
+engines from different audio. Both hand back by crossfade, never by swap. Case
+84(c) is the gate.
+
+What the instrument-wide path kept, because these three genuinely have one
+reading to give: the **language oscillator** (a position there is an orchestra
+and one Csound instance compiles one of them — per note would be a different
+instrument, not a different wiring); the **arpeggiator** (its chord is held by
+fingers that make no voice at all between steps, and the instrument-wide path
+already repairs that gap through `pressureForHeldNote`); and the moments before
+the positions are prepared.
+
+**Snap is not converted.** A snapshot slot is a whole patch — filter, envelopes,
+effects, the panel — and the instrument has one of those by construction. The
+bar stays instrument-wide and says so.
+
+Case 84 is the gate, and it asserts the smallest thing a mono construction
+cannot satisfy: two keys held at two lateral positions follow two DIFFERENT
+masters, holding DIFFERENT audio (the four fixtures differ in length as well as
+pitch, so an implementation that prepared every position from one entry would
+hand back two addresses and fail). Two counter-checks, because "always
+different" would satisfy that and be just as wrong: two keys at the same
+position follow the same master, and a fresh key starts on the instrument-wide
+master rather than inheriting the position of whoever held that voice before.
+
+**One thing sixteen masters broke that one master hid.** Both wavetable and
+granular decide "is this the same bank I already hold?" by comparing a
+generation NUMBER, and both counters were per instance. With a single master
+that is the same as comparing identity; with sixteen it is not — every freshly
+built master stamped generation 1, so the positions all claimed to be each
+other. Wavetable then took the "already current" branch and did nothing (the
+voice kept its old sound while the pointer said otherwise), and granular took
+its "same buffer — harmless" branch and republished genuinely different audio
+under a sounding voice, which is a hard swap mid-grain and the one thing the
+Regen XFade contract forbids. Both counters are process-wide now. **Case 85 is
+the tripwire**, on the engines directly: two instances, two prepares, two
+different numbers. It is separate from case 84 on purpose — case 84 asserts the
+pointer and passed throughout, which is exactly the blind spot.
+
+**Sixteen masters also changed who may touch what.** Three rules came out of
+building them, and all three are load-bearing:
+
+- **A position publishes, then sweeps.** Publishing drops the position's own
+  reference to the buffers it held a moment ago, which can leave a voice as the
+  last owner — and the next audio-thread assignment that displaces it would then
+  free megabytes on the audio thread. So a position publish is followed by the
+  same three `distribute*` calls every other publish site in the file already
+  makes. The position is the one that can go unswept for a whole idle stretch,
+  because `skipSynthesis` stops the audio thread's own pass.
+- **A published position is never written again — except through an atomic.**
+  The transport (extract brackets, AutoScan, loop points) is written *before* the
+  position enters the ready mask, while no voice can hold a pointer to it: those
+  are plain fields a voice reads on the audio thread, and on CLAP the callback
+  lock does not exclude it. Their inputs are in the stamp, so changing one
+  rebuilds rather than reaching in behind a sounding voice. **Regen XFade is the
+  one exception, deliberately.** It is a control the player turns *while playing*,
+  and putting it in the stamp meant every step of that drag discarded all sixteen
+  positions — so for the whole gesture nothing was ever finished, the per-note
+  path stayed off, and the instrument-wide bar took over and started landing
+  whole samples under the hand. It is refreshed in place instead, which is safe
+  because the field it writes was made an atomic scalar and nothing hangs off it.
+- **The cache vector is not the audio thread's business.** It has its own mutex,
+  never `getCallbackLock()`. Copying a whole take out under the callback lock is
+  megabytes of memcpy with `processBlock` parked behind it — one dropout per
+  position built, at the deep-and-long end of the cache.
+
+And with the points unlocked, a position's P1 is derived from **its own** entry
+like the loop window, not inherited from the live sampler. Following the live
+value did not settle: a landing rewrites P1, the rewrite changes the stamp, the
+stamp throws away all sixteen positions, and the next landing does it again — so
+the per-note path never came up at all.
+
+**Known, and not fixed here:** with the per-note path in charge nothing is
+posted to the message thread, so the waveform display and the cache row's
+highlight no longer follow the bar — they show whatever was last installed
+instrument-wide. Four notes on four positions have no single waveform to show,
+so this needs a decision about what the display should mean, not a repair.

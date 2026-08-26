@@ -255,7 +255,8 @@ public:
     // on the AUDIO THREAD (the reader) — so, opposite to distributeFreezeBuffer,
     // allowMorph MUST be true ONLY at the audio-thread call site; off-thread callers
     // pass false and leave held voices to crossfade on the next audio block.
-    void distributeSamplerBuffer(const SamplePlayer& master, float morphMs, bool allowMorph);
+    void distributeSamplerBuffer(const SamplePlayer& master, float morphMs, bool allowMorph,
+                                 bool onAudioThread);
     // Release the per-voice sampler reclaim slots populated by morphToBufferFrom.
     // Off-thread only; sequence before the master republishes its snapshot.
     void drainRetiredSamplerSnapshots();
@@ -267,7 +268,75 @@ public:
     // old one. MUST be false at audio-thread call sites — morphToBufferFrom may
     // release a retired snapshot off-thread and must never run on the audio
     // thread. false reproduces the legacy "keep old buffer on held voices".
-    void distributeFreezeBuffer(const FreezeTextureEngine& masterFreeze, float morphMs, bool allowMorph);
+    void distributeFreezeBuffer(const FreezeTextureEngine& masterFreeze, float morphMs, bool allowMorph,
+                                bool onAudioThread);
+
+    // ── Per-note engine data (cache position per voice) ──
+    // MPE means per note, and a cache position is a whole sample. So a voice can
+    // be pointed at a master OF ITS OWN instead of the instrument-wide one the
+    // three distribute functions above are handed: two fingers at two lateral
+    // positions play two different samples, which one bar and one master cannot
+    // express. nullptr - the default, and what every voice is born with - means
+    // "follow the instrument-wide master", i.e. exactly the behaviour before
+    // this existed.
+    //
+    // The pointer is to a master owned by the PROCESSOR for the lifetime of the
+    // plug-in (T5ynthProcessor::cachePosEngines_), never to a temporary: the
+    // audio thread dereferences it on every block, and the three distribute
+    // functions morph from it under the same snapshot discipline they use for
+    // the instrument-wide master. A master still being prepared is simply not
+    // handed over - the voice keeps what it has until it is ready.
+    void setVoiceEngineMasters(int voice,
+                               const SamplePlayer* sampler,
+                               const WavetableOscillator* osc,
+                               const FreezeTextureEngine* freeze);
+    /** Back to the instrument-wide master. Called when a voice is taken for a
+     *  new note, and whenever the per-note path stops being in charge. */
+    void clearVoiceEngineMasters(int voice);
+    /** Give EVERY voice back to the instrument-wide masters. The next distribute
+     *  pass then crossfades each held note onto whatever they now hold, over the
+     *  Regen XFade - it does not swap. Called wherever the instrument-wide sound
+     *  is replaced (a regenerate, a preset, a cache the positions no longer
+     *  describe), because a held note plays the CURRENT sample and a position
+     *  claim by the hand does not outrank that. */
+    void clearAllVoiceEngineMasters();
+    /** True while any voice follows a master of its own. */
+    bool hasVoiceEngineMasters() const
+    {
+        // The sampler slot is the claim marker: setVoiceEngineMasters' only two
+        // callers set all three pointers or clear all three, never a mixture.
+        for (const auto& m : voiceSamplerMaster_)
+            if (m.load(std::memory_order_relaxed) != nullptr)
+                return true;
+        return false;
+    }
+    /** Held GRANULAR voices onto the per-note masters the audio thread pointed
+     *  them at. Off the audio thread only, and for the same reason
+     *  distributeFreezeBuffer's allowMorph is: FreezeTextureEngine::
+     *  morphToBufferFrom frees the snapshots the previous morph retired, which
+     *  must never happen on the audio thread. Wavetable and Sampler need no
+     *  counterpart - both of those morph on the audio thread's own distribute
+     *  pass, which is where their contract puts them.
+     *  Idempotent: the engine's own generation guard makes a repeat a no-op. */
+    void morphHeldFreezeVoicesToOwnMasters(float morphMs);
+    /** The member channel whose expression this voice answers, 0 for none. The
+     *  channel is the FINGER: an MPE controller rotates its members, and the
+     *  mono legato path hands one voice from one finger to the next without a
+     *  fresh strike, so this is what tells them apart when triggerEpoch cannot. */
+    int voiceExprChannel(int voice) const
+    {
+        return (voice >= 0 && voice < MAX_VOICES)
+             ? static_cast<int>(voiceExprChannel_[static_cast<size_t>(voice)]) : 0;
+    }
+    /** Which sampler master this voice follows, nullptr for the instrument-wide
+     *  one. The observable that says whether an expression target acts per note:
+     *  two held keys leaning differently must not come back with one pointer. */
+    const SamplePlayer* voiceSamplerMaster(int voice) const
+    {
+        return (voice >= 0 && voice < MAX_VOICES)
+             ? voiceSamplerMaster_[static_cast<size_t>(voice)].load(std::memory_order_relaxed)
+             : nullptr;
+    }
 
     // ── Query ──
     int getActiveVoiceCount() const;
@@ -289,6 +358,15 @@ public:
      *  leaning hardest is the one that moves it. Over the same voices as
      *  getKeyHeldVoiceCount(). Sign is kept, because X leans both ways. */
     float maxHeldExpression(int src) const;
+    /** Is THIS voice held by a key that is still down? The per-voice form of
+     *  getKeyHeldVoiceCount(), over exactly the same voices. */
+    bool isVoiceKeyHeld(int voiceIdx) const { return isKeyHeldVoice(voiceIdx); }
+    /** ONE voice's own reading on one expression axis (ExprSource) - what
+     *  maxHeldExpression folds away. MPE gives every note its own expression,
+     *  and a target that acts PER NOTE has to read the note rather than the
+     *  instrument. Sign is kept, for the same reason: X leans both ways.
+     *  Out-of-range or silent voices read rest. */
+    float voiceExpression(int voice, int src) const;
     /** Voice source id the computer keyboard plays under. Above every sequencer
      *  strand on purpose, so such a voice can be told apart from an internal one. */
     static constexpr int kComputerKeyboardSourceId = 15;
@@ -384,6 +462,28 @@ private:
     const SamplePlayer* currentSamplerMaster_ = nullptr;
     const WavetableOscillator* currentWavetableMaster_ = nullptr;
     const FreezeTextureEngine* currentFreezeMaster_ = nullptr;
+
+    // Per-note override of the three above. nullptr = follow the instrument-wide
+    // master. See setVoiceEngineMasters.
+    // ATOMIC, because these cross threads in BOTH directions: written on the
+    // audio thread (updateVoiceCachePositions, noteOn, renderBlock) and read -
+    // and dereferenced - off it, by morphHeldFreezeVoicesToOwnMasters on the
+    // message thread and by the position builder's own distribute sweep. On
+    // CLAP getCallbackLock() does not exclude the audio thread, so the lock
+    // those readers take is not what holds; these are. Relaxed is enough: the
+    // audio DATA behind each pointer is published by the engine's own
+    // acquire/release snapshot pair, and the slots themselves outlive both.
+    std::array<std::atomic<const SamplePlayer*>, MAX_VOICES>        voiceSamplerMaster_ {};
+    std::array<std::atomic<const WavetableOscillator*>, MAX_VOICES> voiceOscMaster_ {};
+    std::array<std::atomic<const FreezeTextureEngine*>, MAX_VOICES> voiceFreezeMaster_ {};
+    // No side table saying WHICH voices carry one - neither a count nor a
+    // bitmask. Both were tried and both are the same mistake: a second variable
+    // that has to be kept in step with the pointers by a separate atomic op,
+    // which two threads acting on the same voice can leave disagreeing in
+    // either direction (claims standing that read as none, or none standing
+    // that read as claims). hasVoiceEngineMasters() reads the pointers
+    // themselves, so there is nothing to disagree with. 128 relaxed loads,
+    // three times a block - tens of nanoseconds against a 10 ms block.
     BlockParams currentBlockParams_;
     bool hasCurrentBlockParams_ = false;
 

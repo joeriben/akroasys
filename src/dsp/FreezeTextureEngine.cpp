@@ -4,6 +4,10 @@
 #include <cstdint>
 #include <limits>
 
+// See the declaration in FreezeTextureEngine.h: process-wide so that snapshots
+// from DIFFERENT engine instances never collide on a generation number.
+std::atomic<juce::uint64> FreezeTextureEngine::nextGeneration_ { 1 };
+
 namespace
 {
 double deterministicUnit(int index, std::uint32_t salt)
@@ -77,7 +81,7 @@ FreezeTextureEngine::SnapshotPtr FreezeTextureEngine::prepareBufferLoad(const ju
 
     auto snapshot = std::make_shared<Snapshot>();
     snapshot->sampleRate = bufferSampleRate > 0.0 ? bufferSampleRate : 44100.0;
-    snapshot->generation = nextGeneration_++;
+    snapshot->generation = nextGeneration_.fetch_add(1, std::memory_order_relaxed);
     snapshot->samples.resize(static_cast<size_t>(buffer.getNumSamples()), 0.0f);
 
     const int channels = buffer.getNumChannels();

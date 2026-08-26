@@ -121,6 +121,9 @@ void VoiceManager::reset()
     currentSamplerMaster_ = nullptr;
     currentWavetableMaster_ = nullptr;
     currentFreezeMaster_ = nullptr;
+    for (auto& m : voiceSamplerMaster_) m.store(nullptr, std::memory_order_relaxed);
+    for (auto& m : voiceOscMaster_) m.store(nullptr, std::memory_order_relaxed);
+    for (auto& m : voiceFreezeMaster_) m.store(nullptr, std::memory_order_relaxed);
     hasCurrentBlockParams_ = false;
     droneVoiceIndex = -1;
     droneNote = -1;
@@ -249,6 +252,11 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
         sostenutoReleasedVoice[0] = false;
         clearPolyPressureIfReleased(displacedNote, 0);
         v.setAftertouch(pressureForNote(note));
+        // A fresh note starts on the instrument-wide master. The cache position
+        // it will follow is ITS OWN, and nothing has read the new key's lateral
+        // position yet - inheriting the displaced note's would put the sound of
+        // somebody else's finger under this one.
+        clearVoiceEngineMasters(0);
         if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
         {
             v.getSampler().shareBufferFrom(*currentSamplerMaster_);
@@ -419,6 +427,7 @@ void VoiceManager::noteOn(int note, float velocity, bool isBind, float glideMs,
     sostenutoReleasedVoice[static_cast<size_t>(idx)] = false;
     clearPolyPressureIfReleased(displacedNote, idx);
     v.setAftertouch(pressureForNote(note));
+    clearVoiceEngineMasters(idx);   // see the mono branch above
 
     if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
     {
@@ -1284,6 +1293,15 @@ VoiceManager::VoiceOutput VoiceManager::renderBlock(
             voiceStartedByHand_[static_cast<size_t>(vi)] = false;
             voiceExprChannel_[static_cast<size_t>(vi)] = 0;
             voiceMpePressure_[static_cast<size_t>(vi)] = 0.0f;
+            // The per-note cache position goes with it. A RELEASING voice keeps
+            // its position deliberately (it must go on playing the sample it is
+            // playing), which is why updateVoiceCachePositions leaves the
+            // pointer alone - but a voice that has gone fully silent has
+            // nothing left to keep, and leaving the pointer standing would hold
+            // hasVoiceEngineMasters() true for the rest of the session and make
+            // processBlock redistribute all three engines every block with
+            // nothing sounding.
+            clearVoiceEngineMasters(vi);
             v.setPerVoicePitchBend(0.0f);
             sustainedVoice[static_cast<size_t>(vi)] = false;
             sostenutoVoice[static_cast<size_t>(vi)] = false;
@@ -1533,11 +1551,45 @@ void VoiceManager::drainRetiredSamplerSnapshots()
         v.getSampler().drainRetiredSnapshot();
 }
 
-void VoiceManager::distributeSamplerBuffer(const SamplePlayer& master, float morphMs, bool allowMorph)
+void VoiceManager::distributeSamplerBuffer(const SamplePlayer& master, float morphMs, bool allowMorph,
+                                           bool onAudioThread)
 {
     currentSamplerMaster_ = &master;
-    for (auto& v : voices)
+    for (int vi = 0; vi < MAX_VOICES; ++vi)
     {
+        auto& v = voices[static_cast<size_t>(vi)];
+        // A voice pointed at a cache position of its own follows THAT master.
+        // Same crossfade, same snapshot discipline - only the source differs.
+        const SamplePlayer* own =
+            voiceSamplerMaster_[static_cast<size_t>(vi)].load(std::memory_order_relaxed);
+        // hasAudio() as well as non-null: a master still being prepared, or one
+        // whose cache was cleared under it, would otherwise hand the voice an
+        // empty buffer - shareBufferFrom sizes playBuffer to 0 on a null
+        // snapshot, i.e. silence. Falling back to the instrument-wide master
+        // keeps the voice sounding until its own position is ready.
+        const SamplePlayer& src = (own != nullptr && own->hasAudio()) ? *own : master;
+        // Nothing to hand over. Only reachable once a per-note master exists,
+        // because the audio-thread caller gates on the instrument-wide master
+        // having audio - and there sharing an empty snapshot would size the
+        // voice's buffer to zero, i.e. silence a voice that is sounding.
+        //
+        // Empty master: skip only on the AUDIO thread, where handing a sounding
+        // voice an empty snapshot would size its buffer to zero. OFF it, no
+        // voice is skipped - active ones included. An active voice in SAMPLER
+        // mode is already protected by the branch below (it never reaches
+        // shareBufferFrom off-thread); an active voice in any OTHER mode is not
+        // sounding through this engine at all, and it is exactly the one that
+        // can be left the last owner of a snapshot its old position has since
+        // dropped - which then dies on the audio thread instead.
+        //
+        // The thread is a PARAMETER, never derived from allowMorph. allowMorph
+        // says which engine's morph is legal, and the two engines' morphs are
+        // legal on opposite threads - so reading it as a thread flag gets the
+        // polarity right in one of these functions and wrong in the other, and
+        // wrong again at the one background-thread caller that passes false
+        // deliberately (serviceSamplerReprepare, which must not morph).
+        if (! src.hasAudio() && onAudioThread)
+            continue;
         if (v.isActive() && v.getEngineMode() == SynthVoice::EngineMode::Sampler)
         {
             // Held sampler note: equal-power crossfade-follow the freshly published
@@ -1553,11 +1605,11 @@ void VoiceManager::distributeSamplerBuffer(const SamplePlayer& master, float mor
             // snapshot is freed later by drainRetiredSamplerSnapshots(), off-thread.
             // Never shareBufferFrom a held voice — that hard-swaps mid-note and clicks.
             if (allowMorph)
-                v.getSampler().morphToBufferFrom(master, morphMs);
+                v.getSampler().morphToBufferFrom(src, morphMs);
             continue;
         }
 
-        v.getSampler().shareBufferFrom(master);
+        v.getSampler().shareBufferFrom(src);
     }
 }
 
@@ -1568,20 +1620,48 @@ void VoiceManager::distributeWavetableFrames(const WavetableOscillator& masterOs
     // equal-power over the Regen XFade window — the held-note-live-follow
     // invariant); an inactive voice adopts it immediately (shareFramesFrom). Both
     // early-out on hasFrames(), so an empty master leaves every voice untouched.
-    for (auto& v : voices)
+    for (int vi = 0; vi < MAX_VOICES; ++vi)
     {
+        auto& v = voices[static_cast<size_t>(vi)];
+        const WavetableOscillator* own =
+            voiceOscMaster_[static_cast<size_t>(vi)].load(std::memory_order_relaxed);
+        const WavetableOscillator& src = (own != nullptr && own->hasFrames()) ? *own : masterOsc;
+        // The comment above is a claim about BOTH calls, and only half of it was
+        // true: morphToFramesFrom and shareFramesFrom each call
+        // syncSharedConfigFrom BEFORE their null-bank check, so an empty master
+        // still overwrote every voice's AutoScan rate, start, loop window and
+        // morph time. Harmless while the call site gated on masterOsc.hasFrames(),
+        // reachable now that a per-note master can bring it here with the
+        // instrument-wide one empty - which is exactly the cache-only preset.
+        if (! src.hasFrames())
+            continue;
         if (v.isActive() && v.getEngineMode() == SynthVoice::EngineMode::Wavetable)
-            v.getOsc().morphToFramesFrom(masterOsc);
+            v.getOsc().morphToFramesFrom(src);
         else
-            v.getOsc().shareFramesFrom(masterOsc);
+            v.getOsc().shareFramesFrom(src);
     }
 }
 
-void VoiceManager::distributeFreezeBuffer(const FreezeTextureEngine& masterFreeze, float morphMs, bool allowMorph)
+void VoiceManager::distributeFreezeBuffer(const FreezeTextureEngine& masterFreeze, float morphMs, bool allowMorph,
+                                          bool onAudioThread)
 {
     currentFreezeMaster_ = &masterFreeze;
-    for (auto& v : voices)
+    for (int vi = 0; vi < MAX_VOICES; ++vi)
     {
+        auto& v = voices[static_cast<size_t>(vi)];
+        const FreezeTextureEngine* own =
+            voiceFreezeMaster_[static_cast<size_t>(vi)].load(std::memory_order_relaxed);
+        const FreezeTextureEngine& src = (own != nullptr && own->hasAudio()) ? *own : masterFreeze;
+        // Empty master: skip only on the AUDIO thread. Off it, a voice must be
+        // handed the empty master so it releases a snapshot it may be the last
+        // owner of - HEAD did that unconditionally and this had removed it, so
+        // with a cache-only preset (no live take, sixteen full positions) the
+        // release never happened anywhere and a whole mixdown was freed inside
+        // processBlock.
+        //
+        // The thread is a PARAMETER here too - see distributeSamplerBuffer.
+        if (! src.hasAudio() && onAudioThread)
+            continue;
         const bool heldGranular = v.isActive()
             && v.getEngineMode() == SynthVoice::EngineMode::Freeze
             && v.getFreezeEngine().hasAudio();
@@ -1594,11 +1674,62 @@ void VoiceManager::distributeFreezeBuffer(const FreezeTextureEngine& masterFreez
             // audio thread). Either way, never shareBufferFrom — that hard-swaps
             // mid-grain and clicks.
             if (allowMorph)
-                v.getFreezeEngine().morphToBufferFrom(masterFreeze, morphMs);
+                v.getFreezeEngine().morphToBufferFrom(src, morphMs);
             continue;
         }
 
-        v.getFreezeEngine().shareBufferFrom(masterFreeze);
+        v.getFreezeEngine().shareBufferFrom(src);
+    }
+}
+
+void VoiceManager::setVoiceEngineMasters(int voice,
+                                         const SamplePlayer* sampler,
+                                         const WavetableOscillator* osc,
+                                         const FreezeTextureEngine* freeze)
+{
+    if (voice < 0 || voice >= MAX_VOICES)
+        return;
+    const size_t i = static_cast<size_t>(voice);
+    constexpr auto rlx = std::memory_order_relaxed;
+    voiceSamplerMaster_[i].store(sampler, rlx);
+    voiceOscMaster_[i].store(osc, rlx);
+    voiceFreezeMaster_[i].store(freeze, rlx);
+    // Nothing else to update: hasVoiceEngineMasters() reads these same three
+    // slots, so there is no side table that can fall out of step with them.
+}
+
+void VoiceManager::clearVoiceEngineMasters(int voice)
+{
+    setVoiceEngineMasters(voice, nullptr, nullptr, nullptr);
+}
+
+void VoiceManager::clearAllVoiceEngineMasters()
+{
+    // No early-out on "nobody has one". The audio thread can be installing a
+    // claim at this very moment, and an early-out that reads the mask a hair
+    // before that store walks past the one voice this call exists to revoke -
+    // which is a held note going deaf to the regenerate that is landing. 128
+    // unconditional clears cost nothing off the audio thread.
+    for (int vi = 0; vi < MAX_VOICES; ++vi)
+        clearVoiceEngineMasters(vi);
+}
+
+void VoiceManager::morphHeldFreezeVoicesToOwnMasters(float morphMs)
+{
+    if (! hasVoiceEngineMasters())
+        return;
+    for (int vi = 0; vi < MAX_VOICES; ++vi)
+    {
+        const FreezeTextureEngine* own =
+            voiceFreezeMaster_[static_cast<size_t>(vi)].load(std::memory_order_relaxed);
+        if (own == nullptr || ! own->hasAudio())
+            continue;
+        auto& v = voices[static_cast<size_t>(vi)];
+        if (! v.isActive()
+            || v.getEngineMode() != SynthVoice::EngineMode::Freeze
+            || ! v.getFreezeEngine().hasAudio())
+            continue;
+        v.getFreezeEngine().morphToBufferFrom(*own, morphMs);
     }
 }
 
@@ -1863,19 +1994,28 @@ float VoiceManager::maxHeldExpression(int src) const
     {
         if (! isKeyHeldVoice(i))
             continue;
-        const auto& v = voices[static_cast<size_t>(i)];
-        float value = 0.0f;
-        switch (src)
-        {
-            case ExprSource::Velocity: value = v.getCurrentVelocity();       break;
-            case ExprSource::X:        value = v.getPerVoicePitchBendNorm(); break;
-            case ExprSource::Y:        value = v.getTimbre();                break;
-            default:                   value = pressureForVoice(i);          break;
-        }
+        const float value = voiceExpression(i, src);
         if (std::abs(value) > std::abs(furthest))
             furthest = value;
     }
     return furthest;
+}
+
+float VoiceManager::voiceExpression(int voice, int src) const
+{
+    // None reads rest, exactly as maxHeldExpression's own early-out does - the
+    // `default:` arm below is Z's alone, because that early-out already caught
+    // None before this switch was ever extracted out of it.
+    if (voice < 0 || voice >= MAX_VOICES || src == ExprSource::None)
+        return 0.0f;
+    const auto& v = voices[static_cast<size_t>(voice)];
+    switch (src)
+    {
+        case ExprSource::Velocity: return v.getCurrentVelocity();
+        case ExprSource::X:        return v.getPerVoicePitchBendNorm();
+        case ExprSource::Y:        return v.getTimbre();
+        default:                   return pressureForVoice(voice);
+    }
 }
 
 float VoiceManager::performanceOutputGain() const
@@ -1933,6 +2073,7 @@ void VoiceManager::setDroneNote(int note, float velocity, bool lfo1TrigMode, boo
         sostenutoReleasedVoice[static_cast<size_t>(idx)] = false;
         clearPolyPressureIfReleased(displacedNote, idx);
         v.setAftertouch(pressureForNote(note));
+        clearVoiceEngineMasters(idx);   // see the mono noteOn branch
         if (v.getEngineMode() == SynthVoice::EngineMode::Sampler && currentSamplerMaster_ != nullptr)
             v.getSampler().shareBufferFrom(*currentSamplerMaster_);
         if (v.getEngineMode() == SynthVoice::EngineMode::Wavetable && currentWavetableMaster_ != nullptr)

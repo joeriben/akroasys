@@ -372,6 +372,13 @@ T5ynthProcessor::T5ynthProcessor()
 {
     paramCache.init(parameters);
 
+    // -1 is "nowhere", and zero-initialised arrays would mean "zone 0, pointed
+    // at position 0" on a voice that has never been read or pointed anywhere.
+    atVoiceCacheZone_.fill(-1);
+    atVoiceCacheBase_.fill(-1);
+    atVoiceCacheIdx_.fill(-1);
+    atVoiceCacheEngaged_.fill(false);
+
     // Load the global (machine-wide) nonlinear-filter oversampling quality from
     // the settings store into the audio-thread atomic. Default index 1 = 2×.
     {
@@ -2660,6 +2667,15 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     masterSampler.prepare(sampleRate, samplesPerBlock);
     masterFreeze.prepare(sampleRate, samplesPerBlock);
+    // The per-note cache positions are prepared at the host's rate like every
+    // other engine - but on the BUILD thread, not here. Their prepare/publish
+    // calls are not const, and that thread is the only one that ever mutates
+    // them; touching them from here would race it. Publishing the rate is
+    // enough: it is part of the stamp, so the build thread sees the change,
+    // drops what is built and re-prepares. A voice pointing at a position keeps
+    // hearing it meanwhile - the engines are never destroyed.
+    cachePosHostRate_.store(sampleRate, std::memory_order_release);
+    cachePosHostBlock_.store(samplesPerBlock, std::memory_order_release);
     voiceManager.prepare(sampleRate, samplesPerBlock);
     lfo1.prepare(sampleRate);
     lfo2.prepare(sampleRate);
@@ -3387,10 +3403,12 @@ bool T5ynthProcessor::serviceSamplerReprepare()
         // background-thread (samplerReprepareThread) call passes allowMorph=false
         // and leaves the crossfade to start on processBlock's own redistribute
         // pass instead. Off-thread → allowMorph=false (sync inactive voices only).
-        voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false);
+        voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false,
+                                             /*onAudioThread=*/false);
         // Sampler re-prepare (config change, not a new inference) → keep held
         // granular voices on their current buffer (no live morph).
-        voiceManager.distributeFreezeBuffer(masterFreeze, 0.0f, false);
+        voiceManager.distributeFreezeBuffer(masterFreeze, 0.0f, false,
+                                            /*onAudioThread=*/false);
     }
 
     return true;
@@ -3403,6 +3421,14 @@ void T5ynthProcessor::samplerReprepareThreadMain()
         samplerReprepareWorkRequested.store(false, std::memory_order_release);
         serviceSamplerReprepare();
         drainSequencerOneShotRetireBin();  // release one-shot samples the audio thread retired (off-thread)
+        // One per-note cache position per pass. Deliberately one: the work is
+        // the expensive half of loadGeneratedAudio, and sixteen back to back
+        // would hold getCallbackLock() long enough to matter. At ~5 ms a pass a
+        // sixteen-deep cache is fully travellable inside a tenth of a second.
+        serviceCachePositionEngines();
+        // Not part of the stamp, so it is refreshed rather than rebuilt - see
+        // this function's declaration.
+        refreshMorphTimeOnCachePositions();
 
         for (int i = 0; i < 5 && !samplerReprepareThreadShouldExit.load(std::memory_order_acquire); ++i)
         {
@@ -4981,16 +5007,21 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // contract (see its doc comment in SamplePlayer.h). The crossfade runs
         // over the Drift Crossfade time (Regen XFade); the generation guard makes
         // this a no-op once a held voice is current.
-        if (masterSampler.hasAudio())
+        // ...or a voice is following a per-note cache position, which can hold
+        // audio the instrument-wide master does not: a preset restores the cache
+        // without loading any of it into the master.
+        if (masterSampler.hasAudio() || voiceManager.hasVoiceEngineMasters())
             voiceManager.distributeSamplerBuffer(masterSampler,
                                                  paramCache.driftCrossfade->load(),
-                                                 /*allowMorph=*/true);
-        if (masterFreeze.hasAudio())
+                                                 /*allowMorph=*/true,
+                                                 /*onAudioThread=*/true);
+        if (masterFreeze.hasAudio() || voiceManager.hasVoiceEngineMasters())
             // Audio-thread per-block redistribution → allowMorph MUST be false
             // (morphToBufferFrom may free a retired snapshot off-thread). The
             // generation guard makes this a no-op when the buffer is unchanged.
-            voiceManager.distributeFreezeBuffer(masterFreeze, 0.0f, false);
-        if (masterOsc.hasFrames())
+            voiceManager.distributeFreezeBuffer(masterFreeze, 0.0f, false,
+                                                /*onAudioThread=*/true);
+        if (masterOsc.hasFrames() || voiceManager.hasVoiceEngineMasters())
         {
             // With a DCO/LCO-baked table the traversal was set once by
             // loadDcoWavetable (full-range motion loop) — re-deriving it from
@@ -7108,12 +7139,29 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         // (false here — morphToBufferFrom's contract confines it to the audio
         // thread, see SamplePlayer.h; this message-thread call leaves the
         // crossfade to start on processBlock's own redistribute pass instead).
-        voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false);
+        // THE PER-NOTE CLAIM ENDS HERE, and it has to. A HELD note always plays
+        // the CURRENT sample - the platform invariant, and the reason A/B drift
+        // works at all: it regenerates continuously under held notes. A voice
+        // pointed at a cache position followed THAT master unconditionally, so
+        // the sample the player just generated never reached it and the note
+        // went deaf to Regenerate for the rest of its life. The hand's claim
+        // says which of the OLD sounds this key plays; it does not outrank a
+        // new one. Released before the sweep, so the three calls below crossfade
+        // every held note onto the fresh audio over the Regen XFade - the same
+        // call, now actually pointed at the new master.
+        voiceManager.clearAllVoiceEngineMasters();
+        // ...and told to the audio thread as well, because it owns the fingers'
+        // gesture state and can be installing a claim in the same instant. See
+        // voiceCacheRearmReq_.
+        voiceCacheRearmReq_.store(true, std::memory_order_release);
+        voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false,
+                                             /*onAudioThread=*/false);
         voiceManager.distributeWavetableFrames(masterOsc);
         // New inference → held granular voices crossfade-adopt it live (near
         // real-time), mirroring distributeWavetableFrames above. Off the audio
         // thread (under getCallbackLock), so morphToBufferFrom is RT-safe here.
-        voiceManager.distributeFreezeBuffer(masterFreeze, paramCache.driftCrossfade->load(), true);
+        voiceManager.distributeFreezeBuffer(masterFreeze, paramCache.driftCrossfade->load(), true,
+                                            /*onAudioThread=*/false);
 
         samplerProcessorDebugLog("loadGeneratedAudio end masterAfter={" + masterSampler.debugStateString() + "}");
 
@@ -7129,6 +7177,378 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     // display). Outside the lock — the strip build allocates. Sampler/Freeze skip.
     if (wavetableMode)
         publishWtDisplayFromOscFrames();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-note cache positions
+// ═══════════════════════════════════════════════════════════════════════════
+// See CachePositionEngines in PluginProcessor.h for why these exist. What
+// follows is the build half; the audio-thread half that points voices at them
+// is updateVoiceCachePositions, below updateAftertouchTraversal.
+
+juce::uint64 T5ynthProcessor::cachePositionStamp() const
+{
+    // A cheap order-sensitive mix of everything that decides what a prepared
+    // position WOULD contain. Not a hash for lookup - only equality is ever
+    // asked of it, and a value it collides with is a value that produces the
+    // same audio anyway for every field here except the generation, which is a
+    // counter and cannot repeat within a session.
+    //
+    // The cache is EMPTY as far as this is concerned unless it is full: the bar
+    // does not travel a partial cache (isInferenceCacheFull gates the traversal
+    // too), and building positions for entries that are about to be joined by
+    // more would throw the work away on the next add.
+    juce::uint64 entryCount = 0;
+    {
+        const std::lock_guard<std::mutex> lk (cacheEntriesMutex_);
+        if (! isInferenceCacheFull())
+            return 0;
+        entryCount = static_cast<juce::uint64> (inferenceCacheEntries.size());
+    }
+    if (cachePosHostRate_.load (std::memory_order_acquire) <= 0.0)
+        return 0;      // prepareToPlay has not run; nothing can be prepared yet
+
+    auto mix = [] (juce::uint64 h, juce::uint64 v)
+    {
+        h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    };
+    auto bits = [] (float f)
+    {
+        juce::uint32 u = 0;
+        std::memcpy (&u, &f, sizeof (u));
+        return static_cast<juce::uint64> (u);
+    };
+
+    juce::uint64 h = 0x1234567890abcdefULL;
+    h = mix (h, bits (static_cast<float> (cachePosHostRate_.load (std::memory_order_acquire))));
+    h = mix (h, static_cast<juce::uint64> (cachePosHostBlock_.load (std::memory_order_acquire)));
+    h = mix (h, static_cast<juce::uint64> (getInferenceCacheGeneration()));
+    h = mix (h, entryCount);
+    h = mix (h, isWavetableMode() ? 1u : 2u);
+    h = mix (h, bits (paramCache.genHfBoost->load()));
+    h = mix (h, bits (paramCache.wtFrames->load()));
+    h = mix (h, bits (paramCache.loopMode->load()));
+    h = mix (h, bits (paramCache.normalize->load()));
+    h = mix (h, bits (paramCache.loopOptimize->load()));
+    h = mix (h, bits (paramCache.crossfadeMs->load()));
+    h = mix (h, masterSampler.getPointsLocked() ? 3u : 4u);
+    // AutoScan and the Regen XFade are inputs because prepareCachePosition now
+    // writes the whole transport into the position before it is published -
+    // see the comment there. Nothing writes a published position afterwards,
+    // which is what keeps the build thread out of engine state a voice is
+    // reading; the price is that moving either control rebuilds, and the bar
+    // is instrument-wide for the ~80 ms that takes.
+    h = mix (h, paramCache.wtAutoScan->load() > 0.5f ? 5u : 6u);
+    // driftCrossfade (Regen XFade) is deliberately NOT here. It is a control the
+    // player turns WHILE playing, and every step of that drag would discard all
+    // sixteen positions and rebuild them one per background pass - so for the
+    // whole drag nothing is ever finished, the per-note path stays off, and the
+    // instrument-wide bar takes over mid-gesture and starts landing whole
+    // samples. It is kept current without a rebuild instead: morphTimeMs_ is an
+    // atomic and refreshMorphTimeOnCachePositions() writes it in place.
+    if (masterSampler.getPointsLocked())
+    {
+        // All three points, but only when they are LOCKED: locked points are
+        // the player's own and apply to every entry, so they decide what every
+        // position contains. Unlocked, all three are derived from each entry's
+        // own audio and the live sampler's values are not an input at all.
+        h = mix (h, bits (masterSampler.getStartPos()));
+        h = mix (h, bits (masterSampler.getLoopStart()));
+        h = mix (h, bits (masterSampler.getLoopEnd()));
+    }
+    return h == 0 ? 1 : h;   // 0 is reserved for "no positions wanted"
+}
+
+void T5ynthProcessor::refreshMorphTimeOnCachePositions()
+{
+    const auto mask = cachePosReadyMask_.load (std::memory_order_acquire);
+    if (mask == 0)
+        return;
+    const float ms = paramCache.driftCrossfade->load();
+    for (int k = 0; k < kMaxCachePositions; ++k)
+        if ((mask & (1u << static_cast<juce::uint32> (k))) != 0)
+            cachePosEngines_[static_cast<size_t> (k)]->osc.setMorphTimeMs (ms);
+}
+
+const T5ynthProcessor::CachePositionEngines*
+T5ynthProcessor::readyCachePosition (int index) const
+{
+    if (index < 0 || index >= kMaxCachePositions)
+        return nullptr;
+    const auto mask = cachePosReadyMask_.load (std::memory_order_acquire);
+    if ((mask & (1u << static_cast<juce::uint32> (index))) == 0)
+        return nullptr;
+    // The unique_ptr itself is only ever assigned on the build thread BEFORE
+    // that thread sets the ready bit, and never cleared while a bit is set -
+    // clearing goes through the mask first (release) and the pointer stays put.
+    // So an acquire on the mask is what orders this read.
+    return cachePosEngines_[static_cast<size_t> (index)].get();
+}
+
+bool T5ynthProcessor::serviceCachePositionEngines()
+{
+    // Computed HERE rather than pushed from wherever a parameter changes: the
+    // inputs are a vector the message thread grows, engine state the callback
+    // lock guards, and a handful of APVTS atomics. One read under the lock, on
+    // the thread that acts on the answer, is both cheaper and harder to get
+    // wrong than a notification from each of a dozen sites.
+    juce::uint64 wanted = 0;
+    {
+        const juce::ScopedLock sl (getCallbackLock());
+        wanted = cachePositionStamp();
+    }
+
+    if (wanted != cachePosStampBuilt_)
+    {
+        // Everything built belongs to a stamp that is no longer current, so the
+        // engines are about to be refilled from different audio. A voice left
+        // pointing at one would be crossfaded onto a take it never travelled
+        // to - and would be reading plain transport fields while the rebuild
+        // writes them, which on CLAP nothing excludes. So the CLAIMS go back
+        // here, with the mask, and each held note crossfades onto the
+        // instrument-wide master on the next distribute pass rather than being
+        // swapped. The engines themselves are never destroyed.
+        cachePosReadyMask_.store (0, std::memory_order_release);
+        {
+            const juce::ScopedLock sl (getCallbackLock());
+            voiceManager.clearAllVoiceEngineMasters();
+            // And hand back HERE, not "on the next distribute pass". A held
+            // GRANULAR voice can only be crossfaded off the audio thread -
+            // processBlock's own freeze pass always runs allowMorph=false - and
+            // when the stamp goes to zero (the cache emptied, the depth
+            // changed) nothing is ever built again, so the sweep in
+            // prepareCachePosition never runs and that voice would play a take
+            // from a cache that no longer exists for the rest of its life.
+            // A no-op when the instrument-wide masters are empty, which is
+            // right: there is nothing to hand back to, and what is sounding
+            // keeps sounding rather than being cut.
+            voiceManager.distributeSamplerBuffer (masterSampler, 0.0f, /*allowMorph=*/false,
+                                                  /*onAudioThread=*/false);
+            voiceManager.distributeWavetableFrames (masterOsc);
+            voiceManager.distributeFreezeBuffer (masterFreeze,
+                                                 paramCache.driftCrossfade->load(), true,
+                                                 /*onAudioThread=*/false);
+        }
+        voiceCacheRearmReq_.store (true, std::memory_order_release);
+        cachePosStampBuilt_  = wanted;
+        cachePosNextToBuild_ = 0;
+        if (wanted == 0)
+            return false;      // nothing to build (cache not full)
+        return true;           // came back next pass to build position 0
+    }
+    if (wanted == 0)
+        return false;
+
+    const int index = cachePosNextToBuild_;
+    juce::AudioBuffer<float> source;
+    double sourceRate = 44100.0;
+    {
+        // The vector is grown on the message thread; copy the entry out under
+        // cacheEntriesMutex_ - NOT getCallbackLock(). A take is megabytes, and
+        // makeCopyOf under the callback lock is that memcpy with processBlock
+        // parked behind it on Standalone/VST3/AU: at the deep-and-long end of
+        // the cache that is a dropout per position built. The audio thread
+        // never reads this vector, so it has no business in this lock.
+        const std::lock_guard<std::mutex> lk (cacheEntriesMutex_);
+        const int count = juce::jmin (static_cast<int> (inferenceCacheEntries.size()),
+                                      kMaxCachePositions);
+        if (index >= count)
+            return false;                   // all built and current
+        const auto& e = inferenceCacheEntries[static_cast<size_t> (index)];
+        source.makeCopyOf (e.audio);
+        sourceRate = e.sampleRate > 0.0 ? e.sampleRate : 44100.0;
+    }
+    if (source.getNumSamples() <= 0 || source.getNumChannels() <= 0)
+    {
+        ++cachePosNextToBuild_;             // an empty entry is simply not a position
+        return true;
+    }
+
+    const double hostRate  = cachePosHostRate_.load (std::memory_order_acquire);
+    const int    hostBlock = cachePosHostBlock_.load (std::memory_order_acquire);
+    auto& slot = cachePosEngines_[static_cast<size_t> (index)];
+    if (slot == nullptr)
+        slot = std::make_unique<CachePositionEngines>();
+    if (hostRate != slot->preparedRate || hostBlock != slot->preparedBlock)
+    {
+        // Under the lock, because this is the one write to a position's engines
+        // that is not a snapshot publish: prepare() resizes buffers and resets
+        // plain members, and a voice already pointed at this position reads
+        // those through shareBufferFrom on the audio thread. Only ever taken on
+        // the first build of a position and after a host rate change.
+        const juce::ScopedLock sl (getCallbackLock());
+        slot->sampler.prepare (hostRate, hostBlock);
+        slot->freeze .prepare (hostRate, hostBlock);
+        slot->osc    .prepare (hostRate, hostBlock);
+        slot->preparedRate  = hostRate;
+        slot->preparedBlock = hostBlock;
+    }
+
+    if (! prepareCachePosition (*slot, source, sourceRate))
+    {
+        ++cachePosNextToBuild_;
+        return true;
+    }
+
+    // Publish the bit LAST and with release, so a voice that sees it also sees
+    // the three snapshots. If the stamp moved while this position was being
+    // prepared, the next pass throws it away wholesale (above) - marking it
+    // ready here regardless is deliberate: it is not WRONG audio, only audio
+    // built for the configuration of a moment ago, and it is about to be
+    // rebuilt anyway.
+    cachePosReadyMask_.fetch_or (1u << static_cast<juce::uint32> (index),
+                                 std::memory_order_release);
+    ++cachePosNextToBuild_;
+    return true;
+}
+
+bool T5ynthProcessor::prepareCachePosition (CachePositionEngines& dest,
+                                            const juce::AudioBuffer<float>& raw,
+                                            double sr)
+{
+    // The same pipeline loadGeneratedAudio runs for the live master, on another
+    // set of engines and without any of the instrument-wide side effects: no
+    // waveform snapshot, no generatedAudioFull, no reprepare source, no
+    // wavetable traversal, no LCO bake state. A position is audio and nothing
+    // else. Everything that shapes the audio is shared with the live path
+    // deliberately - a position conditioned differently is a different sound,
+    // and the player would hear the bar change the timbre rather than the take.
+    const bool hfOn = paramCache.genHfBoost->load() > 0.5f;
+    juce::AudioBuffer<float> feed = conditionGeneratedSource (raw, sr, hfOn);
+    if (feed.getNumSamples() <= 0 || feed.getNumChannels() <= 0)
+        return false;
+
+    SamplePlayer::PrepareConfig config;
+    bool autoPositionPoints = false;
+    {
+        const juce::ScopedLock sl (getCallbackLock());
+        syncSamplerSettingsFromParametersLocked();
+        config = masterSampler.capturePrepareConfig();
+        autoPositionPoints = ! masterSampler.getPointsLocked();
+    }
+
+    float activeStartFrac = 0.0f;
+    float activeEndFrac   = 1.0f;
+    if (autoPositionPoints)
+    {
+        // Per ENTRY, from that entry's own audio - two takes do not share a loop
+        // window. The live path writes its regions back into the sampler's
+        // points; this one deliberately does not touch them, because P1/P2/P3
+        // are one set of controls on the panel and sixteen positions cannot all
+        // own them.
+        const auto regions = analyzeGeneratedRegions (feed, sr, config.loopMode);
+        activeStartFrac = regions.activeStartFrac;
+        activeEndFrac   = regions.activeEndFrac;
+        config.loopStartFrac = regions.loopStartFrac;
+        config.loopEndFrac   = regions.loopEndFrac;
+        // P1 comes from THIS entry too, not from the live sampler. The live
+        // path keeps the player's P1 where the new audio allows it, but the
+        // live path has one entry to be consistent with and this has sixteen:
+        // the same P1 sits inside one take's active region and outside the
+        // next one's, so following it would make a position's start depend on
+        // which take happened to play last. Worse, it does not settle - a
+        // landing rewrites P1 (loadGeneratedAudio), the rewrite changes the
+        // stamp, the stamp throws away all sixteen positions, and the next
+        // landing does it again, so the per-note path never gets to come up.
+        // Unlocked means derived per entry; this is the rest of that rule.
+        config.startPosFrac = activeStartFrac;
+    }
+
+    const bool wavetableMode = isWavetableMode();
+    const auto wtMapping = makeWtTraversalMapping (feed.getNumSamples(),
+                                                   config.startPosFrac,
+                                                   config.loopStartFrac,
+                                                   config.loopEndFrac);
+    const float extractStart = wavetableMode ? wtMapping.extractStart : config.loopStartFrac;
+    const float extractEnd   = wavetableMode ? wtMapping.extractEnd   : config.loopEndFrac;
+
+    constexpr int frameCounts[] = { 32, 64, 128, 256 };
+    const int fcIdx = static_cast<int> (paramCache.wtFrames->load());
+    const int maxFrames = frameCounts[juce::jlimit (0, 3, fcIdx)];
+
+    auto preparedSampler = dest.sampler.prepareBufferLoad (feed, sr, config);
+    auto freezeBuffer    = makeFreezeLoadBuffer (feed, sr, config.normalizeOn,
+                                                 activeStartFrac, activeEndFrac,
+                                                 masterSampler);
+    auto preparedFreeze  = dest.freeze.prepareBufferLoad (freezeBuffer, sr);
+    auto preparedMip     = wavetableMode
+        ? dest.osc.prepareFramesFromBuffer (feed, sr, extractStart, extractEnd, maxFrames)
+        : dest.osc.prepareContiguousFrames (feed, sr, extractStart, extractEnd);
+
+    {
+        // Publish under the same lock loadGeneratedAudio publishes under, and
+        // for the same reason: it is the one that is real on Standalone/VST3/AU.
+        // On CLAP the three atomic stores inside the apply calls are what holds.
+        //
+        // NO distribute* here. A voice adopts a position on the audio thread's
+        // own pass (processBlock's distributeSamplerBuffer et al.), which is
+        // where morphToBufferFrom is allowed to run and where the Regen XFade is
+        // applied - exactly as a regenerate does.
+        const juce::ScopedLock sl (getCallbackLock());
+        voiceManager.drainRetiredSamplerSnapshots();
+        dest.sampler.applyPreparedBufferLoad (std::move (preparedSampler), config);
+        // The transport, from THIS position's own length and points, written
+        // while nothing can be reading it: the position is not in
+        // cachePosReadyMask_ yet, so no voice can hold a pointer to it. That
+        // ordering is the whole reason this is here and not on a per-pass sweep
+        // - these are plain fields a voice reads through syncSharedConfigFrom
+        // on the audio thread, and on CLAP getCallbackLock() does not exclude
+        // it. Every input is in cachePositionStamp(), so a control the player
+        // moves rebuilds rather than reaching in behind a sounding voice.
+        {
+            WavetableOscillator::LoopMode oscLoopMode;
+            switch (config.loopMode)
+            {
+                case SamplePlayer::LoopMode::OneShot:  oscLoopMode = WavetableOscillator::LoopMode::OneShot;  break;
+                case SamplePlayer::LoopMode::PingPong: oscLoopMode = WavetableOscillator::LoopMode::PingPong; break;
+                default:                               oscLoopMode = WavetableOscillator::LoopMode::Loop;     break;
+            }
+            dest.sampler.setWtExtractStart (wtMapping.extractStart);
+            dest.sampler.setWtExtractEnd   (wtMapping.extractEnd);
+            dest.osc.setAutoScanStartPos (wtMapping.startInExtract);
+            dest.osc.setAutoScanLoop (wtMapping.loopStartInExtract,
+                                      wtMapping.loopEndInExtract, oscLoopMode);
+            if (paramCache.wtAutoScan->load() > 0.5f)
+            {
+                dest.osc.setAutoScan (true);
+                dest.osc.setAutoScanRate (sr > 0.0 ? sr : 44100.0, wtMapping.regionSamples);
+            }
+            else
+            {
+                dest.osc.setAutoScan (false);
+            }
+        }
+        dest.freeze .applyPreparedBufferLoad (std::move (preparedFreeze));
+        dest.osc    .applyPreparedMipData    (std::move (preparedMip));
+        dest.osc.setMorphTimeMs (paramCache.driftCrossfade->load());
+        // THE SWEEP, and it is not optional. Publishing drops this position's
+        // own reference to the three snapshots it held a moment ago, and a
+        // voice that is still holding one is then its LAST owner - so the next
+        // audio-thread assignment that displaces it (noteOn's shareBufferFrom,
+        // a morph completing) would free megabytes on the audio thread. Every
+        // other publish site in this file follows itself with exactly these
+        // three calls for exactly that reason (loadGeneratedAudio,
+        // serviceSamplerReprepare); a position is no different, and it is the
+        // one that can go unswept for a whole idle stretch because
+        // skipSynthesis stops the audio thread's own distribute pass.
+        //
+        // Same arguments those callers pass. allowMorph=false for the sampler
+        // (morphToBufferFrom is audio-thread-only by contract - the crossfade
+        // starts on processBlock's next pass); wavetable and granular crossfade
+        // here, off the audio thread, over the Regen XFade. Each loop reads
+        // each voice's OWN master, so a voice following another position is
+        // handed that one and not this.
+        voiceManager.distributeSamplerBuffer (masterSampler, 0.0f, /*allowMorph=*/false,
+                                              /*onAudioThread=*/false);
+        voiceManager.distributeWavetableFrames (masterOsc);
+        voiceManager.distributeFreezeBuffer (masterFreeze,
+                                             paramCache.driftCrossfade->load(), true,
+                                             /*onAudioThread=*/false);
+        dest.sourceSamples = feed.getNumSamples();
+        dest.sourceRate    = sr > 0.0 ? sr : 44100.0;
+    }
+    return true;
 }
 
 void T5ynthProcessor::loadDcoWavetable(const juce::AudioBuffer<float>& frameStrip,
@@ -7319,7 +7739,8 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
             waveformSnapshot = std::move(preparedWaveformSnapshot);
         // Held sampler notes crossfade onto the reprocessed sample on the next
         // audio-thread distribute pass (off-thread → allowMorph=false).
-        voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false);
+        voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false,
+                                             /*onAudioThread=*/false);
         if (masterOsc.hasFrames())
         {
             dcoTableActive_.store(false, std::memory_order_relaxed);  // re-extracted from processed audio above
@@ -7333,7 +7754,8 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         // Reprocessed audio (e.g. Rumble/HF/Normalize changed) → held granular
         // voices crossfade-adopt it live, like Wavetable above. Off the audio
         // thread (under getCallbackLock), so morphToBufferFrom is RT-safe here.
-        voiceManager.distributeFreezeBuffer(masterFreeze, paramCache.driftCrossfade->load(), true);
+        voiceManager.distributeFreezeBuffer(masterFreeze, paramCache.driftCrossfade->load(), true,
+                                            /*onAudioThread=*/false);
 
         samplerProcessorDebugLog("reloadProcessedAudio end masterAfter={" + masterSampler.debugStateString() + "}");
 
@@ -7406,7 +7828,13 @@ void T5ynthProcessor::setInferenceCacheCapacity(int capacity)
     if (sanitized == inferenceCacheCapacity)
         return;
 
-    inferenceCacheCapacity = sanitized;
+    // Under the same mutex clearInferenceCache takes: the position builder reads
+    // this alongside the entries (isInferenceCacheFull), and the two must not
+    // part company even for one pass.
+    {
+        const std::lock_guard<std::mutex> lk(cacheEntriesMutex_);
+        inferenceCacheCapacity = sanitized;
+    }
     clearInferenceCache();   // publishes the zone count for us
 }
 
@@ -7415,10 +7843,20 @@ void T5ynthProcessor::clearInferenceCache()
     // Anything still on its way: a position posted into a cache that is being
     // emptied must not install into whatever fills it next.
     atCachePosReq_.store(0, std::memory_order_release);
-    inferenceCacheEntries.clear();
-    inferenceCachePlaybackIndex = 0;
-    inferenceCacheIsOfflineTake = false;   // whatever it held, it is gone with it
-    publishInferenceCacheTraversableZones();
+    // UNDER cacheEntriesMutex_, because this vector is no longer read only by
+    // the thread that writes it: the per-note position builder reads it from
+    // samplerReprepareThread (see serviceCachePositionEngines), and a clear
+    // that reallocates or frees underneath that read is a use-after-free on
+    // the entries' AudioBuffers. Emptied by swapping into a local so the actual
+    // deallocation happens after the mutex is released.
+    std::vector<InferenceCacheEntry> doomed;
+    {
+        const std::lock_guard<std::mutex> lk(cacheEntriesMutex_);
+        doomed.swap(inferenceCacheEntries);
+        inferenceCachePlaybackIndex = 0;
+        inferenceCacheIsOfflineTake = false;   // whatever it held, it is gone with it
+        publishInferenceCacheTraversableZones();
+    }
 }
 
 void T5ynthProcessor::publishInferenceCacheTraversableZones()
@@ -7439,13 +7877,22 @@ bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buf
         || buffer.getNumChannels() <= 0)
         return false;
 
+    // The COPY happens off the lock - it is the expensive part (a whole take)
+    // and nothing else can see the local yet.
     InferenceCacheEntry entry;
     entry.audio.makeCopyOf(buffer);
     entry.sampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
-    inferenceCacheEntries.push_back(std::move(entry));
-    if (isInferenceCacheFull())
-        inferenceCachePlaybackIndex = 0;
-    publishInferenceCacheTraversableZones();
+
+    // The push_back is under the mutex, for the reason clearInferenceCache
+    // states: the position builder reads this vector from another thread, and a
+    // push_back that reallocates frees the storage out from under that read.
+    {
+        const std::lock_guard<std::mutex> lk(cacheEntriesMutex_);
+        inferenceCacheEntries.push_back(std::move(entry));
+        if (isInferenceCacheFull())
+            inferenceCachePlaybackIndex = 0;
+        publishInferenceCacheTraversableZones();
+    }
     return true;
 }
 
@@ -7549,6 +7996,136 @@ int traversalZone(float pressure, float amount, int zones, int currentZone)
 }
 } // namespace
 
+void T5ynthProcessor::updateVoiceCachePositions(float cacheAmt, int cacheSrc, int zones)
+{
+    // Audio thread. Every held key resolves its OWN position out of its own
+    // reading on the bar's axis, and is pointed at the master prepared for that
+    // position. Pointing is all this does: the crossfade onto it is the audio
+    // thread's own distribute pass a few hundred lines up in processBlock,
+    // over the same Regen XFade every other buffer change uses. Nothing here
+    // allocates, locks or blocks.
+    //
+    // No mailbox, no engage-once claim, no acted index. That machinery exists
+    // because an instrument-wide landing is a whole load - in the LRO a Csound
+    // recompile - so it must happen once per position the hand reaches and
+    // never under a motionless finger. Here a landing is one pointer, and
+    // morphToBufferFrom's own pointer-identity guard makes a repeat free. What
+    // does carry over is the rule that THE HAND HAS TO MOVE, per voice: a key
+    // taken and not yet moved sits at the step it landed on, and until it is
+    // carried off that step the voice keeps the sound the instrument is playing
+    // instead of crossfading to cache entry 0 on touch-down.
+    atVoiceCacheActive_ = true;
+    bool repointed = false;
+    for (int i = 0; i < VoiceManager::MAX_VOICES; ++i)
+    {
+        const size_t vi = static_cast<size_t>(i);
+        if (! voiceManager.isVoiceKeyHeld(i))
+        {
+            // Not a hand. The voice is free, releasing, or held by a pedal or a
+            // sequencer - and a releasing voice must keep the sample it is
+            // playing, so the POINTER is deliberately left where it is. Only the
+            // gesture is forgotten, so the next key on this voice starts from a
+            // bearing. noteOn clears the pointer itself.
+            atVoiceCacheZone_[vi]    = -1;
+            atVoiceCacheBase_[vi]    = -1;
+            atVoiceCacheIdx_[vi]     = -1;
+            atVoiceCacheEngaged_[vi] = false;
+            atVoiceCacheEpoch_[vi]   = voiceManager.getVoice(i).triggerEpoch;
+            atVoiceCacheChan_[vi]    = voiceManager.voiceExprChannel(i);
+            continue;
+        }
+
+        // The voice changed hands without ever being idle, so the branch above
+        // never got to forget anything. Two ways that happens: a STEAL - a fresh
+        // strike on a voice whose old key was still down, which bumps
+        // triggerEpoch - and the mono LEGATO hand-off, which is deliberately not
+        // a fresh strike but IS a new finger on a new member channel (the same
+        // place re-bases Y and zeroes X for exactly this reason).
+        //
+        // Two things go wrong without it, both silent. The new key arrives
+        // already ENGAGED, so it lands a position with no hand having moved -
+        // and after the legato hand-off it lands the FIRST one, because X was
+        // just zeroed under it. And the index it inherited makes the position it
+        // resolves to look like the one it already holds, so the re-point is
+        // skipped and the voice sits on the instrument-wide master until the
+        // hand has visited another position and come back.
+        const juce::uint64 epoch = voiceManager.getVoice(i).triggerEpoch;
+        const int          chan  = voiceManager.voiceExprChannel(i);
+        if (epoch != atVoiceCacheEpoch_[vi] || chan != atVoiceCacheChan_[vi])
+        {
+            atVoiceCacheEpoch_[vi]   = epoch;
+            atVoiceCacheChan_[vi]    = chan;
+            atVoiceCacheZone_[vi]    = -1;
+            atVoiceCacheBase_[vi]    = -1;
+            atVoiceCacheIdx_[vi]     = -1;
+            atVoiceCacheEngaged_[vi] = false;
+        }
+
+        const float reading = voiceManager.voiceExpression(i, cacheSrc);
+        const int zone = traversalZone(reading, cacheAmt, zones,
+                                       static_cast<int>(atVoiceCacheZone_[vi]));
+        if (zone < 0)
+            continue;
+        atVoiceCacheZone_[vi] = static_cast<int16_t>(zone);
+
+        if (! atVoiceCacheEngaged_[vi])
+        {
+            if (atVoiceCacheBase_[vi] < 0)
+                atVoiceCacheBase_[vi] = static_cast<int16_t>(zone);
+            else if (zone != atVoiceCacheBase_[vi])
+                atVoiceCacheEngaged_[vi] = true;
+        }
+        if (! atVoiceCacheEngaged_[vi])
+            continue;
+
+        // The sign of the bar is the direction of travel through the cache,
+        // exactly as on the instrument-wide path.
+        const int idx = cacheAmt > 0.0f ? zone : (zones - 1 - zone);
+        if (idx == atVoiceCacheIdx_[vi])
+            continue;                       // already pointed there
+        const auto* pos = readyCachePosition(idx);
+        if (pos == nullptr)
+            continue;                       // not prepared yet - keep what is playing
+        atVoiceCacheIdx_[vi] = static_cast<int16_t>(idx);
+        voiceManager.setVoiceEngineMasters(i, &pos->sampler, &pos->osc, &pos->freeze);
+        repointed = true;
+    }
+    if (repointed)
+    {
+        // Not only for Freeze. A sampler voice that morphed on THIS pass has a
+        // full reclaim slot, and its next morph is refused until the message
+        // thread empties it - so a scrub has to keep asking, once per pass on
+        // which anything moved. Idempotent and collapsing, so a fast hand that
+        // crosses three positions in one message-loop turn costs one drain.
+        voiceCacheServicePending_.store(true, std::memory_order_release);
+        triggerAsyncUpdate();
+    }
+}
+
+void T5ynthProcessor::rearmVoiceCacheTraversal()
+{
+    // The GESTURE is forgotten, the POINTERS are not. A voice that is sounding a
+    // position keeps sounding it: the bar going to zero, the axis changing under
+    // the hand, or the cache being replaced, is not an instruction to crossfade
+    // every held note back to whatever the instrument-wide master happens to
+    // hold. noteOn clears the pointer, so the next key on that voice starts
+    // fresh. Same rule as every re-arm on the instrument-wide path: it PERMITS
+    // the next landing, it does not fire one - every voice takes a bearing again
+    // and has to be carried off it.
+    atVoiceCacheZone_.fill(-1);
+    atVoiceCacheBase_.fill(-1);
+    atVoiceCacheIdx_.fill(-1);
+    atVoiceCacheEngaged_.fill(false);
+}
+
+void T5ynthProcessor::releaseVoiceCachePositions()
+{
+    if (! atVoiceCacheActive_)
+        return;
+    atVoiceCacheActive_ = false;
+    rearmVoiceCacheTraversal();
+}
+
 void T5ynthProcessor::cancelParkedCachePosition()
 {
     // What is PARKED, and only that. A position already in a mailbox was asked
@@ -7568,6 +8145,16 @@ void T5ynthProcessor::cancelParkedCachePosition()
 void T5ynthProcessor::cancelParkedSnapSlot()
 {
     atSnapCancelSeq_.store(atPostSeq_, std::memory_order_release);   // parked only - see above
+}
+
+bool T5ynthProcessor::arpIsHoldingKeys() const
+{
+    // processBlock's `arpHoldingKeys`, in one place both it and the cache bar
+    // can ask. The enable term is not optional - see its comment there.
+    const int arpModeRaw = static_cast<int>(paramCache.arpMode->load());
+    return arpModeRaw > 0
+        && ! replayModeActive_.load(std::memory_order_acquire)
+        && arpeggiator.hasHeldKeys();
 }
 
 void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
@@ -7622,6 +8209,8 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         atCacheEngaged_ = false; atCacheBaseZone_ = -1;
         cancelParkedCachePosition();
     }
+    if (cacheAmt == 0.0f)
+        releaseVoiceCachePositions();   // idempotent; held notes keep their sample
     if (snapAmt == 0.0f && (atSnapZone_ >= 0 || atSnapActedSlot_ >= 0
                             || atSnapEngaged_ || atSnapBaseZone_ >= 0))
     {
@@ -7724,6 +8313,10 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
     }
     if (cacheSrc != atCacheSrc_)
     {
+        // Per note as well as instrument-wide: every voice's reading jumps from
+        // wherever the old axis stood to wherever the new one does, in one
+        // block, under fingers that have not stirred.
+        rearmVoiceCacheTraversal();
         atCacheSrc_       = cacheSrc;
         atCacheZone_      = -1;
         atCacheActedIdx_  = -1;
@@ -7845,7 +8438,82 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
             atCacheActedIdx_ = -1;
             atCacheEngaged_  = false;   // permits, does not fire - see below
             atCacheBaseZone_ = -1;
+            // And per note, for the same reason: position 3 of the cache that
+            // has just replaced this one says nothing about position 3 of the
+            // one the fingers were travelling.
+            rearmVoiceCacheTraversal();
         }
+        // ── PER NOTE ────────────────────────────────────────────────────────
+        // MPE means per note, so on the neural oscillator every held key steers
+        // its OWN position and the instrument-wide claim above steps aside.
+        // Everything below it - one zone, one index, one mailbox, one
+        // instrument-wide install - is what makes two fingers move one sample
+        // together, and it stays for the cases that genuinely have only one
+        // reading to give:
+        //
+        //   the LRO, where a position is an orchestra and one Csound instance
+        //   compiles one of them (per note there is a different instrument, not
+        //   a different wiring);
+        //
+        //   the arpeggiator, whose chord is held by fingers that make no voice
+        //   at all between steps - there is nothing per-note to read, and the
+        //   instrument-wide path already repairs that gap through
+        //   pressureForHeldNote;
+        //
+        //   and the moments before the positions are prepared, right after a
+        //   cache fills or a parameter changes what they would contain.
+        // A new instrument-wide sound landed since the last pass: every claim
+        // goes back and every finger takes a fresh bearing. Done HERE, on the
+        // audio thread, because the message thread's own revoke cannot see a
+        // claim this thread is in the middle of installing - and because the
+        // gesture arrays are this thread's alone.
+        //
+        // ABOVE the perNote test, not inside updateVoiceCachePositions: the
+        // request is raised by the two events that also EMPTY the ready mask,
+        // and perNote requires a non-empty mask - so consuming it in there
+        // meant the one branch that most needed it could never reach it, and
+        // the flag sat raised until some unrelated gesture rebuilt a position.
+        if (voiceCacheRearmReq_.exchange(false, std::memory_order_acq_rel))
+        {
+            voiceManager.clearAllVoiceEngineMasters();
+            rearmVoiceCacheTraversal();
+            // The granular half of the hand-back is not this thread's to make -
+            // see voiceCacheHandBackReq_.
+            voiceCacheHandBackReq_.store(true, std::memory_order_release);
+            triggerAsyncUpdate();
+        }
+
+        // ...and NOT while the ARPEGGIATOR holds keys. Its chord is held by
+        // fingers that make no voice at all between steps, so those keys have
+        // no per-note reading to give - the repair for that is the
+        // instrument-wide path's pressureForHeldNote, a few lines up. A
+        // computer-keyboard key IS a key-held voice, though, so one finger down
+        // beside a running arp flipped this true and took the arp's own bar
+        // away for as long as it was held. The arp's ENABLE state is part of
+        // the question: hasHeldKeys() alone is true whenever any key is down,
+        // arp on or off - the same reason processBlock writes
+        // `arpEnabled && arpeggiator.hasHeldKeys()` and never the second half
+        // on its own.
+        const bool perNote = ! lro
+                          && ! arpIsHoldingKeys()
+                          && zones > 0
+                          && voiceManager.getKeyHeldVoiceCount() > 0
+                          && cachePosReadyMask_.load(std::memory_order_acquire) != 0;
+        if (perNote)
+        {
+            updateVoiceCachePositions(cacheAmt, cacheSrc, zones);
+            // The instrument-wide claim is not in charge, so it is held
+            // re-armed rather than left standing: when the per-note path hands
+            // back (the player switches to the LRO, or lets go and lets the
+            // arpeggiator run) the bar takes a bearing first. A re-arm PERMITS
+            // the next landing, it does not fire one - the same rule as every
+            // other re-arm in this function.
+            atCacheZone_ = -1; atCacheActedIdx_ = -1;
+            atCacheEngaged_ = false; atCacheBaseZone_ = -1;
+            return;
+        }
+        releaseVoiceCachePositions();
+
         const int zone = traversalZone(cachePressure, cacheAmt, zones, atCacheZone_);
         if (zone >= 0)
         {
@@ -10798,6 +11466,32 @@ void T5ynthProcessor::handleAsyncUpdate()
     // make the patch agree with what the two of them now say.
     if (authorReconcileWanted_.exchange(false, std::memory_order_acq_rel))
         reconcileAuthorSettings();
+
+    // A voice was pointed at a per-note cache position last block. Two jobs,
+    // both the message thread's alone - see voiceCacheServicePending_.
+    if (voiceCacheServicePending_.exchange(false, std::memory_order_acq_rel))
+    {
+        const juce::ScopedLock sl(getCallbackLock());
+        // Empty the one-deep reclaim slots FIRST, so the sampler morph the
+        // audio thread will attempt on its very next pass is not refused. This
+        // frees std::vector<float>s, which is why it can only happen here.
+        voiceManager.drainRetiredSamplerSnapshots();
+        // The granular morph, over the same Regen XFade every other buffer
+        // change uses; idempotent, so collapsing several requests loses nothing.
+        voiceManager.morphHeldFreezeVoicesToOwnMasters(paramCache.driftCrossfade->load());
+    }
+
+    // The other direction: the audio thread took every claim back and a held
+    // granular voice has to be crossfaded onto the instrument-wide master, which
+    // only this thread may do. Same call the two off-thread revokes make for
+    // themselves; a no-op when that master is empty, and the generation guard
+    // makes a repeat free.
+    if (voiceCacheHandBackReq_.exchange(false, std::memory_order_acq_rel))
+    {
+        const juce::ScopedLock sl(getCallbackLock());
+        voiceManager.distributeFreezeBuffer(masterFreeze, paramCache.driftCrossfade->load(), true,
+                                            /*onAudioThread=*/false);
+    }
 
     // XL DAW-mode transport buttons: toggle on the message thread (setValueNotifyingHost
     // locks, so it must not run on the audio thread). Consumed before — and independently

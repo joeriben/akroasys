@@ -902,6 +902,141 @@ private:
     int csoundControlsRevision_ = 0;
     SamplePlayer masterSampler;
     FreezeTextureEngine masterFreeze;
+
+    // ── Per-note cache positions ──────────────────────────────────────────────
+    // MPE means PER NOTE, and one cache position is a whole sample. The three
+    // masters above can hold exactly one, so a bar riding them moves every note
+    // at once - which is what a channel-wide aftertouch does, not what a
+    // per-note controller does. Two fingers at two lateral positions have to be
+    // able to play two different entries.
+    //
+    // So every cache entry gets a master of its own, prepared through the same
+    // pipeline loadGeneratedAudio uses for the live one (prepareCachePosition
+    // below shares its conditioning and its prepare calls, because a position
+    // conditioned differently is a different sound). A voice is then pointed at
+    // one of these instead of at the instrument-wide master
+    // (VoiceManager::setVoiceEngineMasters) and crossfades onto it over the same
+    // Regen XFade every other buffer change uses.
+    //
+    // Built on samplerReprepareThread, ONE position per pass: the work is the
+    // expensive half of loadGeneratedAudio (region analysis, normalisation, the
+    // mip FFT, the freeze mixdown) and doing sixteen of them in one go would
+    // stall whichever thread ran it. Until a position is ready the voice keeps
+    // the instrument-wide master, so the bar simply has less travel for a moment
+    // rather than falling silent.
+    struct CachePositionEngines
+    {
+        SamplePlayer        sampler;
+        FreezeTextureEngine freeze;
+        WavetableOscillator osc;
+        double preparedRate = 0.0;   // build thread only: what prepare() was last given
+        int    preparedBlock = 0;
+        // The conditioned source this position was built from, for the transport
+        // half of syncWavetableTraversal: extract brackets and the AutoScan rate
+        // are derived from the sample's OWN length, and two takes are not the
+        // same length.
+        int    sourceSamples = 0;
+        double sourceRate = 44100.0;
+    };
+    static constexpr int kMaxCachePositions = 16;   // sanitizeCacheCapacity's ceiling
+    std::array<std::unique_ptr<CachePositionEngines>, kMaxCachePositions> cachePosEngines_;
+    // Bit k: position k holds audio prepared from cache entry k under the
+    // CURRENT stamp. Written on the build thread, read on the audio thread.
+    std::atomic<juce::uint32> cachePosReadyMask_ { 0 };
+    juce::uint64 cachePosStampBuilt_ = 0;     // build thread only
+    int          cachePosNextToBuild_ = 0;    // build thread only
+    // The host's rate and block size, written by prepareToPlay and read by the
+    // build thread. Part of the stamp, so a rate change invalidates what is
+    // built the same way a parameter change does - and the engines themselves
+    // are re-prepared on the BUILD thread, which is the only thread that ever
+    // mutates them (prepareBufferLoad and prepareFramesFromBuffer are not const).
+    std::atomic<double> cachePosHostRate_ { 0.0 };
+    std::atomic<int>    cachePosHostBlock_ { 0 };
+
+    /** Guards inferenceCacheEntries and inferenceCacheCapacity between the
+     *  message thread that fills them and the position builder that reads them.
+     *  NOT getCallbackLock(): the audio thread never touches this vector (it
+     *  asks inferenceCacheTraversableZones_, an atomic, for exactly that
+     *  reason), and using the callback lock parked it for a whole-take
+     *  makeCopyOf - megabytes of memcpy with processBlock waiting, which on a
+     *  deep cache of long takes is a dropout per position built. */
+    mutable std::mutex cacheEntriesMutex_;
+    /** What the positions must match to be current. Cheap enough to call per
+     *  block; message/audio thread safe (atomics and parameter reads only). */
+    juce::uint64 cachePositionStamp() const;
+    /** Build at most one position. Returns true if it did work. Runs on
+     *  samplerReprepareThread; publishes under getCallbackLock(). */
+    bool serviceCachePositionEngines();
+    /** One cache entry through loadGeneratedAudio's own conditioning and prepare
+     *  calls, into `dest`. Off the audio thread. False when the entry is empty. */
+    bool prepareCachePosition(CachePositionEngines& dest,
+                              const juce::AudioBuffer<float>& raw,
+                              double sr);
+    /** Push the live Regen XFade onto every built position, in place. The one
+     *  thing a position needs kept current that must NOT be in the stamp: it is
+     *  a control the player turns while playing, and rebuilding on every step of
+     *  that drag takes the per-note path off for the whole gesture. Safe to write
+     *  under a sounding voice because morphTimeMs_ is an atomic scalar. */
+    void refreshMorphTimeOnCachePositions();
+    /** The prepared engines for a cache position, or nullptr when that position
+     *  is not (yet) current. Audio-thread safe. */
+    const CachePositionEngines* readyCachePosition(int index) const;
+    /** Per-note traversal state - the instrument-wide atCacheZone_/BaseZone_/
+     *  Engaged_ triple, once per voice. Audio thread only. */
+    std::array<int16_t, VoiceManager::MAX_VOICES> atVoiceCacheZone_ {};
+    std::array<int16_t, VoiceManager::MAX_VOICES> atVoiceCacheBase_ {};
+    std::array<int16_t, VoiceManager::MAX_VOICES> atVoiceCacheIdx_ {};
+    std::array<bool,    VoiceManager::MAX_VOICES> atVoiceCacheEngaged_ {};
+    // Whose gesture the state above belongs to: the voice's fresh-strike epoch
+    // and the member channel it answers. A voice changes hands in two ways that
+    // are otherwise invisible from here - a STEAL (a fresh strike on a voice
+    // whose old key was still down) and the mono LEGATO hand-off (a new finger
+    // on a new member channel, deliberately without a fresh strike) - and in
+    // both the gesture standing here belongs to a finger that is gone.
+    std::array<juce::uint64, VoiceManager::MAX_VOICES> atVoiceCacheEpoch_ {};
+    std::array<int,          VoiceManager::MAX_VOICES> atVoiceCacheChan_ {};
+    bool atVoiceCacheActive_ = false;   // the per-note path was in charge last block
+    // At least one voice was pointed at a new position and the message thread
+    // has work to finish for it. TWO things, both of which only it may do:
+    //
+    //  - A held GRANULAR voice still has to crossfade onto its new buffer. The
+    //    audio thread cannot make that one itself, because
+    //    FreezeTextureEngine::morphToBufferFrom frees retired snapshots.
+    //  - Every voice that DID morph on the audio thread (sampler) parked its
+    //    old snapshot in a one-deep reclaim slot, and SamplePlayer::
+    //    morphToBufferFrom REFUSES while that slot is full. Without a drain in
+    //    the scrub's own loop, the four existing drain sites only ever run on a
+    //    publish (regenerate / re-prepare / position build), so a held sampler
+    //    note followed the bar exactly once and then stopped.
+    std::atomic<bool> voiceCacheServicePending_ { false };
+    /** The audio thread revoked the claims itself and a held GRANULAR voice
+     *  still has to be crossfaded back to the instrument-wide master. It cannot
+     *  do that one: processBlock's own freeze pass never morphs (allowMorph is
+     *  false there by contract), and morphHeldFreezeVoicesToOwnMasters only ever
+     *  reaches a voice's OWN master, which the revoke has just set to null - so
+     *  without this the note would go on playing a cache take across the very
+     *  regenerate the revoke exists to deliver. Sampler and wavetable need no
+     *  hop: their audio-thread morph falls back to the instrument-wide master
+     *  by itself. */
+    std::atomic<bool> voiceCacheHandBackReq_ { false };
+    /** A new instrument-wide sound has landed, so every per-note claim is void
+     *  and every finger has to earn its position again. Raised off the audio
+     *  thread, consumed by updateVoiceCachePositions ON it - which is the only
+     *  way to close the window where the audio thread installs a claim between
+     *  the message thread's revoke and its distribute pass, and the only place
+     *  the per-voice gesture state may be touched. Without the gesture re-arm a
+     *  voice keeps its old landed index, that index still matches the zone the
+     *  motionless finger is standing in, and the bar simply stops working under
+     *  that finger until it leaves the zone and comes back. */
+    std::atomic<bool> voiceCacheRearmReq_ { false };
+    /** Whether the arpeggiator is on AND holding keys - the condition under
+     *  which the cache bar must stay instrument-wide, because an arpeggiated
+     *  chord makes no voice to read per note. */
+    bool arpIsHoldingKeys() const;
+    void updateVoiceCachePositions(float cacheAmt, int cacheSrc, int zones);
+    /** Forget where every voice stood without taking its sample away. */
+    void rearmVoiceCacheTraversal();
+    void releaseVoiceCachePositions();
     std::thread samplerReprepareThread;
     std::atomic<bool> samplerReprepareThreadShouldExit { false };
     std::atomic<bool> samplerReprepareWorkRequested { false };

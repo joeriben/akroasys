@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <limits>
 
+// See the declaration in WavetableOscillator.h: process-wide so that banks from
+// DIFFERENT oscillator instances never collide on a generation number.
+std::atomic<uint64_t> WavetableOscillator::nextPublishedGeneration_ { 0 };
+
 void WavetableOscillator::prepare(double sr, int /*samplesPerBlock*/)
 {
     sampleRate = sr;
@@ -107,7 +111,7 @@ void WavetableOscillator::syncSharedConfigFrom(const WavetableOscillator& source
     autoScanLoopStart_ = source.autoScanLoopStart_;
     autoScanLoopEnd_ = source.autoScanLoopEnd_;
     autoScanLoopMode_ = source.autoScanLoopMode_;
-    morphTimeMs_ = source.morphTimeMs_;
+    setMorphTimeMs(source.getMorphTimeMs());
 }
 
 void WavetableOscillator::adoptMipData(MipDataPtr mipData, bool seedAdditivePhase)
@@ -160,7 +164,7 @@ void WavetableOscillator::beginMorphToMipData(const MipDataPtr& mipData)
         return;
     }
 
-    if (morphTimeMs_ <= 0.0f)
+    if (getMorphTimeMs() <= 0.0f)
     {
         adoptMipData(mipData);
         return;
@@ -193,7 +197,7 @@ void WavetableOscillator::beginMorphToMipData(const MipDataPtr& mipData)
     targetMorphMipData_ = mipData;
     morphAlpha_ = 0.0f;
     const int morphSamples = std::max(1, static_cast<int>(std::round(
-        static_cast<double>(morphTimeMs_) * 0.001 * sampleRate)));
+        static_cast<double>(getMorphTimeMs()) * 0.001 * sampleRate)));
     morphIncrement_ = 1.0f / static_cast<float>(morphSamples);
     morphActive_ = true;
     // A new inharmonic bank fades IN from its authored phase offsets (wetGain
@@ -352,7 +356,7 @@ WavetableOscillator::MipDataPtr WavetableOscillator::prepareMipLevels(const std:
 
     dest->numFrames = nFrames;
     dest->numLevels = NUM_MIP_LEVELS;
-    dest->generation = ++nextPublishedGeneration_;
+    dest->generation = nextPublishedGeneration_.fetch_add(1, std::memory_order_relaxed) + 1;
     return dest;
 }
 
@@ -988,7 +992,7 @@ void WavetableOscillator::setAdditiveBank(const std::vector<std::vector<Additive
     // synthAdditiveSample returns 0 with no div-by-0.
     dest->partialSets = std::move(kept);
     dest->additiveGain = (maxSumAbs > 1.0e-9) ? static_cast<float>(0.95 / maxSumAbs) : 0.0f;
-    dest->generation = ++nextPublishedGeneration_;
+    dest->generation = nextPublishedGeneration_.fetch_add(1, std::memory_order_relaxed) + 1;
 
     applyPreparedMipData(std::move(dest));
 }

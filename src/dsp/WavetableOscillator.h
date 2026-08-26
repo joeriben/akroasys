@@ -172,8 +172,12 @@ public:
     void setInterpolation(bool enabled) { doInterpolate = enabled; }
 
     /** Set WT bank-morph time for live retargeting of held notes. */
-    void setMorphTimeMs(float ms) { morphTimeMs_ = juce::jlimit(0.0f, 2000.0f, ms); }
-    float getMorphTimeMs() const { return morphTimeMs_; }
+    /** ATOMIC, so a master's morph time can be refreshed from another thread
+     *  while a voice reads it. Only a scalar duration is published through it -
+     *  no data hangs off it - so relaxed is enough. */
+    void setMorphTimeMs(float ms)
+    { morphTimeMs_.store(juce::jlimit(0.0f, 2000.0f, ms), std::memory_order_relaxed); }
+    float getMorphTimeMs() const { return morphTimeMs_.load(std::memory_order_relaxed); }
 
     // ── Auto-scan (sampler-style temporal progression) ──────────────
 
@@ -331,7 +335,19 @@ private:
     // `mutable` predates this conversion and is not required by it — no const
     // method writes this member; left as found.
     mutable MipDataPtr publishedMipData_;
-    uint64_t nextPublishedGeneration_ = 0;
+    // PROCESS-WIDE, not per instance, and that is the whole point. The three
+    // generation comparisons in this class (beginMorphToMipData,
+    // morphToFramesFrom) ask one question - "is this the same published bank I
+    // already hold?" - and a voice's activeMorphMipData_ can perfectly well have
+    // come from a DIFFERENT oscillator than the one it is being handed now. With
+    // a per-instance counter every freshly built master stamps generation 1, so
+    // two genuinely different banks compare EQUAL and the morph is skipped
+    // (silently keeping the old sound) or taken for a republish of the same
+    // audio (a hard swap). That is exactly what per-note cache positions do:
+    // sixteen masters, each built once. A process-wide counter makes the number
+    // globally unique, which is what the comparisons always assumed. Atomic
+    // because those masters are prepared from a background thread.
+    static std::atomic<uint64_t> nextPublishedGeneration_;
 
     // Shared mode: voice adopts new banks from a master oscillator.
     const WavetableOscillator* sharedSource_ = nullptr;
@@ -340,7 +356,7 @@ private:
     float morphAlpha_ = 1.0f;
     float morphIncrement_ = 0.0f;
     bool morphActive_ = false;
-    float morphTimeMs_ = 200.0f;
+    std::atomic<float> morphTimeMs_ { 200.0f };
 
     // Real-time additive synthesis: per-voice running phase (radians) for each
     // partial INDEX of the active/target additive bank. Fixed size — never allocated
