@@ -1,4 +1,5 @@
 #include "FxPanel.h"
+#include <cmath>
 #include "../dsp/BlockParams.h"
 #include "../PluginProcessor.h"
 #include "MidiLearnMenu.h"
@@ -328,6 +329,11 @@ FxPanel::FxPanel(juce::AudioProcessorValueTreeState& apvts, T5ynthProcessor& pro
         ampStateBtns[i].setClickingTogglesState(false);
         ampStateBtns[i].onClick = [this, i]
         {
+            // The cell owns the BYPASS and nothing else, so the click flips the
+            // bypass and nothing else. It does not reach for the Mix: raising a
+            // Mix the player left at zero would be this panel deciding how loud
+            // an effect should be, and at mix zero the Mix slider immediately
+            // below is both the reason and the cure.
             ampOnHidden[i].setToggleState(! ampOnHidden[i].getToggleState(),
                                           juce::sendNotificationSync);
         };
@@ -338,13 +344,14 @@ FxPanel::FxPanel(juce::AudioProcessorValueTreeState& apvts, T5ynthProcessor& pro
         // OFF (BJ, 2026-08-01) — five cells away, delay's lit OFF means the
         // delay IS off, so the same word was saying two opposite things on one
         // card. With a single cell, its own text has to carry the state.
-        ampOnHidden[i].onStateChange = [this, i]
-        {
-            const bool on = ampOnHidden[i].getToggleState();
-            ampStateBtns[i].setButtonText(on ? "ON" : "OFF");
-            ampStateBtns[i].setToggleState(on, juce::dontSendNotification);
-            updateVisibility();
-        };
+        // ...and the state it is in includes the MIX. The bypass being open is
+        // not the effect running: at mix zero it is switched on, costs its
+        // processing and cannot be heard, and this cell said ON. BJ, 26.08.2026:
+        // "bei den Effekten sollte Mix/Amt=0 das Element automatisch auf OFF
+        // schalten." Refreshed from updateVisibility, which the 30 Hz timer
+        // already calls whenever the running picture changes, so pulling a Mix
+        // to zero moves this cell with it.
+        ampOnHidden[i].onStateChange = [this] { updateVisibility(); };
         ampStateBtns[i].setButtonText("OFF");   // until the attachment reports in
     }
 
@@ -452,7 +459,8 @@ FxPanel::FxPanel(juce::AudioProcessorValueTreeState& apvts, T5ynthProcessor& pro
         runOnPtr_[i]  = apvts.getRawParameterValue(kAmpOnPid[i]);
         runWetPtr_[i] = apvts.getRawParameterValue(kAmpWetPid[i]);
     }
-
+    runDelayMixPtr_  = apvts.getRawParameterValue(PID::delayMix);
+    runReverbMixPtr_ = apvts.getRawParameterValue(PID::reverbMix);
     updateVisibility();
     startTimerHz(30); // ghost slider updates + the title row's running lamps
 }
@@ -538,8 +546,44 @@ bool FxPanel::effectRunning(int sel) const
             && on->load(std::memory_order_relaxed)  > 0.5f
             && wet->load(std::memory_order_relaxed) > 0.0001f;
     }
-    if (sel == SelDelay)  return delayTypeHidden.getSelectedId()  > 1;
-    if (sel == SelReverb) return reverbTypeHidden.getSelectedId() > 1;
+    // ...and the same second half for these two, which had only the first. A
+    // type other than Off with the mix at zero is an effect that is switched on,
+    // costs its processing, and cannot be heard - and the cell said it was
+    // running. BJ, 26.08.2026: "wir haben derzeit als laufend angezeigte Effekte
+    // die aber wegen mix=0 faktisch off sind."
+    // ...and the mix that decides it is the one the DSP applies, which is the
+    // BASE PLUS ITS MODULATION: Dly Mix and Rev Mix are modulation destinations
+    // for all three sources, so an envelope on Dly Mix over a base of zero is an
+    // audible delay that a base-only reading would call off - with the ghost
+    // marker on that very row, on this very card, showing the mix well above
+    // zero. The published value is NaN when nothing modulates it; then the base
+    // is the whole answer. (The four above cannot be modulated at all.)
+    // A mix that is MODULATED counts as in play whatever its value reads at this
+    // instant. Not the instantaneous number: over a base of zero the sum sits at
+    // zero for a whole negative half-cycle and above it for the whole positive
+    // one, so reading the number would flip this lamp twice per cycle - at up to
+    // 30 Hz, each flip a full repaint of the card (docs/PERFORMANCE_GUIDE.md).
+    // The delay is not switching on and off there; it is being played.
+    //
+    // ...and only while the audio thread is actually publishing. The modulated
+    // values are written below processBlock's deep-idle early return, so after
+    // ten seconds of silence they freeze at whatever they last held; trusting
+    // them then would leave the cell stuck ON with the Mix pulled to zero, which
+    // is the exact complaint. Silent instrument: the base mix is the answer.
+    auto liveMix = [this] (const std::atomic<float>* base, const std::atomic<float>& modulated)
+    {
+        if (base == nullptr) return 0.0f;
+        if (! processorRef.audioIdle.load (std::memory_order_relaxed)
+            && ! std::isnan (modulated.load (std::memory_order_relaxed)))
+            return 1.0f;
+        return base->load (std::memory_order_relaxed);
+    };
+    if (sel == SelDelay)
+        return delayTypeHidden.getSelectedId() > 1
+            && liveMix (runDelayMixPtr_, processorRef.modulatedValues.delayMix) > 0.0001f;
+    if (sel == SelReverb)
+        return reverbTypeHidden.getSelectedId() > 1
+            && liveMix (runReverbMixPtr_, processorRef.modulatedValues.reverbMix) > 0.0001f;
     return false;
 }
 
@@ -578,7 +622,23 @@ void FxPanel::updateVisibility()
     const bool showReverb = fxSelected_ == SelReverb;
 
     for (int i = 0; i < kNumAmpFx; ++i)
+    {
         ampStateBtns[i].setVisible(fxSelected_ == i);
+        // TWO facts on one cell, on two channels, the way the select row above
+        // already carries them: the WORD is whether the effect is running -
+        // bypass open AND mix off zero, so a mix of zero reads OFF and stops the
+        // card claiming an effect nobody can hear (BJ, 26.08.2026). The FILL is
+        // the bypass, which is what this cell switches. They come apart in
+        // exactly one place, and it is the place that matters: at mix zero the
+        // cell can read OFF and still be lit - switched on, not audible - so
+        // every click still changes something visible. With the word alone the
+        // bypass would flip under an unchanging caption, and since this cell is
+        // its only control it could be left inverted with nothing on the card
+        // to show it, and saved that way into the preset.
+        ampStateBtns[i].setButtonText(effectRunning(i) ? "ON" : "OFF");
+        ampStateBtns[i].setToggleState(ampOnHidden[i].getToggleState(),
+                                       juce::dontSendNotification);
+    }
     for (auto* b : { &delayTypeBtns[0], &delayTypeBtns[1], &delayTypeBtns[2],
                      &delayTypeBtns[3], &delayTypeBtns[4] })
         b->setVisible(showDelay);
@@ -610,6 +670,12 @@ void FxPanel::updateVisibility()
     // (BJ, 2026-08-01). The rest of the tree still has to be swept.
     for (int i = 0; i < kNumAmpFx; ++i)
     {
+        // The BYPASS, not "is it running": the dimmed set of every one of these
+        // four CONTAINS its own Mix, and dimming a control to say "this has no
+        // effect right now" while it is the only control that has any effect is
+        // the opposite of the signal. It would also split the card - the delay
+        // below dims on its type alone, so type=Digital at mix zero would show
+        // five bright rows beside four dim ones under the identical condition.
         const bool on = ampOnHidden[i].getToggleState();
         const float a = on ? 1.0f : dimAlpha;
         auto apply = [&](std::initializer_list<SliderRow*> rows)

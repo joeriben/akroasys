@@ -79,6 +79,12 @@ private:
     // over every parameter is exactly what ParamCache.h exists to avoid.
     std::atomic<float>* runOnPtr_ [4] { };
     std::atomic<float>* runWetPtr_[4] { };
+    // Delay and reverb have no bypass of their own - their type IS the switch -
+    // but they do have a mix, and a type other than Off at mix zero is an
+    // effect that cannot be heard. Same question as runWetPtr_, for the two
+    // cells that were not asking it.
+    std::atomic<float>* runDelayMixPtr_  = nullptr;
+    std::atomic<float>* runReverbMixPtr_ = nullptr;
 
     // ── The four amp effects ──
     // Their OFF is a bool of its own (delay and reverb have OFF as a value of
