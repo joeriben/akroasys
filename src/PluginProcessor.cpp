@@ -7191,104 +7191,119 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
 // follows is the build half; the audio-thread half that points voices at them
 // is updateVoiceCachePositions, below updateAftertouchTraversal.
 
-juce::uint64 T5ynthProcessor::cachePositionStamp(bool snapRange) const
+namespace
 {
-    // A cheap order-sensitive mix of everything that decides what a prepared
-    // position WOULD contain. Not a hash for lookup - only equality is ever
-    // asked of it, and a value it collides with is a value that produces the
-    // same audio anyway for every field here except the generation, which is a
-    // counter and cannot repeat within a session.
+    // A cheap order-sensitive mix. Not a hash for lookup - only equality is ever
+    // asked of these, and a value one collides with is a value that produces the
+    // same audio anyway for every field but the generations, which are counters
+    // and cannot repeat within a session.
+    inline juce::uint64 stampMix (juce::uint64 h, juce::uint64 v)
+    {
+        h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    }
+    inline juce::uint64 stampBits (float f)
+    {
+        juce::uint32 u = 0;
+        std::memcpy (&u, &f, sizeof (u));
+        return static_cast<juce::uint64> (u);
+    }
+}
+
+juce::uint64 T5ynthProcessor::cachePositionSourceStamp (bool snapRange) const
+{
+    // WHAT a range would be built FROM, and nothing about HOW. Kept apart from
+    // the settings because the two must be treated in opposite ways: audio that
+    // has been replaced or deleted has to stop being reachable in the same
+    // instant - a finger crossing a zone a moment later would otherwise land a
+    // take that no longer exists - while a knob being dragged must not discard
+    // anything until the hand comes off it.
     //
-    // The cache is EMPTY as far as this is concerned unless it is full: the bar
+    // The cache is EMPTY as far as this is concerned unless it is FULL: the bar
     // does not travel a partial cache (isInferenceCacheFull gates the traversal
-    // too), and building positions for entries that are about to be joined by
-    // more would throw the work away on the next add.
-    juce::uint64 entryCount = 0;
-    juce::uint64 snapValidMask = 0;
+    // too), and building positions for entries about to be joined by more would
+    // throw the work away on the next add. The snapshot slots have no such rule
+    // - each is stored by hand and is complete the moment it exists - and they
+    // are independent of the cache entirely.
+    juce::uint64 entryCount = 0, snapValidMask = 0;
     {
         const std::lock_guard<std::mutex> lk (cacheEntriesMutex_);
-        // The cache counts only when it is FULL (the bar does not travel a
-        // partial one). The snapshot slots have no such rule - each is stored by
-        // hand and is complete the moment it exists - and they are independent
-        // of the cache entirely: Snap travels per note with the cache switched
-        // off, and the other way round.
         if (isInferenceCacheFull())
             entryCount = static_cast<juce::uint64> (inferenceCacheEntries.size());
         for (int k = 0; k < kNumSnapAudioSlots; ++k)
             if (snapAudio_[static_cast<size_t> (k)].valid)
                 snapValidMask |= (1ull << k);
     }
-    // Asked per RANGE. The sixteen cache positions and the four Snap slots are
-    // built from independent sources, so a change to one must not discard the
-    // other: storing a snapshot used to hand every held note back off its cache
-    // position and leave that bar inert for the ~100 ms a full rebuild takes.
-    // What the two ranges DO share is the transport - every field below the
-    // source lines applies to both - so a control that changes what any position
-    // would contain still rebuilds all twenty.
     if (snapRange ? (snapValidMask == 0) : (entryCount == 0))
-        return 0;      // nothing THIS bar could travel
-    if (cachePosHostRate_.load (std::memory_order_acquire) <= 0.0)
+        return 0;      // nothing this bar could travel
+    const double hostRate = cachePosHostRate_.load (std::memory_order_acquire);
+    if (hostRate <= 0.0)
         return 0;      // prepareToPlay has not run; nothing can be prepared yet
 
-    auto mix = [] (juce::uint64 h, juce::uint64 v)
-    {
-        h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        return h;
-    };
-    auto bits = [] (float f)
-    {
-        juce::uint32 u = 0;
-        std::memcpy (&u, &f, sizeof (u));
-        return static_cast<juce::uint64> (u);
-    };
-
+    // The host rate and block belong HERE and not with the settings: a rate
+    // change is not a hand on a control, and a position prepared at the old rate
+    // is wrong rather than merely out of date.
+    //
+    // ...and so does the ENGINE MODE, for the same reason and not the obvious
+    // one. Every other input to a position is a setting of the same object; this
+    // one decides WHICH object: prepareCachePosition fills a position's
+    // oscillator with pitch-synchronous resampled frames in one mode and raw
+    // contiguous 2048-sample chunks in the other, and the block distributes
+    // whichever it finds to held voices in every mode. Debounced, a note held
+    // across an engine flip renders temporal chunks as single cycles - wrong
+    // pitch, wrong timbre - for a quarter second, or for two seconds if
+    // anything else is being automated at that moment. It is also not a hand on
+    // a control: a toggle produces exactly one stamp change, so a settle window
+    // buys nothing here and only costs.
     juce::uint64 h = 0x1234567890abcdefULL;
-    h = mix (h, bits (static_cast<float> (cachePosHostRate_.load (std::memory_order_acquire))));
-    h = mix (h, static_cast<juce::uint64> (cachePosHostBlock_.load (std::memory_order_acquire)));
+    h = stampMix (h, isWavetableMode() ? 1u : 2u);
+    h = stampMix (h, stampBits (static_cast<float> (hostRate)));
+    h = stampMix (h, static_cast<juce::uint64> (cachePosHostBlock_.load (std::memory_order_acquire)));
     if (snapRange)
     {
-        h = mix (h, static_cast<juce::uint64> (snapAudioGeneration_.load (std::memory_order_acquire)));
-        h = mix (h, snapValidMask);
+        h = stampMix (h, static_cast<juce::uint64> (snapAudioGeneration_.load (std::memory_order_acquire)));
+        h = stampMix (h, snapValidMask);
     }
     else
     {
-        h = mix (h, static_cast<juce::uint64> (getInferenceCacheGeneration()));
-        h = mix (h, entryCount);
+        h = stampMix (h, static_cast<juce::uint64> (getInferenceCacheGeneration()));
+        h = stampMix (h, entryCount);
     }
-    h = mix (h, isWavetableMode() ? 1u : 2u);
-    h = mix (h, bits (paramCache.genHfBoost->load()));
-    h = mix (h, bits (paramCache.wtFrames->load()));
-    h = mix (h, bits (paramCache.loopMode->load()));
-    h = mix (h, bits (paramCache.normalize->load()));
-    h = mix (h, bits (paramCache.loopOptimize->load()));
-    h = mix (h, bits (paramCache.crossfadeMs->load()));
-    h = mix (h, masterSampler.getPointsLocked() ? 3u : 4u);
-    // AutoScan and the Regen XFade are inputs because prepareCachePosition now
-    // writes the whole transport into the position before it is published -
-    // see the comment there. Nothing writes a published position afterwards,
-    // which is what keeps the build thread out of engine state a voice is
-    // reading; the price is that moving either control rebuilds, and the bar
-    // is instrument-wide for the ~80 ms that takes.
-    h = mix (h, paramCache.wtAutoScan->load() > 0.5f ? 5u : 6u);
-    // driftCrossfade (Regen XFade) is deliberately NOT here. It is a control the
-    // player turns WHILE playing, and every step of that drag would discard all
-    // sixteen positions and rebuild them one per background pass - so for the
-    // whole drag nothing is ever finished, the per-note path stays off, and the
-    // instrument-wide bar takes over mid-gesture and starts landing whole
-    // samples. It is kept current without a rebuild instead: morphTimeMs_ is an
-    // atomic and refreshMorphTimeOnCachePositions() writes it in place.
+    h = stampMix (h, snapRange ? 7u : 8u);   // the two ranges are never the same stamp
+    return h == 0 ? 1 : h;   // 0 is reserved for "no positions wanted"
+}
+
+juce::uint64 T5ynthProcessor::cachePositionSettingsStamp() const
+{
+    // HOW any position would be built. Every field here is a CONTROL, and every
+    // one of them applies to both ranges - which is why there is one of these
+    // and two source stamps.
+    juce::uint64 h = 0x0fedcba098765432ULL;
+    h = stampMix (h, stampBits (paramCache.genHfBoost->load()));
+    h = stampMix (h, stampBits (paramCache.wtFrames->load()));
+    h = stampMix (h, stampBits (paramCache.loopMode->load()));
+    h = stampMix (h, stampBits (paramCache.normalize->load()));
+    h = stampMix (h, stampBits (paramCache.loopOptimize->load()));
+    h = stampMix (h, stampBits (paramCache.crossfadeMs->load()));
+    h = stampMix (h, masterSampler.getPointsLocked() ? 3u : 4u);
+    // AutoScan is an input because prepareCachePosition writes the whole
+    // transport into a position before it is published - see the comment there.
+    h = stampMix (h, paramCache.wtAutoScan->load() > 0.5f ? 5u : 6u);
+    // driftCrossfade (Regen XFade) is deliberately NOT here, debounce or no
+    // debounce. It is kept current WITHOUT a rebuild - morphTimeMs_ is an atomic
+    // and refreshMorphTimeOnCachePositions() writes it in place - which is
+    // strictly better than waiting for a hand that may never come off it.
     if (masterSampler.getPointsLocked())
     {
-        // All three points, but only when they are LOCKED: locked points are
-        // the player's own and apply to every entry, so they decide what every
+        // All three points, but only when they are LOCKED: locked points are the
+        // player's own and apply to every entry, so they decide what every
         // position contains. Unlocked, all three are derived from each entry's
         // own audio and the live sampler's values are not an input at all.
-        h = mix (h, bits (masterSampler.getStartPos()));
-        h = mix (h, bits (masterSampler.getLoopStart()));
-        h = mix (h, bits (masterSampler.getLoopEnd()));
+        h = stampMix (h, stampBits (masterSampler.getStartPos()));
+        h = stampMix (h, stampBits (masterSampler.getLoopStart()));
+        h = stampMix (h, stampBits (masterSampler.getLoopEnd()));
     }
-    h = mix (h, snapRange ? 7u : 8u);   // the two ranges are never the same stamp
-    return h == 0 ? 1 : h;   // 0 is reserved for "no positions wanted"
+    return h;   // never 0-reserved: this one has no "nothing to build" state
 }
 
 void T5ynthProcessor::refreshMorphTimeOnCachePositions()
@@ -7315,6 +7330,48 @@ T5ynthProcessor::readyCachePosition (int index) const
     // clearing goes through the mask first (release) and the pointer stays put.
     // So an acquire on the mask is what orders this read.
     return cachePosEngines_[static_cast<size_t> (index)].get();
+}
+
+bool T5ynthProcessor::settingsRunEnded (juce::uint64 setNow, juce::uint32 nowMs)
+{
+    // Build thread. TRUE on exactly one pass: the one where a run of changes
+    // ENDS - the hand came off the control, or the cap below ran out. Not "the
+    // stamp differs from what is built": a control moved away and back inside
+    // the window ends where it started, and comparing stamps would then see no
+    // change and never rebuild, leaving whatever was built mid-gesture standing
+    // under a record that claims it is current. What has to be rebuilt is
+    // decided by whether a run HAPPENED, not by where it happened to land.
+    auto& st = cachePosSettle_;
+    // Unsigned modular arithmetic on juce::uint32, exact across the counter's
+    // 49-day wrap: uint32 has the same conversion rank as int, so neither
+    // subtraction is promoted to a signed type.
+    if (setNow != st.pending)
+    {
+        if (! st.active)
+        {
+            st.active      = true;
+            st.firstSeenMs = nowMs;
+        }
+        st.pending      = setNow;
+        st.lastChangeMs = nowMs;
+        // The cap belongs HERE too, not only where the value repeats. A
+        // MODULATED input - an automation lane, a CC sweep - changes on every
+        // pass and so reaches no other branch, and a cap it can never reach
+        // cannot bound the one starvation it exists for.
+        if ((nowMs - st.firstSeenMs) < kCachePosMaxDeferMs)
+            return false;
+        st.active = false;
+        return true;
+    }
+    if (! st.active)
+        return false;                       // no run in progress
+
+    const bool quiet  = (nowMs - st.lastChangeMs) >= kCachePosSettleMs;
+    const bool waited = (nowMs - st.firstSeenMs)  >= kCachePosMaxDeferMs;
+    if (! quiet && ! waited)
+        return false;
+    st.active = false;
+    return true;
 }
 
 bool T5ynthProcessor::positionsReadyInRange (int lo, int hiExclusive) const
@@ -7400,39 +7457,51 @@ bool T5ynthProcessor::serviceCachePositionEngines()
     // the thread that acts on the answer, is both cheaper and harder to get
     // wrong than a notification from each of a dozen sites.
     //
-    // TWO stamps, one per range. The sixteen cache positions and the four Snap
-    // slots are built from independent sources, and with a single stamp every
-    // change to either discarded BOTH - so storing a snapshot, which is a long
-    // press and an ordinary performance gesture, handed every held note back off
-    // its cache position and left that bar instrument-wide for the ~100 ms a
-    // full rebuild takes. Each stamp still carries the shared transport, so a
-    // control that changes what any position would contain rebuilds all twenty.
-    juce::uint64 wantCache = 0, wantSnap = 0;
+    // THREE stamps, not one. A SOURCE stamp per range, because the sixteen cache
+    // positions and the four Snap slots are built from independent sources and
+    // one stamp for both made every change to either discard both - storing a
+    // snapshot, which is a long press and an ordinary performance gesture,
+    // handed every held note back off its cache position. And ONE settings
+    // stamp, shared, because the controls apply to both ranges - and because it
+    // is the half that has to WAIT for the hand.
+    //
+    // Under the lock, because getPointsLocked and the three point values are
+    // engine state the callback lock guards.
+    const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+    juce::uint64 setNow = 0, srcCache = 0, srcSnap = 0;
     {
         const juce::ScopedLock sl (getCallbackLock());
-        wantCache = cachePositionStamp (false);
-        wantSnap  = cachePositionStamp (true);
+        setNow   = cachePositionSettingsStamp();
+        srcCache = cachePositionSourceStamp (false);
+        srcSnap  = cachePositionSourceStamp (true);
     }
+    // Asked every pass. TRUE on the single pass a run of settings changes ends;
+    // the settings are shared, so there is one watch for both ranges.
+    const bool setRunEnded = settingsRunEnded (setNow, nowMs);
 
     bool invalidated = false;
-    if (wantCache != cachePosStampBuiltCache_)
+    auto consider = [&] (int lo, int hiExclusive, juce::uint64 srcNow,
+                         juce::uint64& srcBuilt, int cursorTo)
     {
-        invalidatePositionRange (0, kMaxCachePositions);
-        cachePosStampBuiltCache_ = wantCache;
-        cachePosNextToBuild_ = 0;
+        const bool srcChanged = (srcNow != srcBuilt);
+        if (! srcChanged && ! setRunEnded)
+            return;
+        if (srcNow == 0 && srcBuilt == 0)
+            // Nothing to build and nothing built. Invalidating an empty range
+            // would take the callback lock and run three distribute passes for
+            // no reason.
+            return;
+        invalidatePositionRange (lo, hiExclusive);
+        srcBuilt = srcNow;
+        cachePosNextToBuild_ = juce::jmin (cachePosNextToBuild_, cursorTo);
         invalidated = true;
-    }
-    if (wantSnap != cachePosStampBuiltSnap_)
-    {
-        invalidatePositionRange (kSnapPosBase, kMaxPositions);
-        cachePosStampBuiltSnap_ = wantSnap;
-        cachePosNextToBuild_ = juce::jmin (cachePosNextToBuild_, kSnapPosBase);
-        invalidated = true;
-    }
+    };
+    consider (0, kMaxCachePositions, srcCache, cachePosSrcBuiltCache_, 0);
+    consider (kSnapPosBase, kMaxPositions, srcSnap, cachePosSrcBuiltSnap_, kSnapPosBase);
     if (invalidated)
-        return wantCache != 0 || wantSnap != 0;   // come back next pass to build
+        return srcCache != 0 || srcSnap != 0;   // come back next pass to build
 
-    if (wantCache == 0 && wantSnap == 0)
+    if (srcCache == 0 && srcSnap == 0)
         return false;
 
     // Walk to the next position that is neither already current nor in a range
@@ -7442,9 +7511,23 @@ bool T5ynthProcessor::serviceCachePositionEngines()
     // for all of it the Snap bar had no per-note path to use.
     {
         const juce::uint32 ready = cachePosReadyMask_.load (std::memory_order_acquire);
-        auto rangeWanted = [wantCache, wantSnap] (int idx)
+        // Only "does this range have anything to build". Deliberately NOT "are
+        // its settings current": that made a range unwanted for a reason that
+        // can end WITHOUT a stamp change - the control moved away and back -
+        // and this cursor is persistent, so the positions it walked past while
+        // the range was unwanted were lost for good, leaving a range that never
+        // finished building and a bar that silently stopped travelling over
+        // most of its range. Here the only reason is the source being empty,
+        // and that flips only through a source stamp change, which always
+        // invalidates and rewinds the cursor with it.
+        //
+        // What the debounce still buys is above: a settings change discards and
+        // rebuilds ONCE, when the hand comes off. In between, positions are
+        // built with live settings under no claim that they are current - the
+        // run that is open will invalidate them all when it ends.
+        auto rangeWanted = [srcCache, srcSnap] (int idx)
         {
-            return idx < kMaxCachePositions ? wantCache != 0 : wantSnap != 0;
+            return idx < kMaxCachePositions ? srcCache != 0 : srcSnap != 0;
         };
         while (cachePosNextToBuild_ < kMaxPositions
                && ((ready & (1u << static_cast<juce::uint32> (cachePosNextToBuild_))) != 0
@@ -7627,8 +7710,9 @@ bool T5ynthProcessor::prepareCachePosition (CachePositionEngines& dest,
         // whole reason this is here and not on a per-pass sweep - these are
         // plain fields a voice reads through syncSharedConfigFrom on the audio
         // thread, and on CLAP getCallbackLock() does not exclude it. Every input
-        // is in cachePositionStamp(), so a control the player moves rebuilds
-        // rather than reaching in behind a sounding voice.
+        // is in one of the two stamps - the engine mode in the source stamp,
+        // the rest in the settings stamp - so a control the player moves
+        // rebuilds rather than reaching in behind a sounding voice.
         //
         // On a FIRST build that is airtight - nothing has ever pointed here. On
         // a REBUILD there is one narrow window, stated rather than claimed away:
@@ -8053,7 +8137,7 @@ void T5ynthProcessor::setSnapshotAudio (int slot0, const juce::AudioBuffer<float
                     m |= (1u << static_cast<unsigned> (k));
             snapAudioValidMask_.store (m, std::memory_order_release);
         }
-        // INSIDE the lock, with the valid flag it belongs to. cachePositionStamp
+        // INSIDE the lock, with the valid flag it belongs to. The source stamp
         // reads the valid mask under this lock and the counter beside it; bumped
         // after the release, a builder pass could read the new mask with the old
         // counter, compute a stamp equal to the one it has already built and

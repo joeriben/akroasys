@@ -616,3 +616,59 @@ posted to the message thread, so the waveform display and the cache row's
 highlight no longer follow the bar — they show whatever was last installed
 instrument-wide. Four notes on four positions have no single waveform to show,
 so this needs a decision about what the display should mean, not a repair.
+
+### 5c. One rebuild per gesture, 2026-08-26
+
+The twenty positions are built from two things: the AUDIO behind them, and the
+SETTINGS every position is prepared with (engine mode, HF Boost, WT Frames, Loop
+Mode, Normalize, Loop Optimize, Crossfade, points-locked, AutoScan and the three
+locked points). Both are stamped, and the two stamps are treated differently on
+purpose.
+
+- **Audio acts immediately, and per range.** A generation landing or a snapshot
+  being stored is not something to wait out — the bar should reach the new
+  material at once. And the ranges are stamped separately: one stamp for both
+  meant storing a snapshot, which is an ordinary performance gesture, discarded
+  all sixteen cache positions and handed every held note back off its position.
+- **Settings wait for the hand.** Ten of the stamp's inputs are controls the
+  player drags. Acting on every detent discarded the whole range and rebuilt it
+  one position per background pass, so for the length of the gesture nothing was
+  ever finished, the per-note path stayed off, and the instrument-wide bar took
+  over and started landing whole samples under the hand. One rebuild per settled
+  gesture instead: 250 ms of quiet, and never deferred longer than 2 s.
+
+Two things the first attempt at this got wrong, both of them the same mistake —
+deciding what is owed by comparing the current stamp to a record of what was
+built, instead of tracking whether a change HAPPENED:
+
+- **A control moved away and back ends where it started.** The stamp then equals
+  the record, nothing looks changed, and the positions built mid-gesture — with
+  live settings, because `prepareCachePosition` reads them live — stand
+  permanently under a record claiming they are current. Recalling a Snap
+  snapshot does exactly this by itself: it locks the points, loads, and restores
+  the previous locked state. So what ends a run is the HAND stopping, and when a
+  run ends the range is discarded whatever the stamp says.
+- **A cap that only a repeated value can reach bounds nothing.** The 2 s cap
+  exists for a stamp input that is MODULATED — an automation lane, a CC sweep —
+  and such an input changes on every service pass, which was the one branch that
+  never consulted the cap. It is checked on both branches now.
+
+The ENGINE MODE is in the immediate half, with the host rate, and for the same
+reason: every other input is a setting of the same object, that one decides
+WHICH object. A position's oscillator holds pitch-synchronous resampled frames
+in one mode and raw contiguous chunks in the other, and every block distributes
+whichever it finds to held voices. Debounced, a note held across an engine flip
+plays chunks as single cycles for a quarter second. A toggle is also not a hand
+on a control - one change, no gesture to wait out.
+
+The build cursor is persistent, so it must only ever be advanced past a position
+that is finished with. It may skip a range whose SOURCE is empty — that flips
+only through a source stamp change, which always invalidates and rewinds the
+cursor with it — but it must never skip a range that is merely waiting, because
+that wait can end without a stamp change and the skipped positions would be lost
+for good: a range that never finished building, and a bar that silently stopped
+travelling over most of its range.
+
+`driftCrossfade` ("Regen XFade") is in neither stamp, deliberately: it is a
+control the player turns *while playing*, and it is refreshed in place on the
+prepared positions instead. See §5b.

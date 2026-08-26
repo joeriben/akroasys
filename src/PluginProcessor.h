@@ -950,19 +950,57 @@ private:
     static constexpr int kSnapPosBase       = kMaxCachePositions;
     static constexpr int kMaxPositions      = kMaxCachePositions + kNumSnapAudioSlots;
     std::array<std::unique_ptr<CachePositionEngines>, kMaxPositions> cachePosEngines_;
-    // Bit k: position k holds audio prepared from cache entry k under the
-    // CURRENT stamp. Written on the build thread, read on the audio thread.
+    // Bit k: position k holds audio prepared from cache entry k. Under the
+    // current SOURCE stamp always - that half acts at once. Not necessarily
+    // under the current settings: those wait for the hand to come off the
+    // control, and a position built while a run is open carries whatever was
+    // live at that instant, under no claim that it is current. The run
+    // invalidates the whole range when it ends. Written on the build thread,
+    // read on the audio thread.
     std::atomic<juce::uint32> cachePosReadyMask_ { 0 };
-    /** ONE stamp per RANGE, not one for all twenty positions. The sixteen cache
-     *  positions and the four Snap slots are built from independent sources, and
-     *  a single stamp made every change to either discard both: storing a
-     *  snapshot - a long press, an ordinary performance gesture - handed every
-     *  held note back off its CACHE position and left that bar inert for the
-     *  ~100 ms a full rebuild takes. Each range's stamp carries the shared
-     *  transport bits as well, so a control that changes what every position
-     *  would contain still rebuilds all twenty. Build thread only. */
-    juce::uint64 cachePosStampBuiltCache_ = 0;
-    juce::uint64 cachePosStampBuiltSnap_  = 0;
+    /** What each range was last built from, split in two because the two halves
+     *  must be treated in OPPOSITE ways. The SOURCE (which takes, which
+     *  snapshots, the host rate) acts at once: audio that has been replaced or
+     *  deleted must stop being reachable in the same instant, or a finger
+     *  crossing a zone lands a take that no longer exists. The SETTINGS (HF
+     *  Boost, WT Frames, Loop Mode, Normalize, Loop Optimize, Crossfade,
+     *  AutoScan, the three locked points) WAIT for the hand to come off the
+     *  control - acting on every detent of a drag discarded the range and
+     *  rebuilt it one position per background pass, so for the whole gesture
+     *  nothing was ever finished. Build thread only. */
+    juce::uint64 cachePosSrcBuiltCache_ = 0;
+    juce::uint64 cachePosSrcBuiltSnap_  = 0;
+    /** A stamp change WAITS for the hand to come off the control. Seven of the
+     *  stamp's inputs are knobs (HF Boost, WT Frames, Loop Mode, Normalize, Loop
+     *  Optimize, Crossfade, AutoScan) and the locked points are three more, and
+     *  acting on every detent of a drag discarded the whole range and rebuilt it
+     *  one position per background pass - so for the length of the gesture
+     *  nothing was ever finished and both bars sat waiting. One rebuild per
+     *  SETTLED drag instead. Build thread only. */
+    struct StampSettle
+    {
+        juce::uint64 pending      = 0;
+        juce::uint32 firstSeenMs  = 0;
+        juce::uint32 lastChangeMs = 0;
+        bool         active       = false;
+    };
+    /** ONE watch, because the settings are shared by both ranges. */
+    StampSettle cachePosSettle_;
+    /** Quiet for this long and the rebuild goes ahead. A detent of a knob drag
+     *  is far quicker than this; a hand that has stopped is not. */
+    static constexpr juce::uint32 kCachePosSettleMs = 250;
+    /** ...but never defer longer than this, and the cap is consulted on the
+     *  pass the value CHANGES as well as on a pass where it repeats: a stamp
+     *  input that is MODULATED changes on every pass and reaches no other
+     *  branch, so a cap it cannot reach cannot bound the one starvation it is
+     *  for - the positions never rebuilt at all, which reads exactly like the
+     *  feature working. */
+    static constexpr juce::uint32 kCachePosMaxDeferMs = 2000;
+    /** True on the single pass a RUN of settings changes ends - the hand came
+     *  off, or the cap ran out. Not "the stamp differs from what is built": a
+     *  control moved away and back inside the window ends where it started, and
+     *  a stamp compare would then see nothing and never rebuild. */
+    bool settingsRunEnded (juce::uint64 setNow, juce::uint32 nowMs);
     int          cachePosNextToBuild_ = 0;    // build thread only
     // The host's rate and block size, written by prepareToPlay and read by the
     // build thread. Part of the stamp, so a rate change invalidates what is
@@ -989,7 +1027,7 @@ private:
      *  them, exactly as inferenceCacheGeneration_ is the cache's. */
     std::atomic<unsigned> snapAudioGeneration_ { 0 };
     /** WHICH snapshot slots hold audio, as a lock-free mirror of the same
-     *  question cachePositionStamp asks under cacheEntriesMutex_. The audio
+     *  question the source stamp asks under cacheEntriesMutex_. The audio
      *  thread needs it: a snapshot may carry a patch and no audio at all (older
      *  presets do), and with nothing to travel the Snap bar's per-note path does
      *  not APPLY - the instrument-wide bar handles it and goes on recalling the
@@ -1015,9 +1053,13 @@ private:
     mutable std::mutex cacheEntriesMutex_;
     /** What the positions must match to be current. Cheap enough to call per
      *  block; message/audio thread safe (atomics and parameter reads only). */
-    /** @param snapRange false for the cache positions (0..15), true for the four
-     *  Snap slots (16..19). Returns 0 when that range has nothing to build. */
-    juce::uint64 cachePositionStamp(bool snapRange) const;
+    /** WHAT a range would be built FROM. @param snapRange false for the cache
+     *  positions (0..15), true for the four Snap slots (16..19). Returns 0 when
+     *  that range has nothing to build. Acted on at once - see the built stamps. */
+    juce::uint64 cachePositionSourceStamp(bool snapRange) const;
+    /** HOW any position would be built - the controls, shared by both ranges.
+     *  Debounced. Never 0, so it cannot be confused with "nothing to build". */
+    juce::uint64 cachePositionSettingsStamp() const;
     /** Is ANY position in [lo, hiExclusive) built and current? */
     bool positionsReadyInRange(int lo, int hiExclusive) const;
     /** Take back every voice claim pointing into [lo, hiExclusive). Caller holds
