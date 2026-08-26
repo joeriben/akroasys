@@ -1197,18 +1197,17 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
             { PID::aftertouchAmtEnv3Sustain, PID::exprSrcEnv3Sustain, "ENV3 Sus" , AftertouchTarget::Env3Sustain },
             { PID::aftertouchAmtEnv4Sustain, PID::exprSrcEnv4Sustain, "ENV4 Sus" , AftertouchTarget::Env4Sustain },
             { PID::aftertouchAmtEnv5Sustain, PID::exprSrcEnv5Sustain, "ENV5 Sus" , AftertouchTarget::Env5Sustain },
-            // Last, and apart in kind: these two do not modulate the voice, they
-            // move the instrument - to another cached sample, to another
-            // snapshot. Same bar, same bipolar amount, and the sign means the
-            // same thing it means everywhere else here: which way pressure
-            // travels. Through the cache that is the order the samples were
-            // generated in, forwards or back.
+            // Last, and apart in kind: this one does not modulate the voice, it
+            // moves the instrument - to another cached sample. Same bar, same
+            // bipolar amount, and the sign means the same thing it means
+            // everywhere else here: which way pressure travels. Through the
+            // cache that is the order the samples were generated in, forwards or
+            // back. There is no Snap row beside it - see AftertouchTarget::Snap.
             { PID::aftertouchAmtCache,       PID::exprSrcCache,       "Cache" , AftertouchTarget::Cache },
-            { PID::aftertouchAmtSnap,        PID::exprSrcSnap,        "Snap" , AftertouchTarget::Snap },
         };
         static constexpr int kNumAtBars = sizeof(atBars) / sizeof(atBars[0]);
-        static_assert(kNumAtBars == AftertouchTarget::kCount - 1,
-                      "Every aftertouch target but None needs a bar here.");
+        static_assert(kNumAtBars == AftertouchTarget::kNumExprRows,
+                      "Every target in the expression matrix needs a bar here.");
         for (int i = 0; i < kNumAtBars; ++i)
         {
             const char* pid = atBars[i].pid;

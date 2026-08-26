@@ -89,12 +89,14 @@ const char* const kMainSnapshotParamIds[] = {
     PID::exprSrcCutoff, PID::exprSrcResonance, PID::exprSrcScan,
     PID::exprSrcDca, PID::exprSrcPitch, PID::exprSrcNoiseLevel,
     PID::exprSrcEnv4Sustain, PID::exprSrcEnv5Sustain,
-    // Neither Cache nor Snap. Both bars MOVE the instrument, and a recall must
-    // not seize a bar that is doing so under the player's finger: press into
-    // slot 2, and if slot 2 was stored with that bar at rest - or reversed -
-    // the gesture ends somewhere the hand did not send it, with no way back out
-    // under pressure. Every other aftertouch amount is stored here; these two
-    // are the two the stored value could take out of the player's hands.
+    // Not Cache. That bar MOVES the instrument, and a recall must not seize it
+    // while it is doing so under the player's finger: press into slot 2, and if
+    // slot 2 was stored with the bar at rest - or reversed - the gesture ends
+    // somewhere the hand did not send it, with no way back out under pressure.
+    // Every other aftertouch amount is stored here; this is the one whose
+    // stored value could take the instrument out of the player's hands. (Snap's
+    // pair is absent for the same reason it always was, and is now dead besides
+    // - see AftertouchTarget::Snap.)
     PID::driftEnabled, PID::driftRegen, PID::driftCrossfade,
     PID::drift1Rate, PID::drift1Depth, PID::drift1Target, PID::drift1Wave,
     PID::drift1ClockMode, PID::drift1ClockDivision,
@@ -3184,15 +3186,6 @@ MainPanel::~MainPanel()
     processorRef.onMidiLearnStateChanged = nullptr;
     processorRef.onGenerateRequested = nullptr;
     processorRef.onSnapshotRequested = nullptr;
-    // ...and with it the audio the Snap bar travels per note. The four
-    // snapshots live in THIS panel (mainSnapshots) and nothing repopulates them
-    // when the window is opened again - only a preset load or a long press
-    // does. Nulling the callback above already takes the instrument-wide half of
-    // the Snap bar away with the window; leaving the processor's copies standing
-    // would have left the per-note half crossfading held notes onto audio the
-    // instrument can no longer reach by any other route.
-    for (int i = 0; i < static_cast<int>(kNumSnapshotSlots); ++i)
-        processorRef.clearSnapshotAudio(i);
     processorRef.onCacheToggleRequested = nullptr;
     processorRef.onCachePositionRequested = nullptr;
     processorRef.onLroCachePositionRequested = nullptr;
@@ -3692,22 +3685,10 @@ std::vector<PresetFormat::SnapshotState> MainPanel::buildSnapshotsForSave() cons
 void MainPanel::applySnapshotsFromLoad(const std::vector<PresetFormat::SnapshotState>& snapshots,
                                        int calibEpoch)
 {
-    // Every slot is about to hold something else, and the Snap bar has no other
-    // way of hearing about it - a snapshot slot carries no generation counter
-    // the way a cache does. Without this a finger resting in a slot's zone
-    // could not travel back to it after a load: the bar would still be holding
-    // a claim on what that slot used to be.
-    processorRef.forgetSnapTraversalClaim();
-
     // Clear all session snapshots first; only the slots present in the
     // preset are populated. Slot index from JSON is authoritative; values
     // outside [0, kNumSnapshotSlots) are ignored defensively.
     for (auto& s : mainSnapshots) s = {};
-    // ...and the processor's copy of the audio half with them, or a preset that
-    // stores fewer snapshots than the last one would leave the missing slots
-    // travellable per note with the PREVIOUS preset's sound in them.
-    for (int i = 0; i < kNumSnapshotSlots; ++i)
-        processorRef.clearSnapshotAudio(i);
     // The LCO slots go too, and for a sharper reason than symmetry: a preset
     // brings its own orchestra, and a slot left over from before the load still
     // reads as filled while holding the PREVIOUS session's orchestra and its
@@ -3769,12 +3750,6 @@ void MainPanel::applySnapshotsFromLoad(const std::vector<PresetFormat::SnapshotS
         dst.pointsLocked   = src.pointsLocked;
 
         mainSnapshots[static_cast<size_t>(src.slot)] = std::move(dst);
-        // The AUDIO half goes to the processor, which prepares a per-note
-        // position from it - a held key travels the four snapshots exactly as it
-        // travels the cache. The patch half stays here: the instrument has one
-        // parameter tree, so only the sound can be per note.
-        const auto& stored = mainSnapshots[static_cast<size_t>(src.slot)];
-        processorRef.setSnapshotAudio(src.slot, stored.audio, stored.sampleRate);
     }
     syncSnapshotUi();
 }
@@ -3814,10 +3789,6 @@ void MainPanel::storeSnapshotFromPress(int slot)
         const bool hasSound = pendingLco.orchestra.isNotEmpty();
         lcoSnapshots[static_cast<size_t>(slot - 1)] = std::move(pendingLco);
         pendingLco = {};
-        // The slot holds something else now, so the Snap bar's claim on it is
-        // stale - without this a finger resting on the slot it just re-stored
-        // could not travel back to it, the bar believing it is already there.
-        processorRef.forgetSnapTraversalClaim();
         activeSnapshotIndex = slot;
         syncSnapshotUi();
         snapshotButtons[slot].flashStored();
@@ -3836,12 +3807,6 @@ void MainPanel::storeSnapshotFromPress(int slot)
 
     mainSnapshots[static_cast<size_t>(slot - 1)] = std::move(pending);
     pending = {};
-    {
-        // See applySnapshotsFromLoad: the audio half becomes a per-note position.
-        const auto& stored = mainSnapshots[static_cast<size_t>(slot - 1)];
-        processorRef.setSnapshotAudio(slot - 1, stored.audio, stored.sampleRate);
-    }
-    processorRef.forgetSnapTraversalClaim();   // see the LRO branch above
     activeSnapshotIndex = slot;
     syncSnapshotUi();
     snapshotButtons[slot].flashStored();

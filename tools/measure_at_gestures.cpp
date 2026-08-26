@@ -18,7 +18,7 @@
 // Nothing here is a model of hearing. Every number printed is one the DSP
 // itself uses: SynthVoice::getAftertouch (what every aftertouch target reads),
 // getAmpEnvLevel, and VoiceManager::pressureForHeldNote (what the
-// instrument-wide Cache and Snap travellers consume).
+// instrument-wide Cache traveller consumes).
 //
 // The criterion is FROZEN, not merely "does not swell". Once a key is up its
 // voice keeps exactly the pressure that key left it with. A rise is the swell
@@ -42,7 +42,7 @@
 // covered: M3 (the expression hand-off strips a channel a key still holds) and
 // M4 (the fresh-press mark fires on re-strikes too) pass every gesture here --
 // they are gated by cases 53 and 57 in tools/test_mpe_parity.cpp instead. M5
-// (the Cache/Snap traveller reads decaying voices too) passes because with the
+// (the Cache traveller reads decaying voices too) passes because with the
 // arpeggiator on the reading comes from the held-key latch, not from a voice
 // traversal.
 //
@@ -324,20 +324,18 @@ namespace
         r.trace ("pedal up");
     }
 
-    // ── D. The arpeggiator with Cache / Snap ───────────────────────────────
+    // ── D. The arpeggiator with the Cache bar ──────────────────────────────
     //      These two do not modulate a voice, they MOVE THE INSTRUMENT: a
     //      landing is a Csound recompile. What they traverse is the reading
     //      below, so a reading that collapses and returns under a hand that
     //      never moved is a landing, and then another one on the way back.
-    void gestureArpWithCacheSnap()
+    void gestureArpWithCache()
     {
-        std::printf ("\nD. arpeggiator on, chord held, AT -> Cache and AT -> Snap\n");
+        std::printf ("\nD. arpeggiator on, chord held, AT -> Cache\n");
         Rig r;
-        r.gesture = "arp + cache/snap";
+        r.gesture = "arp + cache";
         r.set (PID::exprSrcCache, (float) ExprSource::Z);
         r.set (PID::aftertouchAmtCache, 1.0f);
-        r.set (PID::exprSrcSnap,  (float) ExprSource::Z);
-        r.set (PID::aftertouchAmtSnap, 1.0f);
         r.run (2);
 
         r.noteOn (2, 60); r.noteOn (3, 64); r.noteOn (4, 67);
@@ -482,7 +480,7 @@ int main()
     gestureRepeatedStrikes();
     gestureOverlappingRelease();
     gestureSustainPedal();
-    gestureArpWithCacheSnap();
+    gestureArpWithCache();
 
     std::printf ("\n%s -- %d violation(s)\n\n",
                  gViolations == 0 ? "ALL CLEAR" : "FAILED", gViolations);

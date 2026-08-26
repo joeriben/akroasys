@@ -763,15 +763,26 @@ namespace AftertouchTarget {
         // would re-point every saved Cutoff/Resonance/Scan/DCA/Pitch setting.
         Env4Sustain = 13,
         Env5Sustain = 14,
-        // The two that do not modulate a voice: they MOVE THE INSTRUMENT, to
-        // another cached sample or another snapshot. Everything above is a
-        // continuous depth SynthVoice reads per block; these two resolve to a
-        // position and hand it to the message thread, the same way the hardware
-        // controller's snapshot buttons already do. From the player's side that
-        // difference does not exist - it is a bar in this module like the others,
-        // and pressure moves it. Appended, never inserted: a DAW session stores
-        // the choice INDEX.
+        // The one that does not modulate a voice: it MOVES THE INSTRUMENT, to
+        // another cached sample. Everything above is a continuous depth
+        // SynthVoice reads per block; this one resolves to a position and hands
+        // it to the message thread, the same way the hardware controller's
+        // buttons already do. From the player's side that difference does not
+        // exist - it is a bar in this module like the others, and pressure moves
+        // it. Appended, never inserted: a DAW session stores the choice INDEX.
         Cache = 15,
+        // RETIRED from the expression matrix (BJ, 2026-08-26: "Keine Expression
+        // auf Snap"). A snapshot is a COMPLETE setting - patch, prompts, seed,
+        // audio - where every other entry here is a difference WITHIN one
+        // setting. One column carried two incompatible kinds of thing, and under
+        // a finger they could not be told apart. The Snap bar stays what it
+        // always was, four buttons the player presses; it is simply not
+        // something pressure drives, and the cache is autonomous of it.
+        //
+        // The entry, kEntries and both parameters STAY. A DAW session stores
+        // parameter INDICES and a .t5p stores these keys, so dropping them would
+        // re-point every patch saved since. Nothing reads them: ask
+        // inExpressionMatrix below, never `t != None`.
         Snap = 16
     };
     static constexpr ChoiceEntry kEntries[] = {
@@ -804,6 +815,26 @@ namespace AftertouchTarget {
     {
         return target == Cache || target == Snap;
     }
+
+    /** True for the targets that still HAVE a row and a route. Snap does not -
+     *  see its enum entry above. Everything that walks the expression matrix
+     *  asks THIS, never `t != None`: the enum keeps a retired entry so that
+     *  saved indices hold still, and a bare range loop would give it a row back. */
+    constexpr bool inExpressionMatrix(int target)
+    {
+        return target != None && target != Snap;
+    }
+    /** How many rows the matrix has. Counted rather than written down, so
+     *  retiring the next one cannot leave a stale number behind. */
+    constexpr int countExprRows()
+    {
+        int n = 0;
+        for (int t = 0; t < kCount; ++t)
+            if (inExpressionMatrix(t))
+                ++n;
+        return n;
+    }
+    static constexpr int kNumExprRows = countExprRows();
 
     /** The target that holds mod envelope `i`'s sustain — ENV (i+2), because ENV1
         is the amp envelope. A table for the same reason as LfoTarget::modEnvAmt:

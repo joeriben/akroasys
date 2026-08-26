@@ -374,12 +374,9 @@ T5ynthProcessor::T5ynthProcessor()
 
     // -1 is "nowhere", and zero-initialised arrays would mean "zone 0, pointed
     // at position 0" on a voice that has never been read or pointed anywhere.
-    for (auto* st : { &atVoiceCache_, &atVoiceSnap_ })
-    {
-        st->zone.fill(-1);
-        st->base.fill(-1);
-        st->engaged.fill(false);
-    }
+    atVoiceCache_.zone.fill(-1);
+    atVoiceCache_.base.fill(-1);
+    atVoiceCache_.engaged.fill(false);
     atVoicePosIdx_.fill(-1);
     atVoiceBarOwner_.fill(0);
 
@@ -3909,19 +3906,14 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // gesture either way, and the bar re-arms from wherever the hand is.
         // Once on the way into idle, not on every idle block - the cancels below
         // would otherwise sit permanently raised (see cancelParkedCachePosition).
-        if (atAnyKeyHeld_ || atCacheEngaged_ || atSnapEngaged_
-            || atCacheZone_ >= 0 || atSnapZone_ >= 0
-            || atCacheBaseZone_ >= 0 || atSnapBaseZone_ >= 0)
+        if (atAnyKeyHeld_ || atCacheEngaged_
+            || atCacheZone_ >= 0 || atCacheBaseZone_ >= 0)
         {
             atAnyKeyHeld_    = false;
             atCacheZone_     = -1;
             atCacheBaseZone_ = -1;
             atCacheEngaged_  = false;
-            atSnapZone_      = -1;
-            atSnapBaseZone_  = -1;
-            atSnapEngaged_   = false;
             cancelParkedCachePosition();
-            cancelParkedSnapSlot();
         }
         // Keep free-running modulators phase-accurate. lastLfoXVal_ must be
         // refreshed here too, not just advanced — updateDriftState() (called
@@ -4134,7 +4126,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         setAmt(paramCache.aftertouchAmtEnv4Sustain, AftertouchTarget::Env4Sustain);
         setAmt(paramCache.aftertouchAmtEnv5Sustain, AftertouchTarget::Env5Sustain);
         setAmt(paramCache.aftertouchAmtCache,        AftertouchTarget::Cache);
-        setAmt(paramCache.aftertouchAmtSnap,         AftertouchTarget::Snap);
+        // No Snap. It is retired from the matrix, and these two reads would be
+        // the only thing keeping parameters nothing routes warm on the audio
+        // thread - see AftertouchTarget::Snap for why they still exist at all.
 
         auto setSrc = [&](const std::atomic<float>* p, int target) {
             bp.aftertouchTargetSrc[static_cast<size_t>(target)] =
@@ -4156,9 +4150,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         setSrc(paramCache.exprSrcEnv4Sustain, AftertouchTarget::Env4Sustain);
         setSrc(paramCache.exprSrcEnv5Sustain, AftertouchTarget::Env5Sustain);
         setSrc(paramCache.exprSrcCache,       AftertouchTarget::Cache);
-        setSrc(paramCache.exprSrcSnap,        AftertouchTarget::Snap);
 
-        // The Pitch row does one thing the other fifteen do not: it decides
+        // The Pitch row does one thing the other fourteen do not: it decides
         // whether the per-note bend is HEARD. X is what an MPE controller's
         // lateral travel is for, so it ships wired that way; move the row to
         // another axis and the finger stops bending the note. Broadcast once
@@ -4169,7 +4162,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 == ExprSource::X);
     }
 
-    // The two targets that move the instrument rather than a voice. Resolved
+    // The one target that moves the instrument rather than a voice. Resolved
     // here, once per block, from the same pressure the voices are reading.
     updateAftertouchTraversal(bp);
 
@@ -7166,9 +7159,9 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         voiceManager.clearAllVoiceEngineMasters();
         // ...and told to the audio thread as well, because it owns the fingers'
         // gesture state and can be installing a claim in the same instant. See
-        // voiceCacheRevokeReq_. BOTH ranges: this clears every voice's master,
-        // so every finger on either bar has to take a bearing again.
-        voiceCacheRevokeReq_.store(3u, std::memory_order_release);
+        // voiceCacheRevokeReq_. This clears every voice's master, so every
+        // finger on the bar has to take a bearing again.
+        voiceCacheRevokeReq_.store(true, std::memory_order_release);
         voiceManager.distributeSamplerBuffer(masterSampler, 0.0f, /*allowMorph=*/false,
                                              /*onAudioThread=*/false);
         voiceManager.distributeWavetableFrames(masterOsc);
@@ -7220,11 +7213,11 @@ namespace
     }
 }
 
-juce::uint64 T5ynthProcessor::cachePositionSourceStamp (bool snapRange) const
+juce::uint64 T5ynthProcessor::cachePositionSourceStamp () const
 {
-    // WHAT a range would be built FROM, and nothing about HOW. Kept apart from
-    // the settings because the two must be treated in opposite ways: audio that
-    // has been replaced or deleted has to stop being reachable in the same
+    // WHAT the positions would be built FROM, and nothing about HOW. Kept apart
+    // from the settings because the two must be treated in opposite ways: audio
+    // that has been replaced or deleted has to stop being reachable in the same
     // instant - a finger crossing a zone a moment later would otherwise land a
     // take that no longer exists - while a knob being dragged must not discard
     // anything until the hand comes off it.
@@ -7232,20 +7225,15 @@ juce::uint64 T5ynthProcessor::cachePositionSourceStamp (bool snapRange) const
     // The cache is EMPTY as far as this is concerned unless it is FULL: the bar
     // does not travel a partial cache (isInferenceCacheFull gates the traversal
     // too), and building positions for entries about to be joined by more would
-    // throw the work away on the next add. The snapshot slots have no such rule
-    // - each is stored by hand and is complete the moment it exists - and they
-    // are independent of the cache entirely.
-    juce::uint64 entryCount = 0, snapValidMask = 0;
+    // throw the work away on the next add.
+    juce::uint64 entryCount = 0;
     {
         const std::lock_guard<std::mutex> lk (cacheEntriesMutex_);
         if (isInferenceCacheFull())
             entryCount = static_cast<juce::uint64> (inferenceCacheEntries.size());
-        for (int k = 0; k < kNumSnapAudioSlots; ++k)
-            if (snapAudio_[static_cast<size_t> (k)].valid)
-                snapValidMask |= (1ull << k);
     }
-    if (snapRange ? (snapValidMask == 0) : (entryCount == 0))
-        return 0;      // nothing this bar could travel
+    if (entryCount == 0)
+        return 0;      // nothing the bar could travel
     const double hostRate = cachePosHostRate_.load (std::memory_order_acquire);
     if (hostRate <= 0.0)
         return 0;      // prepareToPlay has not run; nothing can be prepared yet
@@ -7269,25 +7257,16 @@ juce::uint64 T5ynthProcessor::cachePositionSourceStamp (bool snapRange) const
     h = stampMix (h, isWavetableMode() ? 1u : 2u);
     h = stampMix (h, stampBits (static_cast<float> (hostRate)));
     h = stampMix (h, static_cast<juce::uint64> (cachePosHostBlock_.load (std::memory_order_acquire)));
-    if (snapRange)
-    {
-        h = stampMix (h, static_cast<juce::uint64> (snapAudioGeneration_.load (std::memory_order_acquire)));
-        h = stampMix (h, snapValidMask);
-    }
-    else
-    {
-        h = stampMix (h, static_cast<juce::uint64> (getInferenceCacheGeneration()));
-        h = stampMix (h, entryCount);
-    }
-    h = stampMix (h, snapRange ? 7u : 8u);   // the two ranges are never the same stamp
+    h = stampMix (h, static_cast<juce::uint64> (getInferenceCacheGeneration()));
+    h = stampMix (h, entryCount);
     return h == 0 ? 1 : h;   // 0 is reserved for "no positions wanted"
 }
 
 juce::uint64 T5ynthProcessor::cachePositionSettingsStamp() const
 {
-    // HOW any position would be built. Every field here is a CONTROL, and every
-    // one of them applies to both ranges - which is why there is one of these
-    // and two source stamps.
+    // HOW a position would be built. Every field here is a CONTROL, and none of
+    // them says WHAT the position holds - which is why the source is its own
+    // stamp, and the only one of the two that acts at once.
     juce::uint64 h = 0x0fedcba098765432ULL;
     h = stampMix (h, stampBits (paramCache.genHfBoost->load()));
     h = stampMix (h, stampBits (paramCache.wtFrames->load()));
@@ -7322,7 +7301,7 @@ void T5ynthProcessor::refreshMorphTimeOnCachePositions()
     if (mask == 0)
         return;
     const float ms = paramCache.driftCrossfade->load();
-    for (int k = 0; k < kMaxPositions; ++k)
+    for (int k = 0; k < kMaxCachePositions; ++k)
         if ((mask & (1u << static_cast<juce::uint32> (k))) != 0)
             cachePosEngines_[static_cast<size_t> (k)]->osc.setMorphTimeMs (ms);
 }
@@ -7330,7 +7309,7 @@ void T5ynthProcessor::refreshMorphTimeOnCachePositions()
 const T5ynthProcessor::CachePositionEngines*
 T5ynthProcessor::readyCachePosition (int index) const
 {
-    if (index < 0 || index >= kMaxPositions)
+    if (index < 0 || index >= kMaxCachePositions)
         return nullptr;
     const auto mask = cachePosReadyMask_.load (std::memory_order_acquire);
     if ((mask & (1u << static_cast<juce::uint32> (index))) == 0)
@@ -7456,7 +7435,7 @@ void T5ynthProcessor::invalidatePositionRange (int lo, int hiExclusive)
     // The audio thread owns the gesture arrays and the record of where voices
     // point, and it can be in the middle of installing a claim this pass cannot
     // see, so it sweeps the same range itself.
-    voiceCacheRevokeReq_.fetch_or (lo == 0 ? 1u : 2u, std::memory_order_acq_rel);
+    voiceCacheRevokeReq_.store (true, std::memory_order_release);
 }
 
 bool T5ynthProcessor::serviceCachePositionEngines()
@@ -7467,85 +7446,59 @@ bool T5ynthProcessor::serviceCachePositionEngines()
     // the thread that acts on the answer, is both cheaper and harder to get
     // wrong than a notification from each of a dozen sites.
     //
-    // THREE stamps, not one. A SOURCE stamp per range, because the sixteen cache
-    // positions and the four Snap slots are built from independent sources and
-    // one stamp for both made every change to either discard both - storing a
-    // snapshot, which is a long press and an ordinary performance gesture,
-    // handed every held note back off its cache position. And ONE settings
-    // stamp, shared, because the controls apply to both ranges - and because it
-    // is the half that has to WAIT for the hand.
+    // TWO stamps, not one. The SOURCE acts at once; the SETTINGS wait for the
+    // hand to come off the control. Splitting them is the whole point - see
+    // both functions.
     //
     // Under the lock, because getPointsLocked and the three point values are
     // engine state the callback lock guards.
     const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
-    juce::uint64 setNow = 0, srcCache = 0, srcSnap = 0;
+    juce::uint64 setNow = 0, srcCache = 0;
     {
         const juce::ScopedLock sl (getCallbackLock());
         setNow   = cachePositionSettingsStamp();
-        srcCache = cachePositionSourceStamp (false);
-        srcSnap  = cachePositionSourceStamp (true);
+        srcCache = cachePositionSourceStamp();
     }
-    // Asked every pass. TRUE on the single pass a run of settings changes ends;
-    // the settings are shared, so there is one watch for both ranges.
+    // Asked every pass. TRUE on the single pass a run of settings changes ends.
     const bool setRunEnded = settingsRunEnded (setNow, nowMs);
 
-    bool invalidated = false;
-    auto consider = [&] (int lo, int hiExclusive, juce::uint64 srcNow,
-                         juce::uint64& srcBuilt, int cursorTo)
+    if (srcCache != cachePosSrcBuiltCache_ || setRunEnded)
     {
-        const bool srcChanged = (srcNow != srcBuilt);
-        if (! srcChanged && ! setRunEnded)
-            return;
-        if (srcNow == 0 && srcBuilt == 0)
-            // Nothing to build and nothing built. Invalidating an empty range
-            // would take the callback lock and run three distribute passes for
-            // no reason.
-            return;
-        invalidatePositionRange (lo, hiExclusive);
-        srcBuilt = srcNow;
-        cachePosNextToBuild_ = juce::jmin (cachePosNextToBuild_, cursorTo);
-        invalidated = true;
-    };
-    consider (0, kMaxCachePositions, srcCache, cachePosSrcBuiltCache_, 0);
-    consider (kSnapPosBase, kMaxPositions, srcSnap, cachePosSrcBuiltSnap_, kSnapPosBase);
-    if (invalidated)
-        return srcCache != 0 || srcSnap != 0;   // come back next pass to build
+        // Nothing to build and nothing built: invalidating would take the
+        // callback lock and run three distribute passes for no reason.
+        if (srcCache != 0 || cachePosSrcBuiltCache_ != 0)
+        {
+            invalidatePositionRange (0, kMaxCachePositions);
+            cachePosSrcBuiltCache_ = srcCache;
+            cachePosNextToBuild_   = 0;
+            return srcCache != 0;           // come back next pass to build
+        }
+    }
 
-    if (srcCache == 0 && srcSnap == 0)
+    if (srcCache == 0)
         return false;
 
-    // Walk to the next position that is neither already current nor in a range
-    // with nothing to build. Skipping a whole empty range matters: with the
-    // inference cache switched off and only snapshots stored, walking indices
-    // 0-15 one per pass cost ~80 ms before the first Snap position existed - and
-    // for all of it the Snap bar had no per-note path to use.
+    // Walk to the next position that is not already current.
     {
         const juce::uint32 ready = cachePosReadyMask_.load (std::memory_order_acquire);
-        // Only "does this range have anything to build". Deliberately NOT "are
-        // its settings current": that made a range unwanted for a reason that
-        // can end WITHOUT a stamp change - the control moved away and back -
-        // and this cursor is persistent, so the positions it walked past while
-        // the range was unwanted were lost for good, leaving a range that never
-        // finished building and a bar that silently stopped travelling over
-        // most of its range. Here the only reason is the source being empty,
-        // and that flips only through a source stamp change, which always
-        // invalidates and rewinds the cursor with it.
+        // Deliberately NOT "are its settings current": that made the walk stop
+        // for a reason that can end WITHOUT a stamp change - the control moved
+        // away and back - and this cursor is persistent, so the positions it
+        // walked past meanwhile were lost for good, leaving a range that never
+        // finished building and a bar that silently stopped travelling over most
+        // of it. A source stamp change always invalidates and rewinds the cursor
+        // with it.
         //
         // What the debounce still buys is above: a settings change discards and
         // rebuilds ONCE, when the hand comes off. In between, positions are
         // built with live settings under no claim that they are current - the
         // run that is open will invalidate them all when it ends.
-        auto rangeWanted = [srcCache, srcSnap] (int idx)
-        {
-            return idx < kMaxCachePositions ? srcCache != 0 : srcSnap != 0;
-        };
-        while (cachePosNextToBuild_ < kMaxPositions
-               && ((ready & (1u << static_cast<juce::uint32> (cachePosNextToBuild_))) != 0
-                   || ! rangeWanted (cachePosNextToBuild_)))
+        while (cachePosNextToBuild_ < kMaxCachePositions
+               && (ready & (1u << static_cast<juce::uint32> (cachePosNextToBuild_))) != 0)
             ++cachePosNextToBuild_;
     }
     const int index = cachePosNextToBuild_;
-    if (index >= kMaxPositions)
+    if (index >= kMaxCachePositions)
         return false;                       // all built and current
 
     juce::AudioBuffer<float> source;
@@ -7558,36 +7511,22 @@ bool T5ynthProcessor::serviceCachePositionEngines()
         // the cache that is a dropout per position built. The audio thread
         // never reads these, so it has no business in this lock.
         const std::lock_guard<std::mutex> lk (cacheEntriesMutex_);
-        if (index < kMaxCachePositions)
+        // Only while the cache is FULL - the bar does not travel a partial one.
+        const int count = isInferenceCacheFull()
+            ? juce::jmin (static_cast<int> (inferenceCacheEntries.size()), kMaxCachePositions)
+            : 0;
+        if (index < count)
         {
-            // A cache position, and only while the cache is FULL - the bar does
-            // not travel a partial one.
-            const int count = isInferenceCacheFull()
-                ? juce::jmin (static_cast<int> (inferenceCacheEntries.size()), kMaxCachePositions)
-                : 0;
-            if (index < count)
-            {
-                const auto& e = inferenceCacheEntries[static_cast<size_t> (index)];
-                source.makeCopyOf (e.audio);
-                sourceRate = e.sampleRate > 0.0 ? e.sampleRate : 44100.0;
-            }
-        }
-        else
-        {
-            // A SNAP position: one of the four stored snapshots' audio.
-            const auto& sl = snapAudio_[static_cast<size_t> (index - kSnapPosBase)];
-            if (sl.valid)
-            {
-                source.makeCopyOf (sl.audio);
-                sourceRate = sl.sampleRate > 0.0 ? sl.sampleRate : 44100.0;
-            }
+            const auto& e = inferenceCacheEntries[static_cast<size_t> (index)];
+            source.makeCopyOf (e.audio);
+            sourceRate = e.sampleRate > 0.0 ? e.sampleRate : 44100.0;
         }
     }
     if (source.getNumSamples() <= 0 || source.getNumChannels() <= 0)
     {
-        // An empty entry, an empty snapshot slot, or a cache that is not full:
-        // simply not a position. Walk on - the slots are a fixed layout, not a
-        // packed list, so index k always means the same thing to the bar.
+        // An empty entry, or a cache that is not full: simply not a position.
+        // Walk on - the slots are a fixed layout, not a packed list, so index k
+        // always means the same thing to the bar.
         ++cachePosNextToBuild_;
         return true;
     }
@@ -8100,69 +8039,6 @@ void T5ynthProcessor::clearInferenceCache()
     }
 }
 
-void T5ynthProcessor::setSnapshotAudio (int slot0, const juce::AudioBuffer<float>& audio,
-                                       double sampleRate)
-{
-    if (slot0 < 0 || slot0 >= kNumSnapAudioSlots)
-        return;
-
-    // Both multi-megabyte operations happen OUTSIDE the lock. This mutex is
-    // taken by serviceCachePositionEngines while it holds the audio callback
-    // lock, so anything slow under it parks processBlock behind it: a long-press
-    // store would have cost a whole take's memcpy of dropouts, and the retiring
-    // buffer's free on top of it. Under the lock there are two pointer swaps.
-    // Same shape addInferenceCacheEntry already uses for the same reason.
-    const bool hasAudio = audio.getNumSamples() > 0 && audio.getNumChannels() > 0;
-    juce::AudioBuffer<float> incoming;
-    if (hasAudio)
-        incoming.makeCopyOf (audio);
-
-    juce::AudioBuffer<float> retired;
-    bool changed = true;
-    {
-        const std::lock_guard<std::mutex> lk (cacheEntriesMutex_);
-        auto& dst = snapAudio_[static_cast<size_t> (slot0)];
-        if (! hasAudio && ! dst.valid)
-        {
-            // Clearing a slot that holds nothing is not an event. Worth saying
-            // because the generation below is in the position stamp: bumping it
-            // for a no-op would tear down and rebuild all twenty position
-            // engines - and hand every held note back to the instrument-wide
-            // master - every time the four slots are cleared as a group, which
-            // a preset load and closing the window both do.
-            changed = false;
-        }
-        else
-        {
-            retired        = std::move (dst.audio);
-            dst.audio      = std::move (incoming);
-            dst.sampleRate = (hasAudio && sampleRate > 0.0) ? sampleRate : 44100.0;
-            dst.valid      = hasAudio;
-        }
-        // The lock-free mirror, written with the flag it mirrors.
-        {
-            unsigned m = 0;
-            for (int k = 0; k < kNumSnapAudioSlots; ++k)
-                if (snapAudio_[static_cast<size_t> (k)].valid)
-                    m |= (1u << static_cast<unsigned> (k));
-            snapAudioValidMask_.store (m, std::memory_order_release);
-        }
-        // INSIDE the lock, with the valid flag it belongs to. The source stamp
-        // reads the valid mask under this lock and the counter beside it; bumped
-        // after the release, a builder pass could read the new mask with the old
-        // counter, compute a stamp equal to the one it has already built and
-        // skip the rebuild for a pass.
-        if (changed)
-            snapAudioGeneration_.fetch_add (1, std::memory_order_acq_rel);
-    }
-    // `retired` dies here, off the lock.
-}
-
-void T5ynthProcessor::clearSnapshotAudio (int slot0)
-{
-    setSnapshotAudio (slot0, juce::AudioBuffer<float>(), 44100.0);
-}
-
 void T5ynthProcessor::publishInferenceCacheTraversableZones()
 {
     // Every mutation of the cache ends here. Only a FULL cache is traversable:
@@ -8308,19 +8184,6 @@ void T5ynthProcessor::updateVoiceCachePositions(float cacheAmt, int cacheSrc, in
         requestVoiceCacheService();
 }
 
-void T5ynthProcessor::updateVoiceSnapPositions(float snapAmt, int snapSrc)
-{
-    // Four positions, and only the AUDIO half of each snapshot. A snapshot also
-    // carries a whole parameter tree, and the instrument has exactly one of
-    // those - two held keys cannot sit on two filter settings. So the patch half
-    // stays where it was: the instrument-wide bar recalls it, as before.
-    bool repointed = false;
-    updateVoiceBarPositions(atVoiceSnap_, snapAmt, snapSrc, kNumSnapAudioSlots,
-                            kSnapPosBase, repointed);
-    if (repointed)
-        requestVoiceCacheService();
-}
-
 void T5ynthProcessor::updateVoiceHandChanges()
 {
     // Audio thread, EVERY block, above both bars and above every early return.
@@ -8329,11 +8192,8 @@ void T5ynthProcessor::updateVoiceHandChanges()
     // stale in every gap - a bar at rest, a bar whose amount was zero, a bar
     // whose per-note path did not apply, all stop recording - and that bar's
     // first pass back then read its own staleness as "this voice changed hands"
-    // and threw away the SHARED record of where the voice points and who owns
-    // it, under the other bar's finger, which had not moved. Storing a snapshot
-    // with keys held did it: the Snap bar's first per-note pass wiped the cache
-    // bar's traveller, and the cache bar could not take it back because the
-    // finger was steady and the ownership was gone with the record.
+    // and threw away the record of where the voice points and who owns it, under
+    // a finger that had not moved.
     //
     // What is forgotten is the GESTURE, never the pointer. A releasing voice
     // must keep the sample it is playing, so the master is deliberately left
@@ -8362,12 +8222,9 @@ void T5ynthProcessor::updateVoiceHandChanges()
             continue;
         atVoiceEpoch_[vi] = epoch;
         atVoiceChan_[vi]  = chan;
-        for (auto* st : { &atVoiceCache_, &atVoiceSnap_ })
-        {
-            st->zone[vi]    = -1;
-            st->base[vi]    = -1;
-            st->engaged[vi] = false;
-        }
+        atVoiceCache_.zone[vi]    = -1;
+        atVoiceCache_.base[vi]    = -1;
+        atVoiceCache_.engaged[vi] = false;
         atVoicePosIdx_[vi]   = -1;
         atVoiceBarOwner_[vi] = 0;
     }
@@ -8530,12 +8387,11 @@ void T5ynthProcessor::forgetPositionIndices(int lo, int hiExclusive)
 
 void T5ynthProcessor::releaseVoiceBar(VoiceBarState& st)
 {
-    // ONE bar. The other one may well be in the middle of a gesture: a finger
-    // sliding laterally travels the cache while standing still on Snap, and
-    // wiping both would mean a Snap bar at rest silently re-armed the cache bar
-    // under a moving finger every block - and, with only one of the two wired at
-    // all, the wired one could never engage, because its base zone was thrown
-    // away before it could be carried off.
+    // ONE bar. Another may well be in the middle of a gesture, and wiping both
+    // would mean a bar at rest silently re-arming a travelling one under a
+    // moving finger every block - and, with only one of them wired at all, the
+    // wired one could never engage, because its base zone was thrown away before
+    // it could be carried off.
     if (! st.active)
         return;
     st.active = false;
@@ -8566,11 +8422,6 @@ void T5ynthProcessor::cancelParkedCachePosition()
     atCacheCancelSeq_.store(atPostSeq_, std::memory_order_release);
 }
 
-void T5ynthProcessor::cancelParkedSnapSlot()
-{
-    atSnapCancelSeq_.store(atPostSeq_, std::memory_order_release);   // parked only - see above
-}
-
 bool T5ynthProcessor::arpIsHoldingKeys() const
 {
     // processBlock's `arpHoldingKeys`, in one place both it and the cache bar
@@ -8593,7 +8444,6 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         return std::abs (a) >= kAftertouchAmtEpsilon ? a : 0.0f;
     };
     const float cacheAmt = amtOf(AftertouchTarget::Cache);
-    const float snapAmt  = amtOf(AftertouchTarget::Snap);
 
     // A new instrument-wide sound landed since the last pass: every claim goes
     // back and every finger takes a fresh bearing. Done HERE, on the audio
@@ -8602,30 +8452,18 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
     // are this thread's alone.
     //
     // At the TOP, above every early return in this function. The request is
-    // raised by the two events that also empty the ready mask, and it is a
+    // raised by the events that also empty the ready mask, and it is a
     // hand-back, not a gesture: it has to be honoured whether or not a key is
-    // held, whether or not either bar is up, and whichever bar the patch wires.
-    // Consumed under the cache bar it latched in a Snap-only patch - the held
-    // voice stayed on a master that had been torn down, carrying a stale record
-    // of where it pointed, and turning the cache bar up minutes later fired the
-    // hand-back retroactively.
-    if (const unsigned revoke = voiceCacheRevokeReq_.exchange(0, std::memory_order_acq_rel))
+    // held and whether or not the bar is up. Left under the bar's own amount it
+    // latched - the held voice stayed on a master that had been torn down,
+    // carrying a stale record of where it pointed, and turning the bar up
+    // minutes later fired the hand-back retroactively.
+    if (voiceCacheRevokeReq_.exchange(false, std::memory_order_acq_rel))
     {
-        // Per RANGE. The gesture is forgotten and the claims go back for the
-        // positions that were actually rebuilt; the other range's fingers keep
-        // travelling. A re-arm PERMITS the next landing, it does not fire one -
-        // every voice in the range takes a bearing again and has to be carried
-        // off it.
-        if (revoke & 1u)
-        {
-            forgetPositionIndices(0, kMaxCachePositions);
-            rearmVoiceBar(atVoiceCache_);
-        }
-        if (revoke & 2u)
-        {
-            forgetPositionIndices(kSnapPosBase, kMaxPositions);
-            rearmVoiceBar(atVoiceSnap_);
-        }
+        // A re-arm PERMITS the next landing, it does not fire one - every voice
+        // takes a bearing again and has to be carried off it.
+        forgetPositionIndices(0, kMaxCachePositions);
+        rearmVoiceBar(atVoiceCache_);
         // The granular half of the hand-back is not this thread's to make -
         // see voiceCacheHandBackReq_.
         voiceCacheHandBackReq_.store(true, std::memory_order_release);
@@ -8653,21 +8491,14 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         atCacheZone_ = -1; atCacheActedIdx_ = -1;
         atCacheEngaged_ = false; atCacheBaseZone_ = -1;
     }
-    if (atSnapForgetActed_.exchange(false, std::memory_order_acq_rel))
-    {
-        atSnapZone_ = -1; atSnapActedSlot_ = -1;
-        atSnapEngaged_ = false; atSnapBaseZone_ = -1;
-    }
 
-    // Each bar re-arms on ITS OWN. Zeroing one while the other stays live has to
-    // forget that one's zone, or turning it back up with the finger already
-    // resting where it left off would post nothing and the instrument would sit
-    // on whatever is loaded instead of going where the hand is.
+    // The bar re-arms when it goes down, or turning it back up with the finger
+    // already resting where it left off would post nothing and the instrument
+    // would sit on whatever is loaded instead of going where the hand is.
     // Once, when the bar goes down - not on every block it spends at zero. Most
-    // patches leave both of these at zero forever, and a cancel raised on every
-    // block would sit permanently true: harmless today, because nothing else
-    // fills the two parking slots, and a trap for whoever adds something that
-    // does.
+    // patches leave it at zero forever, and a cancel raised on every block would
+    // sit permanently true: harmless today, because nothing else fills the
+    // parking slot, and a trap for whoever adds something that does.
     if (cacheAmt == 0.0f && (atCacheZone_ >= 0 || atCacheActedIdx_ >= 0
                              || atCacheEngaged_ || atCacheBaseZone_ >= 0))
     {
@@ -8676,22 +8507,12 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         cancelParkedCachePosition();
     }
     if (cacheAmt == 0.0f)
-        releaseVoiceCachePositions();   // idempotent; held notes keep their sample
-    if (snapAmt == 0.0f)
-        releaseVoiceBar(atVoiceSnap_);  // ditto - and HERE, beside the cache's,
-                                        // because below it sits under two early
-                                        // returns that fire on exactly the
-                                        // cases it exists for: both bars at
-                                        // zero, and every key lifted.
-    if (snapAmt == 0.0f && (atSnapZone_ >= 0 || atSnapActedSlot_ >= 0
-                            || atSnapEngaged_ || atSnapBaseZone_ >= 0))
     {
-        atSnapZone_ = -1; atSnapActedSlot_ = -1;
-        atSnapEngaged_ = false; atSnapBaseZone_ = -1;
-        cancelParkedSnapSlot();
-    }
-    if (cacheAmt == 0.0f && snapAmt == 0.0f)
+        // HERE, above the early returns that fire on exactly the cases it exists
+        // for: the bar at zero, and every key lifted.
+        releaseVoiceCachePositions();   // idempotent; held notes keep their sample
         return;
+    }
 
     // Only while a key is actually HELD. Not "a voice is active": a voice stays
     // active through its whole release tail, and its pressure is not cleared
@@ -8724,7 +8545,7 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         atAnyKeyHeld_ = anyHeld;
         if (! anyHeld)
         {
-            // The gesture is over: each bar must be pressed into again before it
+            // The gesture is over: the bar must be pressed into again before it
             // claims anything, and nothing it had outstanding may still arrive.
             //
             // What does NOT go is where the traveller stood. Forgetting that
@@ -8736,16 +8557,14 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
             // the language oscillator each of those re-asks is a recompile of
             // the orchestra already sounding, one per note, back to back.
             atCacheZone_ = -1; atCacheEngaged_ = false; atCacheBaseZone_ = -1;
-            atSnapZone_  = -1; atSnapEngaged_  = false; atSnapBaseZone_  = -1;
             cancelParkedCachePosition();
-            cancelParkedSnapSlot();
         }
     }
     if (! anyHeld)
         return;
-    // Each bar reads its OWN axis: these two are targets in the expression
-    // matrix like the rest, so which of V/X/Y/Z moves them is the player's
-    // choice, not a constant.
+    // The bar reads its OWN axis: it is a target in the expression matrix like
+    // the rest, so which of V/X/Y/Z moves it is the player's choice, not a
+    // constant.
     //
     // Same reason as above for the reading itself: in an arpeggiator gap there
     // is no voice to read the pressure off, and taking 0 there would walk the
@@ -8762,9 +8581,7 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
                 value = juce::jmax(value, voiceManager.pressureForHeldNote(k.note));
         return value;
     };
-    const int   snapSrc       = bp.aftertouchTargetSrc[AftertouchTarget::Snap];
     const int   cacheSrc      = bp.aftertouchTargetSrc[AftertouchTarget::Cache];
-    const float snapPressure  = axisReading(snapSrc);
     const float cachePressure = axisReading(cacheSrc);
 
     // Changing which axis a bar rides is not the hand moving, and without this
@@ -8775,25 +8592,13 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
     // cache's own oscillator change further down, and for the same reason: a
     // re-arm PERMITS the next landing, it does not fire one. Travel one step and
     // the bar is back.
-    if (snapSrc != atSnapSrc_)
-    {
-        // Per note as well as instrument-wide, and per BAR: every voice's
-        // reading on this axis jumps in one block under fingers that have not
-        // stirred. Only this bar's gesture goes - the cache bar may be mid-slide
-        // on an axis nobody touched - and where the voices POINT stays, because
-        // an axis change is not an instruction to crossfade every held note
-        // somewhere else.
-        rearmVoiceBar(atVoiceSnap_);
-        atSnapSrc_       = snapSrc;
-        atSnapZone_      = -1;
-        atSnapActedSlot_ = -1;
-        atSnapEngaged_   = false;
-        atSnapBaseZone_  = -1;
-    }
     if (cacheSrc != atCacheSrc_)
     {
-        // Per note as well as instrument-wide, and per BAR - see the Snap bar
-        // just above for both halves of why.
+        // Per note as well as instrument-wide: every voice's reading on this
+        // axis jumps in one block under fingers that have not stirred. Only this
+        // bar's gesture goes, and where the voices POINT stays, because an axis
+        // change is not an instruction to crossfade every held note somewhere
+        // else.
         rearmVoiceBar(atVoiceCache_);
         atCacheSrc_       = cacheSrc;
         atCacheZone_      = -1;
@@ -8802,124 +8607,11 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         atCacheBaseZone_  = -1;
     }
 
-    // REST IS NOT A DESTINATION - see where each bar engages, below.
+    // REST IS NOT A DESTINATION - see where the bar engages, below.
 
-    if (snapAmt != 0.0f)
     {
-        constexpr int kSnapSlots = 4;
-
-        // PER NOTE, exactly as the cache bar below: each held key travels the
-        // four stored snapshots' AUDIO on its own reading.
+        // The bar is up - the zero case returned above.
         //
-        // ONLY the audio, and while this path is in charge the patch half is
-        // not recalled AT ALL - not per note, and not instrument-wide either.
-        // That is deliberate and it is the whole point of per note. A snapshot
-        // carries a parameter tree; the instrument has ONE of those by
-        // construction; so a finger travelling snapshots while recalling patches
-        // would re-cut the filter, the envelopes and the routing under every
-        // other finger on the keyboard. That is the defect this conversion
-        // exists to remove, arriving through the other half of the same control.
-        // Per note the bar moves audio, and the instrument's patch is left where
-        // the player set it. The instrument-wide bar in the else below is
-        // unchanged and still recalls both halves - it is what a patch gets on
-        // the LRO, under the arpeggiator, and with nothing held.
-        //
-        // Two questions, deliberately separate. WHETHER the per-note path applies
-        // is about the patch and the hands: the LRO (whose snapshots are
-        // orchestras, not takes, and whose recall is a Csound compile), the
-        // arpeggiator (a chord held by fingers that make no voice), and whether
-        // any key is held at all. Whether it is READY is about the build thread,
-        // and it is not the same question - falling through to the
-        // instrument-wide branch because a position is still being built would
-        // post a snapshot recall, and a snapshot recall rewrites the entire
-        // parameter tree under every held note. That is the defect this whole
-        // conversion exists to remove, arriving from a race. So when the path
-        // applies but is not ready yet, the bar WAITS: it forgets the gesture,
-        // and the player travels one step once the positions exist.
-        //
-        // And it asks about the SNAP slots, not the mask as a whole. They share
-        // one mask with the sixteen cache positions, so asking "is anything
-        // ready" made this bar depend on the cache - in a patch with snapshots
-        // stored and the cache switched off, indices 0-15 are empty and the
-        // answer was no.
-        //
-        // ...and only when there is something to travel AT ALL. A snapshot can
-        // carry a patch and no audio - preset slots saved before the audio half
-        // existed do - and with NO slot holding audio the per-note path does not
-        // apply rather than waiting: no positions are coming, so the
-        // instrument-wide bar takes it and goes on recalling patches.
-        //
-        // The question is the BAR's, not the slot's, and it cannot be otherwise:
-        // a bar is per note or instrument-wide for a whole block, and which slot
-        // the finger is on is only known after the per-note pass has run. So in
-        // a MIXED row - some slots with audio, some with only a patch - the bar
-        // goes per note and the patch-only slots are simply not destinations:
-        // travelling into one leaves each note playing what it has. That follows
-        // from per note meaning audio; the alternative is one finger recalling a
-        // parameter tree under all the others, which is the defect this whole
-        // conversion removes.
-        // isSurfaceParadigmLanguage, NOT isLanguageOscillatorSounding. Which
-        // snapshot a press stores and a recall restores is decided by the
-        // SURFACE the player is looking at (MainPanel's oscEasyMode), and the
-        // two are deliberately different questions - the LRO panel can sit in
-        // front of a neural engine for a whole session. Asked of the engine, the
-        // bar went per-note on the LRO surface and crossfaded held notes onto
-        // whatever neural audio an earlier Easy-mode session had left in the
-        // slots, while the orchestras the player had just stored there were
-        // never reached: the LRO branch of the store never calls
-        // setSnapshotAudio, so restoreLcoSnapshot is the only thing that can
-        // recall them, and it lives on the instrument-wide path.
-        const bool snapPerNoteApplies = ! isSurfaceParadigmLanguage()
-                                     && ! arpIsHoldingKeys()
-                                     && voiceManager.getKeyHeldVoiceCount() > 0
-                                     && snapAudioValidMask_.load(std::memory_order_acquire) != 0;
-        if (snapPerNoteApplies)
-        {
-            if (positionsReadyInRange(kSnapPosBase, kMaxPositions))
-                updateVoiceSnapPositions(snapAmt, snapSrc);
-            else
-                releaseVoiceBar(atVoiceSnap_);   // nothing to travel yet - wait
-            // Held re-armed rather than left standing, for the reason the cache
-            // bar gives: when the per-note path hands back, the bar takes a
-            // bearing first.
-            atSnapZone_ = -1; atSnapActedSlot_ = -1;
-            atSnapEngaged_ = false; atSnapBaseZone_ = -1;
-        }
-        else
-        {
-        // The per-note path is not in charge, so its gesture goes: coming back
-        // (the LRO stops sounding, the arpeggiator lets go) every voice takes a
-        // bearing and has to be carried off it. Mirrors the cache bar's own
-        // releaseVoiceCachePositions on the same branch.
-        releaseVoiceBar(atVoiceSnap_);
-        const int zone = traversalZone(snapPressure, snapAmt, kSnapSlots, atSnapZone_);
-        if (zone >= 0)
-        {
-            atSnapZone_ = zone;
-            if (! atSnapEngaged_)        // the hand has to move - see the cache bar below
-            {
-                if (atSnapBaseZone_ < 0)          atSnapBaseZone_ = zone;
-                else if (zone != atSnapBaseZone_) atSnapEngaged_ = true;
-            }
-            if (atSnapEngaged_)
-            {
-                const int slot = (snapAmt > 0.0f ? zone
-                                                 : (kSnapSlots - 1 - zone)) + 1;  // slots are 1-4
-                // Same question as the cache bar below, for the same reason.
-                if (slot != atSnapActedSlot_)
-                {
-                    atSnapActedSlot_ = slot;
-                    atSnapReq_.store(makeTraversalReq(++atPostSeq_, slot),
-                                     std::memory_order_release);
-                    triggerAsyncUpdate();
-                }
-            }
-        }
-        }
-    }
-
-    if (cacheAmt != 0.0f)
-    {
         // Whichever oscillator is sounding owns the cache this bar travels.
         //
         // Asked of the PARAMETER, not of bp: this runs early in processBlock,
@@ -8983,7 +8675,7 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         const unsigned gen = lro ? getCsoundCacheGeneration()
                                  : getInferenceCacheGeneration();
         if (gen != genBefore)
-            return;   // the Snap bar above has already had its block
+            return;   // sit this block out rather than steer by a mismatched pair
         // A cache that has been touched at all is a different cache, and the
         // position this bar last asked for says nothing about the new one - so
         // the bar re-arms and a finger already somewhere in it can travel there
@@ -9005,9 +8697,7 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
             // And per note, for the same reason: position 3 of the cache that
             // has just replaced this one says nothing about position 3 of the
             // one the fingers were travelling. Here the record of where voices
-            // point DOES go - but only for the sixteen cache positions. The four
-            // Snap slots hold what they held, and a finger mid-slide across them
-            // must not lose its travel because the neural cache regenerated.
+            // point DOES go with it.
             rearmVoiceBar(atVoiceCache_);
             forgetPositionIndices(0, kMaxCachePositions);
         }
@@ -9042,11 +8732,10 @@ void T5ynthProcessor::updateAftertouchTraversal(const BlockParams& bp)
         // `arpEnabled && arpeggiator.hasHeldKeys()` and never the second half
         // on its own.
         //
-        // WHETHER it applies and whether it is READY are two questions - see the
-        // Snap bar above for why they must not be one. Falling through to the
-        // instrument-wide branch while a position is still being built lands a
-        // whole sample on every voice at once, which is the very thing per note
-        // exists to stop.
+        // WHETHER it applies and whether it is READY are two questions, and they
+        // must not be made one. Falling through to the instrument-wide branch
+        // while a position is still being built lands a whole sample on every
+        // voice at once, which is the very thing per note exists to stop.
         const bool perNoteApplies = ! lro
                                  && ! arpIsHoldingKeys()
                                  && zones > 0
@@ -12166,62 +11855,6 @@ void T5ynthProcessor::handleAsyncUpdate()
     const int snapReq = xlSnapshotReq_.exchange(-1, std::memory_order_acq_rel);
     if (snapReq >= 0 && onSnapshotRequested)
         onSnapshotRequested(snapReq);
-
-    // Aftertouch → Snap: recall the slot the pressure has reached. Its own
-    // mailbox, not the controller's - a single slot would let whichever wrote
-    // last silently eat the other, and the controller press is a one-shot with
-    // no second chance while a bar can simply be moved again. The controller is
-    // drained just above, so in a cycle carrying both, the bar has the last
-    // word; the press is not lost, it is overruled by the finger.
-    //
-    // And it waits for the Csound swap for the same reason the cache landing
-    // below does: in the language oscillator a slot carries an orchestra, and
-    // installing it takes csoundLifecycleMutex_, which the compile thread holds
-    // across a full prepare and warmup. Called straight from a held control that
-    // is the whole window frozen for over a second, once per step.
-    {
-        const juce::uint64 req = atSnapReq_.exchange(0, std::memory_order_acq_rel);
-        const bool arrivedNow = traversalReqIdx(req) >= 0;
-        if (arrivedNow)
-        {
-            pendingAtSnapSlot_ = traversalReqIdx(req);
-            pendingAtSnapSeq_  = traversalReqSeq(req);   // latest wins
-        }
-
-        const bool waitForSwap = isLanguageOscillatorSounding()
-                              && (csoundCompileInFlight_.load(std::memory_order_acquire)
-                               || csoundSwapPending_.load(std::memory_order_acquire)
-                               || csoundSwapFading_.load(std::memory_order_acquire));
-        // Belonging to a gesture that has ended.
-        const bool stale = pendingAtSnapSlot_ >= 0
-                        && traversalSeqReached(pendingAtSnapSeq_,
-                               atSnapCancelSeq_.load(std::memory_order_acquire));
-
-        // A press that can land NOW lands, cancelled or not: it is a millisecond
-        // behind the finger, which is no distance at all, and the alternative is
-        // a last step that arrives or does not depending on when the message
-        // thread happened to run. Pressure reaches zero a few milliseconds
-        // before the note-off on most keyboards, so that last step is the end of
-        // very nearly every phrase.
-        //
-        // A press that would have to WAIT is another matter. It arrives when the
-        // Csound swap frees up, a second or more later, and by then the gesture
-        // it belonged to is over - so once overtaken by a cancel it goes, and it
-        // goes on the same terms whenever this happens to run.
-        if (pendingAtSnapSlot_ >= 0 && stale && (waitForSwap || ! arrivedNow))
-        {
-            pendingAtSnapSlot_ = -1;
-            atSnapForgetActed_.store(true, std::memory_order_release);
-        }
-
-        if (pendingAtSnapSlot_ >= 0 && ! waitForSwap)
-        {
-            const int slot = pendingAtSnapSlot_;
-            pendingAtSnapSlot_ = -1;
-            if (onSnapshotRequested)
-                onSnapshotRequested(slot);
-        }
-    }
 
     // Aftertouch → Cache: play the entry the pressure has reached. Same editor
     // path the Re-Prompt stepping uses, so the held note crossfades to it.

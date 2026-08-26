@@ -75,7 +75,7 @@ the new code keeps the old behaviour deliberately, and the reason is given.
 | 23a | Switching the arpeggiator **off** hands the still-held keys back **with their MPE channel intact** (`PluginProcessor.cpp:3851-3862`) | Unchanged — and the reason note IDs would have been expensive: while the arp is on it *consumes* the note-ons, so a note tracker would have had to be fed from a second place |
 | 24 | `voiceMidiChannel_` also discriminates origin: a step-seq slide must not continue a held external note | Unchanged — this is not MPE routing and must not be replaced by a note ID |
 | 24a | **New, 2026-08-23.** A key-up names its member channel. `noteOff` matched by pitch alone, so the same pitch held on two member channels — a second finger on a key another finger already holds, or a repeat rotated onto a fresh channel while the first is down — was ended by whichever key came up first, and the finger still down pointed at a voice already releasing. `mpeChannel` matches the ORIGIN tag, because the key being lifted is the key that struck the voice. It was a wildcard when 0 — see row 24b, which closed that. Corpus [32] |
-| 24b | **New, 2026-08-23.** The same test in the other direction, and for the SOURCE half of the match. Every internal note event — the step sequencer's and the arpeggiator's — carries `sourceId` −1, and so does external MIDI; `noteOff` read that −1 as a WILDCARD, matching every voice of the pitch whatever struck it. Hold a note, start the sequencer, and the note was cut the first time the pattern reached that pitch (measured: 0.05 s at 240 BPM) with the finger still down. Under the damper it was not cut but MARKED sustained, which is worse: `isKeyHeldVoice` then reads false under a hand that never moved, so the Cache/Snap travellers stop seeing the hand, `claimExprChannel` is free to strip that voice's member channel, and lifting the pedal releases a key nobody lifted. The source test is now strict (the same form the bind branch has always used) and origin is required in both directions, so an internal note-off ends internal notes and nothing else. Every caller that means an external key names its channel. Corpus case 56 |
+| 24b | **New, 2026-08-23.** The same test in the other direction, and for the SOURCE half of the match. Every internal note event — the step sequencer's and the arpeggiator's — carries `sourceId` −1, and so does external MIDI; `noteOff` read that −1 as a WILDCARD, matching every voice of the pitch whatever struck it. Hold a note, start the sequencer, and the note was cut the first time the pattern reached that pitch (measured: 0.05 s at 240 BPM) with the finger still down. Under the damper it was not cut but MARKED sustained, which is worse: `isKeyHeldVoice` then reads false under a hand that never moved, so the Cache traveller stops seeing the hand, `claimExprChannel` is free to strip that voice's member channel, and lifting the pedal releases a key nobody lifted. The source test is now strict (the same form the bind branch has always used) and origin is required in both directions, so an internal note-off ends internal notes and nothing else. Every caller that means an external key names its channel. Corpus case 56 |
 | 23b | **New, 2026-08-23.** The arpeggiator's held-key set is keyed by pitch AND channel, the same identity the pressure ledger uses. Keyed by pitch alone the second of two fingers on one key never got an entry, and the first key-up took the shared one away: switching the arp off then handed back nothing for a key that was still pressed (silence under it until it was released and pressed again), and switching the arp on released only one of the two voices, leaving the other droning under the arpeggio. The pattern still carries a shared pitch once — the arp plays pitches, not fingers. Corpus case 57 |
 | 25 | A voice's MPE tag is cleared when it goes idle | **Split, 2026-08-23.** There are now two tags. `voiceMidiChannel_` is ORIGIN (row 24) and still falls only when the voice goes idle. `voiceExprChannel_` is EXPRESSION routing, and it falls on idle **or on hand-off**: when a new note is struck on a member channel, `claimExprChannel` strips that channel from every other voice. Without it a releasing or pedal-held voice kept the tag, and because an MPE controller reuses its member channels, the next key's pressure, bend and slide also drove the old, dying note — a released note swelling back up under AT→DCA. Poly-AT never showed it because it matches by note NUMBER, which is exactly why PolyAT mode behaved and MPE mode did not. The voice that loses the channel keeps its last expression, frozen. It is taken ONLY from voices no finger is on: two notes really can be down on one channel — a plain keyboard transmitting on channel 2, or an MPE zone with fewer members than fingers — and there the channel drives BOTH, which is MPE's own rule and also what bounds the freeze (on a still-held voice nothing would ever end it). Corpus [28] release, [29] pedal, [33] the boundary |
 | 25a | **New, 2026-08-23.** A voice stops answering its member channel at its OWN key-up, not at the next note-on. `claimExprChannel` is a hand-off and runs only from `noteOn`, but a controller resets its member channel BEFORE the note-on it is preparing — §4a's own capture has CC74 = 0 immediately ahead of 201 of 203 note-ons — so the reset burst was applied while the previous note still owned the tag, and every release tail was pulled back to rest a few milliseconds after the key came up: Y and Z to zero, and with the wheel in the burst a four-octave downward snap in an audible tail. Cleared at the key-up only, which keeps a chord held on one channel together (each voice holds the channel until its own key lifts) and never touches a voice whose key is still down, where nothing would end the freeze. A note the DAMPER holds is cleared too — the pedal keeps it singing, the finger decides its expression, which is the boundary rows 13a and 14a already draw and a change from the previous behaviour, where a pedalled note followed its member channel until the next note-on took the channel from it. Row 25's hand-off is now a BACKSTOP: every voice it could strip arrives with the tag already zeroed, so cases 28 and 29 no longer fail when it is deleted. It is kept because it is the only thing that would catch a voice holding a live tag with no finger on it by some other route. Corpus cases 17, 33 (second half), 58 |
@@ -449,7 +449,9 @@ a second question inside it (a hard stop clicks, a fast ramp does not).
 
 The two expression targets added last — **Cache** and **Snap**, the ones that
 travel a row of whole sounds rather than move a number — arrived
-instrument-wide, and that is the one thing MPE is not. Reported by the player:
+instrument-wide, and that is the one thing MPE is not. (Snap has since left the
+expression matrix entirely — see *Snap, retired* below. What follows describes
+the Cache bar, which is what is live.) Reported by the player:
 *"das ist keine Poly-Funktion. Der Cache wird wie mit einem primitiven Mono_AT
 abgefahren. D.h. bei 2 gehaltenen Noten wechselt das Sample für alle synchron."*
 
@@ -488,71 +490,23 @@ fingers that make no voice at all between steps, and the instrument-wide path
 already repairs that gap through `pressureForHeldNote`); and the moments before
 the positions are prepared.
 
-**Snap is converted too, and its AUDIO half only.** Asked whether per note
-applied to the Snap bar as well, the player: *"ja, natürlich nur die
-audio-hälfte. ich meine dasselbe verhalten wie nun beim Cache. MPE per note
-fährt durch die Audios."* So each of the four stored snapshots' audio becomes a
-position like a cache entry — indices 16–19 beside the cache's 0–15, prepared by
-the same pass, pointed at by the same call.
+**Whose hand is on a voice is the VOICE's record, not a bar's.** Kept per bar it
+went stale in every gap — a bar at rest, a bar at zero, a bar whose per-note path
+did not apply, all stop tracking — and that bar's first pass back read its own
+staleness as "this voice changed hands" and threw away the record of where the
+voice points and who owns it, under a motionless finger.
 
-The patch half does not travel, and while the per-note path is in charge it is
-**not recalled at all** — not per note and not instrument-wide either. That is
-the point rather than a gap in it. A snapshot carries a whole APVTS tree; the
-instrument has exactly one of those; so a finger travelling snapshots while
-recalling patches would re-cut the filter, the envelopes and the routing under
-every other finger on the keyboard — the very defect this conversion exists to
-remove, arriving through the other half of the same control. Per note the bar
-moves audio and leaves the patch where the player set it. The instrument-wide
-bar still recalls both halves and is what a patch gets on the language
-oscillator, under the arpeggiator, and with nothing held. **Case 84b is the
-gate.**
-
-The four slots live in `MainPanel` and nothing repopulates them when the window
-is reopened, so closing it drops the processor's copies with the panel's. That
-is not a new limit: nulling `onSnapshotRequested` in the same destructor already
-took the instrument-wide half of the bar away with the window.
-
-Three things follow, and each is a fact about the instrument rather than an
-implementation detail:
-
-- **A slot with a patch and no audio is not a destination.** Preset slots saved
-  before the audio half existed are exactly that. With NO slot holding audio the
-  per-note path does not apply at all and the instrument-wide bar recalls patches
-  as it always did. In a MIXED row the bar goes per note — a bar is one or the
-  other for a whole block, and which slot the finger is on is only known after
-  the per-note pass has run — and travelling into a patch-only slot leaves each
-  note playing what it has.
-- **The gate asks the SURFACE, not the engine.** Which snapshot a long press
-  stores and a recall restores is decided by the panel the player is looking at
-  (`oscEasyMode`), and the language-oscillator panel can sit in front of a neural
-  engine for a whole session. Asked of the engine, the bar went per note on the
-  LRO surface and crossfaded held notes onto whatever neural audio an earlier
-  session had left in the slots, while the orchestras just stored there were
-  never reached — the LRO branch of the store never writes snapshot audio, so
-  `restoreLcoSnapshot` on the instrument-wide path is the only thing that can
-  recall them.
-- **Whose hand is on a voice is the VOICE's record, not a bar's.** Kept per bar
-  it went stale in every gap — a bar at rest, a bar at zero, a bar whose per-note
-  path did not apply, all stop tracking — and that bar's first pass back read its
-  own staleness as "this voice changed hands" and threw away the shared record of
-  where the voice points and who owns it, under the other bar's motionless
-  finger. Storing a snapshot with keys held was enough to do it.
-
-**Two bars, one voice.** Cache and Snap run in the same block, over the same held
-keys, into the one record of where each voice points — a voice has one set of
-engine masters, so a per-bar record would go stale the moment the other bar
-moved the voice. That shared record needs an owner, or the bar that happens to
-run second silently wins every block (Cache runs after Snap, so Snap's travel
-would be dead whenever Cache was engaged) and the two of them re-point the same
-voice back and forth on every buffer with nobody moving — a crossfade restarted
-at block rate, with an async update posted alongside it. **Ownership is claimed
-by MOVING:** a bar takes a voice on the block its own zone changes under the
-finger, keeps it while it is the only one travelling, and hands it over the
-moment the other bar's zone changes. Last gesture wins, which is the only
-reading that matches what the player did. **Case 84c is the gate**, and it wires
-the two bars to different axes so the discriminator is exact: a move on X cannot
-change the pressure bar's reading, so a landing after an X-only move can only
-have come from Snap.
+That record has an owner (`atVoiceBarOwner_`) for the same reason: bars run in
+the same block, over the same held keys, into the one record — a voice has one
+set of engine masters, so a per-bar record would go stale the moment another bar
+moved the voice, and without an owner the bar that happens to run second wins
+every block while the two re-point the same voice back and forth on every buffer
+with nobody moving. **Ownership is claimed by MOVING:** a bar takes a voice on
+the block its own zone changes under the finger, keeps it while it is the only
+one travelling, and hands it over the moment another bar's zone changes. Last
+gesture wins, which is the only reading that matches what the player did. There
+is one claimant today; the arbiter stays because it is what makes the shared
+record safe.
 
 Case 84 is the cache bar's gate, and it asserts the smallest thing a mono
 construction
@@ -672,3 +626,45 @@ travelling over most of its range.
 `driftCrossfade` ("Regen XFade") is in neither stamp, deliberately: it is a
 control the player turns *while playing*, and it is refreshed in place on the
 prepared positions instead. See §5b.
+
+### 5d. Snap, retired from the expression matrix — 2026-08-26
+
+Snap was converted per note alongside Cache (the four stored snapshots' audio as
+positions 16–19, the patch half deliberately not travelling) and then removed
+from the expression matrix altogether the same day. The player, after seeing the
+two bars drawn side by side:
+
+> *"Snap und Cache lassen sich hier nicht sinnvoll mischen. Wurzel ist eine
+> gewachsene INkonsequenz: Snap ist ein komplettes Setting, das daher auch seinen
+> eigenen Cache brauchen würde. Ein Cache ist ja eine Einheit der Differenz
+> selektierter Möglichkeiten eines Settings, das in jeweils 1 von 4 Snap
+> aufgehoben ist."*
+
+and the decision:
+
+> *"Keine Expression auf Snap. Cache bleibt autonom (z.B. kann ich per Snap das
+> Setting wechseln bei aktiviertem Cache und manuell ein Snap-Sound in den Cache
+> bringen. Ergo kann Cache auch als autonome Struktur betrachtet werden). → Snap
+> raus aus den Expression-Settings"*
+
+The imbalance is exactly what the two structures are: a `MainSnapshot` is audio
+plus the whole `ValueTree`, both prompts, both embeddings, the seed, the three
+axes and the loop/extract points; an `InferenceCacheEntry` is `AudioBuffer` plus
+`sampleRate` and nothing else. One column carried both, and under a finger they
+could not be told apart. The cache is autonomous of the snapshots — nothing in a
+Snap recall touches it — and stays that way.
+
+**What went:** the Snap row in the expression column, the bar's routing, the
+per-note pass, the instrument-wide traversal and its mailbox, and the four Snap
+positions with everything that fed them (`setSnapshotAudio`, the valid mask, the
+second source stamp, the second built stamp, the ranged revoke). Nothing
+travelled them any more, and each prepared position built all three engine forms.
+
+**What stayed:** the Snap bar itself — four buttons, long press stores, press
+recalls both halves — unchanged; the hardware controller's snapshot press; and
+`AftertouchTarget::Snap` with `kEntries[Snap]` and both parameters
+(`aftertouch_amt_snap`, `expr_src_snap`), because a DAW session stores parameter
+INDICES and a `.t5p` stores those keys. They are registered and unread. Ask
+`AftertouchTarget::inExpressionMatrix(t)`, never `t != None`.
+
+Gates 84b and 84c went with the capability.

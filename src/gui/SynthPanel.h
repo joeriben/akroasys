@@ -306,34 +306,35 @@ private:
     // order 1..12) + column header. Bars declared BEFORE their attachments so
     // the attachments destruct first (JUCE reverse-destruction-order rule).
     juce::Label aftertouchHeader;
-    // One bar per aftertouch target except None — AftertouchTarget::kCount - 1.
-    std::array<std::unique_ptr<AftertouchBar>, AftertouchTarget::kCount - 1> aftertouchBars;
+    // One bar per row of the expression matrix — AftertouchTarget::kNumExprRows
+    // (every target but None and the retired Snap).
+    std::array<std::unique_ptr<AftertouchBar>, AftertouchTarget::kNumExprRows> aftertouchBars;
     // Must track aftertouchBars exactly — the two grow together in one loop, and
     // a shorter attachment array writes unique_ptrs over whatever member follows.
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,
-               AftertouchTarget::kCount - 1> aftertouchBarA;
+               AftertouchTarget::kNumExprRows> aftertouchBarA;
     static_assert(std::tuple_size<decltype(aftertouchBarA)>::value
                       == std::tuple_size<decltype(aftertouchBars)>::value,
                   "aftertouchBarA and aftertouchBars must be the same length.");
     // The source switch that shares each bar's row: which of V/X/Y/Z drives that
     // target, or Ø for none. Same length rule and same declaration order as the bars above —
     // switches before their attachments, so the attachments destruct first.
-    std::array<std::unique_ptr<ExprSourceSwitch>, AftertouchTarget::kCount - 1> exprSrcSwitches;
+    std::array<std::unique_ptr<ExprSourceSwitch>, AftertouchTarget::kNumExprRows> exprSrcSwitches;
     /** The two raw values behind each expression row, so the timer can ask the
      *  one question the switch cannot answer for itself: is this row at zero and
      *  still on the axis it shipped with. Resolved once. */
-    std::atomic<float>* atRowAmtPtr_[AftertouchTarget::kCount - 1] { };
-    std::atomic<float>* atRowSrcPtr_[AftertouchTarget::kCount - 1] { };
+    std::atomic<float>* atRowAmtPtr_[AftertouchTarget::kNumExprRows] { };
+    std::atomic<float>* atRowSrcPtr_[AftertouchTarget::kNumExprRows] { };
     // Which target each ROW carries (display order != enum order), and whether
     // the player has moved that row at all. Both feed refreshExprRowOffState.
-    int  atRowTarget_ [AftertouchTarget::kCount - 1] { };
-    bool atRowTouched_[AftertouchTarget::kCount - 1] { };
+    int  atRowTarget_ [AftertouchTarget::kNumExprRows] { };
+    bool atRowTouched_[AftertouchTarget::kNumExprRows] { };
     /** One bit per row, so sixteen relaxed loads a tick cost one int compare and
      *  a repaint follows only when the picture actually changed. */
     juce::uint32 atRowOffMask_ = 0xffffffffu;   // forces the first pass
     void refreshExprRowOffState();
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>,
-               AftertouchTarget::kCount - 1> exprSrcSwitchA;
+               AftertouchTarget::kNumExprRows> exprSrcSwitchA;
     static_assert(std::tuple_size<decltype(exprSrcSwitchA)>::value
                       == std::tuple_size<decltype(exprSrcSwitches)>::value,
                   "exprSrcSwitchA and exprSrcSwitches must be the same length.");
