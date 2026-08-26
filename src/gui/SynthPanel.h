@@ -319,6 +319,19 @@ private:
     // target, or Ø for none. Same length rule and same declaration order as the bars above —
     // switches before their attachments, so the attachments destruct first.
     std::array<std::unique_ptr<ExprSourceSwitch>, AftertouchTarget::kCount - 1> exprSrcSwitches;
+    /** The two raw values behind each expression row, so the timer can ask the
+     *  one question the switch cannot answer for itself: is this row at zero and
+     *  still on the axis it shipped with. Resolved once. */
+    std::atomic<float>* atRowAmtPtr_[AftertouchTarget::kCount - 1] { };
+    std::atomic<float>* atRowSrcPtr_[AftertouchTarget::kCount - 1] { };
+    // Which target each ROW carries (display order != enum order), and whether
+    // the player has moved that row at all. Both feed refreshExprRowOffState.
+    int  atRowTarget_ [AftertouchTarget::kCount - 1] { };
+    bool atRowTouched_[AftertouchTarget::kCount - 1] { };
+    /** One bit per row, so sixteen relaxed loads a tick cost one int compare and
+     *  a repaint follows only when the picture actually changed. */
+    juce::uint32 atRowOffMask_ = 0xffffffffu;   // forces the first pass
+    void refreshExprRowOffState();
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>,
                AftertouchTarget::kCount - 1> exprSrcSwitchA;
     static_assert(std::tuple_size<decltype(exprSrcSwitchA)>::value

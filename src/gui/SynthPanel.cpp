@@ -1173,34 +1173,38 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
     {
         // A row is an AMOUNT and a SOURCE: how deep, and driven by which of the
         // player's expression axes, or Ø. The two params travel together everywhere.
-        struct AtBar { const char* pid; const char* srcPid; const char* label; };
+        // The TARGET travels with the row. The rows below are in DISPLAY order
+        // and AftertouchTarget is in a different one (BlockParams.h:746), so the
+        // row index is NOT the target and deriving one from the other silently
+        // asks the wrong row whether it is wired to its default axis.
+        struct AtBar { const char* pid; const char* srcPid; const char* label; int target; };
         // Order follows the canonical EnvTarget order (BlockParams.h): voice
         // destinations first (DCA, Filter=Cutoff+Reso, Scan, Pitch, Noise), then
         // the mod-source levels (LFO depths, then env sustains). "Amt" matches the
         // LFO module's own depth label in the easy panel.
         static const AtBar atBars[] = {
-            { PID::aftertouchAmtDca,         PID::exprSrcDca,         "DCA" },
-            { PID::aftertouchAmtCutoff,      PID::exprSrcCutoff,      "Cutoff" },
-            { PID::aftertouchAmtResonance,   PID::exprSrcResonance,   "Reso" },
-            { PID::aftertouchAmtScan,        PID::exprSrcScan,        "Scan" },
-            { PID::aftertouchAmtPitch,       PID::exprSrcPitch,       "Pitch" },
-            { PID::aftertouchAmtNoiseLevel,  PID::exprSrcNoiseLevel,  "Noise" },
-            { PID::aftertouchAmtLfo1Depth,   PID::exprSrcLfo1Depth,   "LFO1 Amt" },
-            { PID::aftertouchAmtLfo2Depth,   PID::exprSrcLfo2Depth,   "LFO2 Amt" },
-            { PID::aftertouchAmtLfo3Depth,   PID::exprSrcLfo3Depth,   "LFO3 Amt" },
-            { PID::aftertouchAmtEnv1Sustain, PID::exprSrcEnv1Sustain, "ENV1 Sus" },
-            { PID::aftertouchAmtEnv2Sustain, PID::exprSrcEnv2Sustain, "ENV2 Sus" },
-            { PID::aftertouchAmtEnv3Sustain, PID::exprSrcEnv3Sustain, "ENV3 Sus" },
-            { PID::aftertouchAmtEnv4Sustain, PID::exprSrcEnv4Sustain, "ENV4 Sus" },
-            { PID::aftertouchAmtEnv5Sustain, PID::exprSrcEnv5Sustain, "ENV5 Sus" },
+            { PID::aftertouchAmtDca,         PID::exprSrcDca,         "DCA" , AftertouchTarget::DCA },
+            { PID::aftertouchAmtCutoff,      PID::exprSrcCutoff,      "Cutoff" , AftertouchTarget::Cutoff },
+            { PID::aftertouchAmtResonance,   PID::exprSrcResonance,   "Reso" , AftertouchTarget::Resonance },
+            { PID::aftertouchAmtScan,        PID::exprSrcScan,        "Scan" , AftertouchTarget::Scan },
+            { PID::aftertouchAmtPitch,       PID::exprSrcPitch,       "Pitch" , AftertouchTarget::Pitch },
+            { PID::aftertouchAmtNoiseLevel,  PID::exprSrcNoiseLevel,  "Noise" , AftertouchTarget::NoiseLevel },
+            { PID::aftertouchAmtLfo1Depth,   PID::exprSrcLfo1Depth,   "LFO1 Amt" , AftertouchTarget::LFO1Depth },
+            { PID::aftertouchAmtLfo2Depth,   PID::exprSrcLfo2Depth,   "LFO2 Amt" , AftertouchTarget::LFO2Depth },
+            { PID::aftertouchAmtLfo3Depth,   PID::exprSrcLfo3Depth,   "LFO3 Amt" , AftertouchTarget::LFO3Depth },
+            { PID::aftertouchAmtEnv1Sustain, PID::exprSrcEnv1Sustain, "ENV1 Sus" , AftertouchTarget::Env1Sustain },
+            { PID::aftertouchAmtEnv2Sustain, PID::exprSrcEnv2Sustain, "ENV2 Sus" , AftertouchTarget::Env2Sustain },
+            { PID::aftertouchAmtEnv3Sustain, PID::exprSrcEnv3Sustain, "ENV3 Sus" , AftertouchTarget::Env3Sustain },
+            { PID::aftertouchAmtEnv4Sustain, PID::exprSrcEnv4Sustain, "ENV4 Sus" , AftertouchTarget::Env4Sustain },
+            { PID::aftertouchAmtEnv5Sustain, PID::exprSrcEnv5Sustain, "ENV5 Sus" , AftertouchTarget::Env5Sustain },
             // Last, and apart in kind: these two do not modulate the voice, they
             // move the instrument - to another cached sample, to another
             // snapshot. Same bar, same bipolar amount, and the sign means the
             // same thing it means everywhere else here: which way pressure
             // travels. Through the cache that is the order the samples were
             // generated in, forwards or back.
-            { PID::aftertouchAmtCache,       PID::exprSrcCache,       "Cache" },
-            { PID::aftertouchAmtSnap,        PID::exprSrcSnap,        "Snap" },
+            { PID::aftertouchAmtCache,       PID::exprSrcCache,       "Cache" , AftertouchTarget::Cache },
+            { PID::aftertouchAmtSnap,        PID::exprSrcSnap,        "Snap" , AftertouchTarget::Snap },
         };
         static constexpr int kNumAtBars = sizeof(atBars) / sizeof(atBars[0]);
         static_assert(kNumAtBars == AftertouchTarget::kCount - 1,
@@ -1212,6 +1216,13 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
             bar->setTargetLabel(atBars[i].label);
             if (auto* p = apvts.getParameter(pid))
             {
+                // NOT a "touched" mark. AftertouchBar fires this on every
+                // mouseDown, before it knows whether anything changes - so a
+                // bare click, and worse the double-click whose whole job is to
+                // put the row back to zero, would light the box for a row that
+                // drives nothing. A row whose amount is off zero already shows
+                // its axis without any flag; the flag is only for the case a
+                // value cannot express, which is the SOURCE being chosen.
                 bar->onDragStart = [p] { p->beginChangeGesture(); };
                 bar->onDragEnd   = [p] { p->endChangeGesture(); };
             }
@@ -1225,10 +1236,15 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
             auto sw = std::make_unique<ExprSourceSwitch>();
             sw->onRightClick = [this, srcPid](juce::Point<int> pt) {
                 showMidiLearnMenu(processorRef, srcPid, pt); };
+            sw->onUserPick = [this, i] { atRowTouched_[i] = true; };
             addAndMakeVisible(*sw);
             exprSrcSwitchA[i] = std::make_unique<
                 juce::AudioProcessorValueTreeState::ComboBoxAttachment>(apvts, srcPid, *sw);
             exprSrcSwitches[i] = std::move(sw);
+
+            atRowAmtPtr_[i] = apvts.getRawParameterValue(pid);
+            atRowSrcPtr_[i] = apvts.getRawParameterValue(srcPid);
+            atRowTarget_[i] = atBars[i].target;
         }
         addChildComponent(aftertouchHeader);   // shown by the columns easy-layout
     }
@@ -1302,6 +1318,10 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
     resized();
     repaint();
     updateVisibility();
+    // Before the first paint, not a timer period after it: the three rows that
+    // ship wired at amount zero would otherwise be drawn lit and flip to Ø up
+    // to 33 ms later, which is the exact picture this is here to remove.
+    refreshExprRowOffState();
     startTimerHz(30);
 }
 
@@ -1346,8 +1366,76 @@ void SynthPanel::followModParamToTab(const juce::String& paramId)
     repaint();
 }
 
+void SynthPanel::refreshExprRowOffState()
+{
+    // Which expression rows are OFF, and OFF means what it says: the row's
+    // amount is at zero, so nothing is driven, AND its source is still the one
+    // it shipped with, so the player has not chosen this wiring. Three of the
+    // sixteen ship wired (DCA on Z, Cutoff and Scan on Y) at amount zero, and
+    // the column showed three lit boxes for three things that were not
+    // happening. BJ, 26.08.2026.
+    //
+    // "Nicht bereits manuell verändert" is BJ's own second condition and it is
+    // the reason atRowTouched_ exists rather than a purely stateless compare.
+    // Without it the box could not show the default axis at all while the amount
+    // sits at zero: click round the DCA row and Z - its own default - would draw
+    // as Ø, and the None state would be unreachable, because the next click
+    // steps from what is SHOWN. A row the player has moved always shows its
+    // value; only a row still standing exactly where it shipped reads OFF.
+    //
+    // The flag lives for the life of the EDITOR, and its two edges are stated
+    // rather than papered over: a preset load does not clear it, so a touched
+    // row put back to default-at-zero draws its axis instead of Ø; and closing
+    // the window does clear it, so that same row comes back Ø. Both edges only
+    // ever concern a row that is driving nothing either way, and the box is
+    // telling the truth about its VALUE in both. The alternative - no flag,
+    // purely a function of the patch - costs more than it buys: at amount zero
+    // the box could then not show the default axis at all, and the click cycle
+    // would silently skip it and Ø both, which is a broken control rather than
+    // an overstated history.
+    //
+    // Sixteen relaxed loads and one int compare per tick; the switches are only
+    // touched when the picture changes, and setRowIsOff repaints only on a real
+    // change of its own (docs/PERFORMANCE_GUIDE.md).
+    juce::uint32 mask = 0;
+    for (size_t i = 0; i < exprSrcSwitches.size(); ++i)
+    {
+        const auto* amt = atRowAmtPtr_[i];
+        const auto* src = atRowSrcPtr_[i];
+        if (amt == nullptr || src == nullptr)
+            continue;
+        const int wired = static_cast<int>(std::lround(src->load(std::memory_order_relaxed)));
+        // TWO values count as "still where it shipped". The row's own default is
+        // one. ExprSource::kLegacy is the other, and it is the bigger case: a
+        // preset or DAW session written before sources existed gets kLegacy - Z,
+        // the one axis that path had - written into ALL SIXTEEN rows, because
+        // that is what such a file meant. Against the per-row default alone,
+        // fifteen of those sixteen then read as a wiring the player chose, and
+        // opening one of the shipped presets lit fifteen orange boxes for
+        // fifteen routings at depth zero. Not a fresh patch: the file BJ is
+        // most likely to open.
+        const bool shipped = (wired == ExprSource::defaultFor(atRowTarget_[i])
+                           || wired == ExprSource::kLegacy);
+        const bool off = ! atRowTouched_[i] && shipped
+                      && std::abs(amt->load(std::memory_order_relaxed)) < kAftertouchAmtEpsilon;
+        if (off)
+            mask |= (1u << static_cast<juce::uint32>(i));
+    }
+    if (mask == atRowOffMask_)
+        return;
+    atRowOffMask_ = mask;
+    for (size_t i = 0; i < exprSrcSwitches.size(); ++i)
+        if (exprSrcSwitches[i] != nullptr)
+            exprSrcSwitches[i]->setRowIsOff((mask & (1u << static_cast<juce::uint32>(i))) != 0);
+}
+
 void SynthPanel::timerCallback()
 {
+    // AHEAD of the audioIdle gate below, like the FX panel's running lamps and
+    // for the same reason: a player pulling an expression amount to zero on a
+    // silent synth still has to see the box go dim. Sixteen relaxed loads.
+    refreshExprRowOffState();
+
     // A newly authored instrument brings its own knobs. One int compare per
     // tick — the panel takes a copy only when the processor's revision moves,
     // and a copy is the whole cost: the set is at most twelve short strings.

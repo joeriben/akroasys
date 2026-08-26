@@ -46,6 +46,30 @@ public:
         bar beside it rather than being the one dead spot in the row. */
     std::function<void(juce::Point<int>)> onRightClick;
 
+    /** The player picked an axis on this row. The row is "manually changed" from
+        here on, so the panel stops drawing it OFF whatever its amount says. */
+    std::function<void()> onUserPick;
+
+    /** The ROW is off, whatever this switch's value says: its amount is at zero
+        and its source has never been moved off the default it shipped with. Then
+        the box draws Ø like any unrouted row, because that is the truth - a wired
+        source at depth zero drives nothing, and three of the sixteen rows ship
+        that way, so a fresh patch showed three lit boxes for three things that
+        were not happening. BJ, 26.08.2026: "in der Expression-Spalte sollen alle
+        Parameter die =0 liegen UND nicht bereits manuell verändert wurden auf OFF
+        stehen."
+
+        The VALUE is untouched, deliberately. Raise that row's amount off zero and
+        the default axis is right there and working - which is what the defaults
+        were for. Only the claim that it is doing something now goes. */
+    void setRowIsOff (bool off)
+    {
+        if (off == rowIsOff_)
+            return;
+        rowIsOff_ = off;
+        repaint();
+    }
+
     void mouseDown(const juce::MouseEvent& e) override
     {
         if (e.mods.isPopupMenu())
@@ -53,7 +77,27 @@ public:
             if (onRightClick) onRightClick(e.getPosition());
             return;
         }
-        const int next = (juce::jmax(0, getSelectedId() - 1) + 1) % ExprSource::kCount;
+        const int stored = juce::jmax(0, getSelectedId() - 1);
+        const bool wasOff = rowIsOff_;
+        // Drop OFF here, not a timer tick later: the click makes this row a
+        // touched row by definition, so waiting for the panel to notice would
+        // paint one stale Ø frame over the value it is about to show.
+        rowIsOff_ = false;
+        if (onUserPick) onUserPick();
+        if (wasOff && stored != ExprSource::None)
+        {
+            // The row draws Ø and HOLDS an axis - its own default, or the Z a
+            // file predating sources wrote into all sixteen rows. The first
+            // click REVEALS that value instead of stepping past it: the player
+            // cannot see what they would be replacing, and stepping would drop
+            // a stored routing on a click that looks like it is only arming the
+            // row. The step happens on the next click, from a value now on
+            // screen. A row that really holds Ø steps straight on, so no click
+            // anywhere in the cycle is invisible.
+            repaint();
+            return;
+        }
+        const int next = (stored + 1) % ExprSource::kCount;
         setSelectedId(next + 1, juce::sendNotificationSync);
         repaint();
     }
@@ -79,7 +123,7 @@ public:
     {
         auto b = getLocalBounds().toFloat();
         const int selected = juce::jlimit(0, ExprSource::kCount - 1, getSelectedId() - 1);
-        const bool routed = (selected != ExprSource::None);
+        const bool routed = (selected != ExprSource::None) && ! rowIsOff_;
 
         g.setColour(routed ? kAtCol : kSurface);
         g.fillRect(b);
@@ -108,5 +152,7 @@ public:
     }
 
 private:
+    bool rowIsOff_ = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ExprSourceSwitch)
 };
