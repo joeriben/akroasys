@@ -4157,6 +4157,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         setSrc(paramCache.exprSrcEnv5Sustain, AftertouchTarget::Env5Sustain);
         setSrc(paramCache.exprSrcCache,       AftertouchTarget::Cache);
         setSrc(paramCache.exprSrcSnap,        AftertouchTarget::Snap);
+
+        // The Pitch row does one thing the other fifteen do not: it decides
+        // whether the per-note bend is HEARD. X is what an MPE controller's
+        // lateral travel is for, so it ships wired that way; move the row to
+        // another axis and the finger stops bending the note. Broadcast once
+        // per block rather than gated where the bend arrives, so the switch
+        // takes effect under a held, already-bent note - in both directions.
+        voiceManager.setXBendsPitch(
+            bp.aftertouchTargetSrc[static_cast<size_t>(AftertouchTarget::Pitch)]
+                == ExprSource::X);
     }
 
     // The two targets that move the instrument rather than a voice. Resolved
@@ -9510,6 +9520,41 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
             bool sessionKnowsSources = false;
             for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
                 sessionKnowsSources = sessionKnowsSources || hasParam(kExprSrcPid[t]);
+            // Whether that session had a RAISED pitch amount. Same question the
+            // .t5p reader asks, for the same reason: on the Pitch row the two
+            // things a pre-sources session did cannot both survive, and the
+            // amount says which one the player actually dialled in.
+            //
+            // BOTH shapes, because "no source block" spans two eras. Per-target
+            // amounts arrived 20.06.2026 and sources 23.08.2026, so every
+            // session written by a build in between - which is every release
+            // from v2.5.0-beta.0 to v3.1.0-beta.0 - carries
+            // aftertouch_amt_pitch and no expr_src_*: the first clause is the
+            // one that answers for the whole real population. The second is for
+            // what came before it, the single-select aftertouch_target plus one
+            // global aftertouch_amount, which is folded onto the selected
+            // target's param ~90 lines BELOW this - so asking only for the
+            // per-target node would find nothing there and hand a deliberate
+            // pressure-to-pitch depth to X.
+            //
+            // The second clause defers to the per-target node exactly as that
+            // fold does. A dev build from the 44 minutes when both parameter
+            // sets were registered writes both, and the fold then declines
+            // (! hasParam) and leaves the per-target amount standing - so the
+            // legacy pair is what the session no longer means, and reading it
+            // would answer "raised" for a depth that is about to be zero.
+            auto valueOf = [&] (const juce::String& pid, float fallback) -> float {
+                for (int i = 0; i < loadedTree.getNumChildren(); ++i)
+                    if (loadedTree.getChild(i).getProperty("id").toString() == pid)
+                        return static_cast<float>(loadedTree.getChild(i).getProperty("value"));
+                return fallback;
+            };
+            const bool sessionPitchAmtRaised =
+                hasParam(PID::aftertouchAmtPitch)
+                    ? std::abs(valueOf(PID::aftertouchAmtPitch, 0.0f)) >= kAftertouchAmtEpsilon
+                    : (juce::roundToInt(valueOf("aftertouch_target", 0.0f))
+                           == AftertouchTarget::Pitch
+                       && std::abs(valueOf("aftertouch_amount", 0.0f)) >= kAftertouchAmtEpsilon);
 
             for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
             {
@@ -9520,7 +9565,16 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
                 }
                 juce::ValueTree node("PARAM");
                 node.setProperty("id", kExprSrcPid[t], nullptr);
-                node.setProperty("value", (float) ExprSource::kLegacy, nullptr);
+                // ...except PITCH at rest, which gets X. A session this old
+                // predates sources, and the per-note bend played whatever any
+                // row said; kLegacy there would take the bend away from every
+                // MPE session ever saved. With the amount RAISED the player
+                // dialled a pressure-to-pitch depth, and that is the half worth
+                // keeping instead. See Calibration epoch 10.
+                const bool pitchToX = (t == AftertouchTarget::Pitch)
+                                   && ! sessionPitchAmtRaised;
+                node.setProperty("value", (float) (pitchToX ? ExprSource::X
+                                                            : ExprSource::kLegacy), nullptr);
                 loadedTree.appendChild(node, nullptr);
             }
         }
@@ -11219,6 +11273,10 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
     bool lfoWritten[kNumLfoPIDs] = {};
     bool driftWritten[kNumDriftPIDs] = {};
     bool fileHasAftertouch = false;
+    // Whether a file that predates expression sources had a RAISED pitch
+    // amount. It decides which half of what such a file did survives on the
+    // Pitch row - see the source loop below and Calibration epoch 10.
+    bool legacyPitchAmtRaised = false;
     if (auto* mod = root->getProperty("modulation").getDynamicObject())
     {
         auto* envsArr = mod->getProperty("envs").getArray();
@@ -11356,12 +11414,16 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
                 if (at->hasProperty(AftertouchTarget::kEntries[t].key)) { perTarget = true; break; }
             if (perTarget)
                 for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
-                    setParam(parameters, kAftertouchAmtPid[t],
-                             at->hasProperty(AftertouchTarget::kEntries[t].key)
-                                 ? Calibration::migrateScalar(kAftertouchAmtPid[t],
-                                       static_cast<float>(at->getProperty(AftertouchTarget::kEntries[t].key)),
-                                       fileCalibEpoch)
-                                 : 0.0f);
+                {
+                    const float amt = at->hasProperty(AftertouchTarget::kEntries[t].key)
+                        ? Calibration::migrateScalar(kAftertouchAmtPid[t],
+                              static_cast<float>(at->getProperty(AftertouchTarget::kEntries[t].key)),
+                              fileCalibEpoch)
+                        : 0.0f;
+                    setParam(parameters, kAftertouchAmtPid[t], amt);
+                    if (t == AftertouchTarget::Pitch)
+                        legacyPitchAmtRaised = std::abs(amt) >= kAftertouchAmtEpsilon;
+                }
             if (! perTarget)
             {
                 // Legacy single-select: clear every target FIRST, then migrate
@@ -11376,10 +11438,15 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
                 const int t = choiceFromKey(at->getProperty("target").toString(), AftertouchTarget::kEntries);
                 if (at->hasProperty("target")
                     && t >= AftertouchTarget::LFO1Depth && t <= AftertouchTarget::NoiseLevel)
-                    setParam(parameters, kAftertouchAmtPid[t],
-                             Calibration::migrateScalar(kAftertouchAmtPid[t],
-                                 at->hasProperty("amount") ? static_cast<float>(at->getProperty("amount")) : 0.0f,
-                                 fileCalibEpoch));
+                {
+                    const float amt = Calibration::migrateScalar(kAftertouchAmtPid[t],
+                        at->hasProperty("amount") ? static_cast<float>(at->getProperty("amount")) : 0.0f,
+                        fileCalibEpoch);
+                    setParam(parameters, kAftertouchAmtPid[t], amt);
+                    // Which way the Pitch row falls back below depends on this.
+                    if (t == AftertouchTarget::Pitch)
+                        legacyPitchAmtRaised = std::abs(amt) >= kAftertouchAmtEpsilon;
+                }
             }
 
             // The axis each of those amounts is driven by. Same rule as the
@@ -11397,8 +11464,18 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
             auto* es = mod->getProperty("exprSource").getDynamicObject();
             for (int t = AftertouchTarget::LFO1Depth; t < AftertouchTarget::kCount; ++t)
             {
-                int src = (es != nullptr) ? ExprSource::defaultFor(t)
-                                          : ExprSource::kLegacy;
+                // No block at all means the file predates sources: kLegacy.
+                // PITCH is the exception, and the amount decides which way,
+                // because the two things such a file did cannot both survive on
+                // one row. At rest - which is every shipped preset - the only
+                // thing there was to lose is the per-note bend, so X. RAISED,
+                // the player deliberately dialled a pressure-to-pitch depth,
+                // and that is the half worth keeping: kLegacy. See epoch 10.
+                int src = ExprSource::kLegacy;
+                if (es != nullptr)
+                    src = ExprSource::defaultFor(t);
+                else if (t == AftertouchTarget::Pitch && ! legacyPitchAmtRaised)
+                    src = ExprSource::X;
                 if (es != nullptr && es->hasProperty(AftertouchTarget::kEntries[t].key))
                 {
                     // choiceFromKey returns 0 for "no match" as well as for a
@@ -11412,6 +11489,27 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
                     const int k = choiceFromKey(key, ExprSource::kEntries);
                     if (k >= 0 && k < ExprSource::kCount && key == ExprSource::kEntries[k].key)
                         src = k;
+                    // Calibration epoch 10, on THIS surface too. Sources landed
+                    // while the epoch was 9 and Pitch defaulted to None, so
+                    // every .t5p written between the two - the standalone's own
+                    // session buffer among them - carries "pitch": "off" under
+                    // epoch 9. That used to mean "nothing MODULATES the pitch"
+                    // while the per-note bend played regardless; unmigrated it
+                    // now reads as "the bend is off", and the instrument comes
+                    // up with lateral finger travel doing nothing. The stored
+                    // ValueTrees go through Calibration::migrateValueTree for
+                    // this; the JSON has no such pass and needs the rule here.
+                    if (t == AftertouchTarget::Pitch && fileCalibEpoch < 10
+                        && src == ExprSource::None)
+                    {
+                        src = ExprSource::X;
+                        // ...and the amount goes with it. Raised beside an
+                        // "off" source it did nothing; carried across it would
+                        // drive the pitch bus on top of the bend this row now
+                        // switches on. Same pair migrateValueTree writes.
+                        if (legacyPitchAmtRaised)
+                            setParam(parameters, kAftertouchAmtPid[AftertouchTarget::Pitch], 0.0f);
+                    }
                 }
                 setParam(parameters, kExprSrcPid[t], static_cast<float>(src));
             }

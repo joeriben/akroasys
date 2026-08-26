@@ -74,7 +74,16 @@ public:
         perVoicePitchBendSemitones_ = juce::jlimit(-48.0f, 48.0f, semitones);
         perVoicePitchBendNorm_      = juce::jlimit(-1.0f, 1.0f, normalised);
     }
-    float getPerVoicePitchBend() const { return perVoicePitchBendSemitones_; }
+    /** Whether the per-note bend is AUDIBLE. X reaching the pitch is a wiring
+        now - the Pitch row's source - not a fact of the instrument, so the
+        stored travel is kept either way and only its effect is switched. Kept
+        rather than zeroed so moving the row back to X restores the bend of a
+        finger that has not moved since. */
+    void setXBendsPitch (bool b) { xBendsPitch_ = b; }
+    float getPerVoicePitchBend() const
+    {
+        return xBendsPitch_ ? perVoicePitchBendSemitones_ : 0.0f;
+    }
     float getPerVoicePitchBendNorm() const { return perVoicePitchBendNorm_; }
 
     // MPE per-note Timbre (the Y axis, MIDI CC 74). What this voice holds is not
@@ -297,6 +306,7 @@ private:
     float currentVelocity = 0.0f;
     float aftertouch_ = 0.0f;
     float perVoicePitchBendSemitones_ = 0.0f;
+    bool  xBendsPitch_ = true;
     float perVoicePitchBendNorm_ = 0.0f;   // same gesture, ±1 at full wheel
     float timbre_     = 0.0f;              // signed travel from timbreRest_
     float timbreRest_ = kTimbreRest;       // the CC 74 in force when this note began

@@ -1371,9 +1371,10 @@ void SynthPanel::refreshExprRowOffState()
     // Which expression rows are OFF, and OFF means what it says: the row's
     // amount is at zero, so nothing is driven, AND its source is still the one
     // it shipped with, so the player has not chosen this wiring. Three of the
-    // sixteen ship wired (DCA on Z, Cutoff and Scan on Y) at amount zero, and
-    // the column showed three lit boxes for three things that were not
-    // happening. BJ, 26.08.2026.
+    // sixteen ship wired that way (DCA on Z, Cutoff and Scan on Y) at amount
+    // zero, and the column showed three lit boxes for three things that were
+    // not happening. BJ, 26.08.2026. A fourth ships wired - Pitch on X - and is
+    // excluded below, because that one IS happening.
     //
     // "Nicht bereits manuell verändert" is BJ's own second condition and it is
     // the reason atRowTouched_ exists rather than a purely stateless compare.
@@ -1416,7 +1417,14 @@ void SynthPanel::refreshExprRowOffState()
         // most likely to open.
         const bool shipped = (wired == ExprSource::defaultFor(atRowTarget_[i])
                            || wired == ExprSource::kLegacy);
-        const bool off = ! atRowTouched_[i] && shipped
+        // ...except PITCH, the one row where the source does something on its
+        // own. Everywhere else it only says WHAT MODULATES the target, so at
+        // depth zero nothing happens and Ø is the truth. On this row it also
+        // says whether the per-note bend is HEARD - X at depth zero IS the
+        // lateral finger bending the note, and drawing that Ø would grey out
+        // the one control that decides it while it is working.
+        const bool off = atRowTarget_[i] != AftertouchTarget::Pitch
+                      && ! atRowTouched_[i] && shipped
                       && std::abs(amt->load(std::memory_order_relaxed)) < kAftertouchAmtEpsilon;
         if (off)
             mask |= (1u << static_cast<juce::uint32>(i));

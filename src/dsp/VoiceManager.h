@@ -145,6 +145,13 @@ public:
      *  far the wheel travelled, ±1 at full deflection, and is what the expression
      *  matrix can route to a target. See SynthVoice::setPerVoicePitchBend. */
     void setPerVoicePitchBend(int midiChannel, float semitones, float normalised);
+    /** Whether the per-note bend is AUDIBLE, for every voice. Set once per block
+        from the Pitch row's expression source: X bends the note, anything else
+        leaves the travel stored and silent. */
+    void setXBendsPitch(bool b)
+    {
+        for (auto& v : voices) v.setXBendsPitch(b);
+    }
     // MPE Loudness (Z): channel pressure on a member channel drives only the
     // voice(s) tagged with that channel, not the whole zone.
     void setChannelPressureForChannel(int midiChannel, float pressure);

@@ -892,13 +892,26 @@ namespace ExprSource {
      *  position IS where the timbre comes from, so it is the second thing a
      *  finger sliding up the key should reach.
      *
-     *  Pitch is deliberately NOT on X: X is already applied to it as the
-     *  per-note bend, and routing it here again would bend it twice. */
+     *  Pitch IS on X, and that is what makes the per-note bend a WIRING rather
+     *  than a fact of the instrument: the lateral finger bends the note while
+     *  this row says X, and stops when the player moves the row somewhere else.
+     *  Default on, because that is the gesture every MPE controller is built
+     *  around (BJ, 26.08.2026: "Pitch<-X als Verschaltung statt fest
+     *  verdrahtet, mit Default an").
+     *
+     *  Two things then sit on one row, and the amount is what separates them.
+     *  At amount zero - where it ships - X bends the note through the bend
+     *  range in force and nothing else happens. Raise the amount and the same
+     *  X ALSO drives the pitch bus at kPitchModSemitones on top. That is a
+     *  double bend, and it is reachable on purpose: it is one deliberate drag
+     *  away, it is visible on the card, and the alternative was to give the
+     *  amount a second meaning on this one row. */
     inline constexpr int defaultFor (int target)
     {
         switch (target)
         {
             case AftertouchTarget::DCA:    return Z;
+            case AftertouchTarget::Pitch:  return X;
             case AftertouchTarget::Cutoff: return Y;
             case AftertouchTarget::Scan:   return Y;
             default:                       return None;

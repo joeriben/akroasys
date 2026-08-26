@@ -935,9 +935,11 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
     if (p.lfo3TrigMode) { fillPerVoice(perVoiceLfo3, perVoiceLfoBuf3_, p.lfo3Rate, p.lfo3Wave); lfo3Buf = perVoiceLfoBuf3_.data(); }
 
     // Combine global pitch-bend ratio (all voices) with per-voice MPE pitch bend.
-    // For standard MIDI perVoicePitchBendSemitones_ stays 0, so this is a no-op.
+    // For standard MIDI the per-voice bend stays 0, so this is a no-op - and the
+    // accessor, not the field, because whether X reaches the pitch at all is the
+    // Pitch row's wiring (SynthVoice::setXBendsPitch).
     const float effectivePitchRatio = p.performancePitchRatio
-        * std::pow(2.0f, perVoicePitchBendSemitones_ / 12.0f);
+        * std::pow(2.0f, getPerVoicePitchBend() / 12.0f);
 
     bool samplerMode = (engineMode == EngineMode::Sampler) && sampler.hasAudio();
     bool freezeMode = (engineMode == EngineMode::Freeze) && freezeEngine.hasAudio();

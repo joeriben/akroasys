@@ -154,7 +154,51 @@ namespace Calibration
 //            equals the anchor's normalised position. A lane written against the
 //            old 5-way choice therefore lands one shape off. Documented in
 //            docs/devlog.md 2026-08-05 rather than papered over.
-inline constexpr int kEpoch = 9;
+// Epoch 10: the per-note MPE bend became a WIRING. X reaching the pitch used
+//            to be a fact of the instrument, applied whatever the Pitch row
+//            said; now the row's expression source decides, and it ships on X
+//            (BJ, 26.08.2026: "Pitch<-X als Verschaltung statt fest
+//            verdrahtet, mit Default an"). A file written before this stored
+//            "off" on that row to mean "nothing MODULATES the pitch" - the
+//            audible bend was on regardless - so an unmigrated "off" would
+//            silently take the bend away from every MPE preset ever saved.
+//            A PAIR of writes, not an IndexRemap: the amount bar was
+//            independently draggable in that window, so "off" with a raised
+//            amount was a row doing nothing at all, and carrying that amount
+//            across would have it drive the pitch bus on top of the bend the
+//            row now switches on - a double bend performed by the migration.
+//            The inert amount is zeroed with it. A stored Y or Z is left
+//            alone: deliberate, and it keeps working - at the documented cost
+//            that the audible bend goes with it.
+//            THREE surfaces need it and only two get it from this table. The
+//            DAW-session XML and the .t5p snapshot trees go through
+//            migrateValueTree. The .t5p JSON does NOT - it resolves the row
+//            from the file's key and has no epoch pass - so importJsonPreset
+//            carries the same rule inline. That surface is the one that bites:
+//            sources shipped while the epoch was 9, so every .t5p written since
+//            2026-08-23, INCLUDING the standalone's own session buffer, holds
+//            "pitch": "off" stamped epoch 9. Unmigrated, the instrument comes
+//            up with lateral finger travel doing nothing.
+//            Files that predate expression sources ENTIRELY never reach this
+//            table - they carry no source block and are filled in by the legacy
+//            fallback. There the Pitch row cannot keep both halves of what such
+//            a file did, so the AMOUNT decides: at rest, X, because the only
+//            thing there was to lose is the per-note bend; raised, kLegacy,
+//            because the player deliberately dialled a pressure-to-pitch depth.
+//            NOT .t5evt replay either: migrateLoggedValue applies rescales
+//            and choiceToValues but never indexRemaps, so a tape that logged a
+//            touch of this switch replays the raw index. That hole is older
+//            than this epoch - epochs 3 and 4 have it too - but epoch 10 is the
+//            first index remap whose unmigrated value is AUDIBLE, so it is
+//            named here rather than left to be discovered.
+//            NOT host automation lanes or MIDI-learn mappings. They ride the
+//            normalised value, which lives in the host, and the ExprSource
+//            table did not change size or order - so a lane parked on "off"
+//            still resolves to "off". The cost is that "off" there now silences
+//            the audible bend as well as leaving the row unwired, which is a
+//            heavier consequence than the same lane had before. Unmigratable by
+//            construction, like epoch 9's.
+inline constexpr int kEpoch = 10;
 
 struct Rescale
 {
@@ -541,6 +585,40 @@ inline void migrateValueTree(juce::ValueTree& tree, int fromEpoch)
             if (child.getProperty("id").toString() == s.id && child.hasProperty("value")
                 && static_cast<float>(child.getProperty("value")) > s.above)
                 child.setProperty("value", s.toValue, nullptr);
+        }
+    }
+
+    // Epoch 10: the Pitch row's "off". A PAIR of writes on two parameters, and
+    // that is why it is here rather than an entry in one of the tables - none of
+    // them can touch a sibling, and CondRescale, which comes closest, is applied
+    // AFTER the index remaps below and would read a value this has already
+    // changed.
+    //
+    // "off" used to mean "nothing MODULATES the pitch" while the per-note bend
+    // played regardless, so it becomes X - the bend, as before. But the AMOUNT
+    // bar was independently draggable in that window, and raised beside an "off"
+    // source it did nothing at all. Carried across unchanged it would start
+    // driving the pitch bus at kPitchModSemitones ON TOP of the bend the row now
+    // switches on - a double bend performed by the migration rather than by the
+    // player. So the inert amount goes with it. A row that stored a real Y or Z
+    // routing is left alone: that one is deliberate, and it keeps working.
+    if (fromEpoch < 10)
+    {
+        juce::ValueTree srcNode, amtNode;
+        for (int i = 0; i < tree.getNumChildren(); ++i)
+        {
+            auto child = tree.getChild(i);
+            const auto id = child.getProperty("id").toString();
+            if (id == PID::exprSrcPitch)          srcNode = child;
+            else if (id == PID::aftertouchAmtPitch) amtNode = child;
+        }
+        if (srcNode.isValid() && srcNode.hasProperty("value")
+            && juce::roundToInt(static_cast<double>(srcNode.getProperty("value")))
+                   >= ExprSource::None)
+        {
+            srcNode.setProperty("value", static_cast<float>(ExprSource::X), nullptr);
+            if (amtNode.isValid() && amtNode.hasProperty("value"))
+                amtNode.setProperty("value", 0.0f, nullptr);
         }
     }
 

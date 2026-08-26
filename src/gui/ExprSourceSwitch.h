@@ -61,7 +61,11 @@ public:
 
         The VALUE is untouched, deliberately. Raise that row's amount off zero and
         the default axis is right there and working - which is what the defaults
-        were for. Only the claim that it is doing something now goes. */
+        were for. Only the claim that it is doing something now goes.
+
+        The panel decides this, not the switch, and it holds one row out: on
+        PITCH the source also says whether the per-note bend is HEARD, so depth
+        zero there is not "drives nothing". That row is never set off. */
     void setRowIsOff (bool off)
     {
         if (off == rowIsOff_)

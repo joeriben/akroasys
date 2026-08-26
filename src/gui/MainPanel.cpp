@@ -198,10 +198,27 @@ bool slotKnowsExprSources(const juce::ValueTree& state)
     return false;
 }
 
-/** kLegacy for a source id, nothing for anything else. */
-const float* legacySourceFallback(const char* id)
+/** Whether a slot that predates expression sources had a RAISED pitch amount.
+    On the Pitch row the two things such a slot did - a pressure-to-pitch depth
+    and the per-note bend - cannot both survive, and the amount says which one
+    the player actually dialled in. See Calibration epoch 10. */
+bool legacyPitchAmtRaised(const juce::ValueTree& state)
+{
+    float v = 0.0f;
+    return findParameterValue(state, PID::aftertouchAmtPitch, v)
+        && std::abs(v) >= kAftertouchAmtEpsilon;
+}
+
+/** kLegacy for a source id, nothing for anything else - except the PITCH row at
+    rest, which gets X. Such a slot predates sources, and back then the per-note
+    bend was applied whatever any row said; kLegacy there would silently take
+    the bend away from a snapshot that plainly had it. */
+const float* legacySourceFallback(const char* id, bool pitchAmtRaised)
 {
     static constexpr float kLegacy = (float) ExprSource::kLegacy;
+    static constexpr float kPitch  = (float) ExprSource::X;
+    if (juce::String(id) == PID::exprSrcPitch)
+        return pitchAmtRaised ? &kLegacy : &kPitch;
     return juce::String(id).startsWith("expr_src_") ? &kLegacy : nullptr;
 }
 
@@ -3417,9 +3434,11 @@ void MainPanel::restoreMainSnapshot(const MainSnapshot& snapshot)
     if (snapshot.parameters.isValid())
     {
         const bool knowsSources = slotKnowsExprSources(snapshot.parameters);
+        const bool pitchRaised  = legacyPitchAmtRaised(snapshot.parameters);
         for (auto* id : kMainSnapshotParamIds)
             restoreParameterFromState(apvts, snapshot.parameters, id,
-                                      knowsSources ? nullptr : legacySourceFallback(id));
+                                      knowsSources ? nullptr
+                                                   : legacySourceFallback(id, pitchRaised));
     }
 
     promptPanel.loadPresetData(snapshot.promptA, snapshot.promptB,
@@ -3554,10 +3573,12 @@ void MainPanel::restoreLcoSnapshot(const LcoSnapshot& snapshot)
     if (snapshot.parameters.isValid())
     {
         const bool knowsSources = slotKnowsExprSources(snapshot.parameters);
+        const bool pitchRaised  = legacyPitchAmtRaised(snapshot.parameters);
         for (auto* id : kMainSnapshotParamIds)
             if (!isLcoSnapshotSkippedParam(id))
                 restoreParameterFromState(apvts, snapshot.parameters, id,
-                                          knowsSources ? nullptr : legacySourceFallback(id));
+                                          knowsSources ? nullptr
+                                                       : legacySourceFallback(id, pitchRaised));
     }
 
     // The knobs of the orchestra in this slot: what they MEAN first, then where
