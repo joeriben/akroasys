@@ -535,10 +535,10 @@ void WavetableOscillator::extractFramesFromBuffer(const juce::AudioBuffer<float>
                                                    float startFrac, float endFrac, int maxFrames)
 {
     // Combined compute+publish convenience — see this function's doc comment in the
-    // header for who may call it and why. The already-locked production caller
-    // (reextractWavetable) and the single-threaded tools-dir *.cpp harnesses use this
-    // directly; a caller that must NOT hold the lock across the extraction/FFT work
-    // below uses prepareFramesFromBuffer()/applyPreparedMipData() instead.
+    // header for who may call it and why. The single-threaded tools-dir *.cpp
+    // harnesses use this directly; a caller that must NOT hold the lock across the
+    // extraction/FFT work below — every processor path — uses
+    // prepareFramesFromBuffer()/applyPreparedMipData() instead.
     applyPreparedMipData(prepareFramesFromBuffer(buffer, bufferSr, startFrac, endFrac, maxFrames));
 }
 

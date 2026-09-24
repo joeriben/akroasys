@@ -101,8 +101,8 @@ public:
      *  processBlock with no lock at all). Call this under an explicit
      *  ScopedLock(getCallbackLock()) anyway UNLESS nothing else can be touching
      *  this instance concurrently (a fresh, single-threaded tools-dir *.cpp
-     *  harness — the only callers today besides the already-locked
-     *  reextractWavetable): the lock is real and necessary on Standalone/VST3/AU
+     *  harness — the only callers today; every processor path uses the split
+     *  below): the lock is real and necessary on Standalone/VST3/AU
      *  and for this class's non-atomic state, even though the atomics alone
      *  cover the publish itself on every format. A caller that must NOT hold
      *  the lock across the extraction/FFT work uses

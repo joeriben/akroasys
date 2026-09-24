@@ -8985,35 +8985,47 @@ void T5ynthProcessor::reextractWavetable()
     if (dcoTableActive_.load(std::memory_order_relaxed))
         return;
 
+    // The extraction and its mip-level FFT run OFF getCallbackLock(), as in
+    // loadGeneratedAudio / reloadProcessedAudio: holding the lock across them
+    // stopped processBlock for the whole computation, which on Standalone/VST3/
+    // AU is a dropout: measured in the built standalone as 19-35 ms of digital
+    // silence per re-slice (frame-count change, end of a bracket drag). Only
+    // the region is read under the lock (the sampler's points are shared with
+    // the audio thread) and only the publish happens under it.
+    // waveformSnapshot and generatedSampleRate are written on the message
+    // thread alone, which is this one, so reading them here is race-free.
+    const int snapshotSamples = waveformSnapshot.getNumSamples();
+    if (snapshotSamples <= 0)
+        return;
+
     const bool wtMode = isWavetableMode();
+    float start = 0.0f, end = 1.0f;
     {
         const juce::ScopedLock sl (getCallbackLock());
+        const auto wtMapping = makeWtTraversalMapping(snapshotSamples);
+        start = wtMode ? wtMapping.extractStart : masterSampler.getLoopStart();
+        end   = wtMode ? wtMapping.extractEnd   : masterSampler.getLoopEnd();
+    }
 
-        if (waveformSnapshot.getNumSamples() > 0)
-        {
-            const auto wtMapping = makeWtTraversalMapping(waveformSnapshot.getNumSamples());
-            float start = isWavetableMode() ? wtMapping.extractStart
-                                            : masterSampler.getLoopStart();
-            float end   = isWavetableMode() ? wtMapping.extractEnd
-                                            : masterSampler.getLoopEnd();
+    constexpr int frameCounts[] = {32, 64, 128, 256};
+    int fcIdx = static_cast<int>(paramCache.wtFrames->load());
+    int maxFrames = frameCounts[juce::jlimit(0, 3, fcIdx)];
 
-            constexpr int frameCounts[] = {32, 64, 128, 256};
-            int fcIdx = static_cast<int>(paramCache.wtFrames->load());
-            int maxFrames = frameCounts[juce::jlimit(0, 3, fcIdx)];
+    auto preparedMipData = wtMode
+        ? masterOsc.prepareFramesFromBuffer(waveformSnapshot, generatedSampleRate, start, end, maxFrames)
+        : masterOsc.prepareContiguousFrames(waveformSnapshot, generatedSampleRate, start, end);
 
-            if (isWavetableMode())
-                masterOsc.extractFramesFromBuffer(waveformSnapshot, generatedSampleRate, start, end, maxFrames);
-            else
-                masterOsc.extractContiguousFrames(waveformSnapshot, generatedSampleRate, start, end);
+    {
+        const juce::ScopedLock sl (getCallbackLock());
+        masterOsc.applyPreparedMipData(std::move(preparedMipData));
 
-            dcoTableActive_.store(false, std::memory_order_relaxed);  // re-extracted from the snapshot above
-            clearLcoBakeSnapshot();
-            // Same neural-reclaims-masterOsc transition as reloadProcessedAudio /
-            // loadGeneratedAudio: fresh content on A.
-            syncWavetableTraversal(generatedSampleRate, waveformSnapshot.getNumSamples());
-            masterOsc.setMorphTimeMs(paramCache.driftCrossfade->load());
-            voiceManager.distributeWavetableFrames(masterOsc);
-        }
+        dcoTableActive_.store(false, std::memory_order_relaxed);  // re-extracted from the snapshot above
+        clearLcoBakeSnapshot();
+        // Same neural-reclaims-masterOsc transition as reloadProcessedAudio /
+        // loadGeneratedAudio: fresh content on A.
+        syncWavetableTraversal(generatedSampleRate, snapshotSamples);
+        masterOsc.setMorphTimeMs(paramCache.driftCrossfade->load());
+        voiceManager.distributeWavetableFrames(masterOsc);
     }
 
     // Re-slicing changed the neural table → refresh the engine-window 2.5D fan.
