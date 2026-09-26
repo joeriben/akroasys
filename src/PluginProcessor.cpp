@@ -1001,6 +1001,25 @@ void T5ynthProcessor::parameterChanged(const juce::String& parameterID, float ne
         triggerAsyncUpdate();
     }
 
+    // WT Frames: re-slice the neural table at the new frame count. Here and not
+    // on the frame-count box: the box follows host automation and a MIDI-learned
+    // controller only through its attachment, so there it held only while the
+    // editor was open, and it re-sliced on every editor open, when the
+    // attachment first sets the box. Deferred to handleAsyncUpdate like the
+    // switches above, because this can arrive on the audio thread, where the
+    // re-slice cannot run, and because a Snap recall or preset load that
+    // changes WT Frames must not re-slice the sound it is leaving before it
+    // publishes the one it recalls: two publishes, and a held note starts
+    // following both. Whatever settles the table first drops the request
+    // (loadGeneratedAudio in a wavetable mode, reextractWavetable), and so does
+    // an installed LCO snapshot (setLcoBakeSnapshot), which the re-slice would
+    // clear.
+    if (parameterID == PID::wtFrames)
+    {
+        wtReextractWanted_.store(true, std::memory_order_release);
+        triggerAsyncUpdate();
+    }
+
     // Can run on the audio thread (confirmed: MIDI-CC-Learn-bound params call
     // setValueNotifyingHost from inside processBlock) or the message thread —
     // never assume which. No allocation, no lock beyond the lock-free FIFO.
@@ -7056,6 +7075,16 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     const float extractEnd   = wavetableMode ? wtMapping.extractEnd
                                              : samplerConfig.loopEndFrac;
 
+    // In a wavetable mode this extraction uses the frame count in force and the
+    // markers the caller set, so a re-slice still waiting from before it (a Snap
+    // recall's parameter restore that changed WT Frames) would only republish
+    // the sound being replaced here. Outside one it installs contiguous chunks,
+    // which ignore the frame count, so a waiting re-slice stays for the switch
+    // back (handleAsyncUpdate). Audio that yields no table (empty, shorter than
+    // one frame, or every frame below -40 dBFS) leaves the previous bank as it
+    // was, frame count included.
+    if (wavetableMode)
+        wtReextractWanted_.exchange(false, std::memory_order_acq_rel);
     constexpr int frameCounts[] = {32, 64, 128, 256};
     int fcIdx = static_cast<int>(paramCache.wtFrames->load());
     int maxFrames = frameCounts[juce::jlimit(0, 3, fcIdx)];
@@ -7100,6 +7129,15 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     auto preparedMipData = wavetableMode
         ? masterOsc.prepareFramesFromBuffer(feedBuffer, sr, extractStart, extractEnd, maxFrames)
         : masterOsc.prepareContiguousFrames(feedBuffer, sr, extractStart, extractEnd);
+    // What masterOsc is sliced at once the publish below lands. No table: the
+    // previous bank stays. If the snapshot a re-slice reads is still replaced
+    // below, a re-slice of it can succeed where this extraction did not (it
+    // reads the snapshot normalised; this drops frames below -40 dBFS of the raw
+    // audio), so no count is known to match any more. Otherwise nothing changed.
+    const int slicedAtIdx = preparedMipData != nullptr
+                              ? (wavetableMode ? juce::jlimit(0, 3, fcIdx) : -1)
+                          : preparedWaveformSnapshot.getNumSamples() > 0 ? -1
+                          : wtSlicedAtFramesIdx_;
     // Off-lock compute: mixdown only, no publish (see FreezeTextureEngine::
     // prepareBufferLoad's doc comment). The actual publish happens inside the
     // lock below, alongside masterSampler's. masterFreeze.publishedSnapshot_
@@ -7134,6 +7172,7 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         masterSampler.applyPreparedBufferLoad(std::move(preparedSamplerLoad), samplerConfig);
         masterFreeze.applyPreparedBufferLoad(std::move(preparedFreezeSnapshot));
         masterOsc.applyPreparedMipData(std::move(preparedMipData));
+        wtSlicedAtFramesIdx_ = slicedAtIdx;
 
         dcoTableActive_.store(false, std::memory_order_relaxed);  // neural frames own masterOsc again
         clearLcoBakeSnapshot();  // masterOsc is neural again — an LCO save block would be stale
@@ -7826,6 +7865,7 @@ void T5ynthProcessor::loadDcoWavetable(const juce::AudioBuffer<float>& frameStri
         // Gate the per-block traversal re-sync BEFORE distributing, so no
         // audio block can re-derive neural scan brackets over the DCO table.
         dcoTableActive_.store(true, std::memory_order_relaxed);
+        wtSlicedAtFramesIdx_ = -1;   // masterOsc holds no neural slicing now
         // A HELD note plays the freshly baked table: active wavetable voices
         // equal-power crossfade over the Regen XFade time, silent voices adopt.
         voiceManager.distributeWavetableFrames(masterOsc);
@@ -7868,6 +7908,7 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
     // on nullptr, matching this function's original behaviour of leaving
     // masterOsc's bank untouched when the outer condition below is false.
     WavetableOscillator::MipDataPtr preparedMipData;
+    int slicedAtIdx = wtSlicedAtFramesIdx_;   // what masterOsc is sliced at after the publish below
     if (preparedWaveformSnapshot.getNumSamples() > 0 && masterOsc.hasFrames())
     {
         const auto wtMapping = makeWtTraversalMapping(preparedWaveformSnapshot.getNumSamples(),
@@ -7891,6 +7932,8 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         preparedMipData = wavetableMode
             ? masterOsc.prepareFramesFromBuffer(preparedWaveformSnapshot, generatedSampleRate, start, end, maxFrames)
             : masterOsc.prepareContiguousFrames(preparedWaveformSnapshot, generatedSampleRate, start, end);
+        if (preparedMipData != nullptr)
+            slicedAtIdx = wavetableMode ? juce::jlimit(0, 3, fcIdx) : -1;
     }
     auto preparedFreezeBuffer = makeFreezeLoadBuffer(processed,
                                                      generatedSampleRate,
@@ -7915,6 +7958,7 @@ void T5ynthProcessor::reloadProcessedAudio(const juce::AudioBuffer<float>& proce
         masterSampler.applyPreparedBufferLoad(std::move(preparedSamplerLoad), samplerConfig);
         masterFreeze.applyPreparedBufferLoad(std::move(preparedFreezeSnapshot));
         masterOsc.applyPreparedMipData(std::move(preparedMipData));
+        wtSlicedAtFramesIdx_ = slicedAtIdx;
         if (preparedWaveformSnapshot.getNumSamples() > 0)
             waveformSnapshot = std::move(preparedWaveformSnapshot);
         // Held sampler notes crossfade onto the reprocessed sample on the next
@@ -8975,8 +9019,31 @@ int T5ynthProcessor::maxActiveCacheCapacityForDuration() const
     return isSurfaceParadigmLanguage() ? 16 : maxInferenceCacheCapacityForDuration();
 }
 
-void T5ynthProcessor::reextractWavetable()
+void T5ynthProcessor::reextractWavetable(bool deferredRequest)
 {
+    // Read once, for both uses: whether a waiting request may run now, and which
+    // extraction below. Read twice, an engine switch landing in between (host
+    // automation, a MIDI-learned CC) would let a request pass the first read and
+    // then install contiguous chunks, and nothing would be left to re-slice on the
+    // switch back to Wavetable.
+    const bool wtMode = isWavetableMode();
+    if (deferredRequest && ! wtMode)
+        return;   // the request waits for the switch back (handleAsyncUpdate)
+
+    // In a wavetable mode this settles a re-slice still waiting from a WT Frames
+    // change: it extracts with the frame count in force (see parameterChanged,
+    // wtReextractWanted_). Outside one (only a direct call gets here, with an
+    // engine switch landing after its caller's check) it installs contiguous
+    // chunks, and the request stays for the switch back.
+    if (wtMode)
+        wtReextractWanted_.exchange(false, std::memory_order_acq_rel);
+
+    constexpr int frameCounts[] = {32, 64, 128, 256};
+    const int fcIdx = juce::jlimit(0, 3, static_cast<int>(paramCache.wtFrames->load()));
+    // A waiting request for the count the table already has: a load settled it.
+    if (deferredRequest && fcIdx == wtSlicedAtFramesIdx_)
+        return;
+
     // A DCO/LCO table owns the oscillator with bit-exact frames (setExactFrames).
     // Frame-count buttons and bracket drags must NOT re-slice the last neural
     // snapshot over it — that would revert the authored table to neural material.
@@ -8998,7 +9065,6 @@ void T5ynthProcessor::reextractWavetable()
     if (snapshotSamples <= 0)
         return;
 
-    const bool wtMode = isWavetableMode();
     float start = 0.0f, end = 1.0f;
     {
         const juce::ScopedLock sl (getCallbackLock());
@@ -9007,17 +9073,18 @@ void T5ynthProcessor::reextractWavetable()
         end   = wtMode ? wtMapping.extractEnd   : masterSampler.getLoopEnd();
     }
 
-    constexpr int frameCounts[] = {32, 64, 128, 256};
-    int fcIdx = static_cast<int>(paramCache.wtFrames->load());
-    int maxFrames = frameCounts[juce::jlimit(0, 3, fcIdx)];
+    const int maxFrames = frameCounts[fcIdx];
 
     auto preparedMipData = wtMode
         ? masterOsc.prepareFramesFromBuffer(waveformSnapshot, generatedSampleRate, start, end, maxFrames)
         : masterOsc.prepareContiguousFrames(waveformSnapshot, generatedSampleRate, start, end);
+    const int slicedAtIdx = preparedMipData == nullptr ? wtSlicedAtFramesIdx_
+                          : wtMode ? fcIdx : -1;
 
     {
         const juce::ScopedLock sl (getCallbackLock());
         masterOsc.applyPreparedMipData(std::move(preparedMipData));
+        wtSlicedAtFramesIdx_ = slicedAtIdx;
 
         dcoTableActive_.store(false, std::memory_order_relaxed);  // re-extracted from the snapshot above
         clearLcoBakeSnapshot();
@@ -11945,6 +12012,23 @@ void T5ynthProcessor::handleAsyncUpdate()
                 onLroCachePositionRequested(idx);
         }
     }
+
+    // WT Frames moved (see parameterChanged). After the Snap and cache landings
+    // above: in a wavetable mode the neural ones install their table through
+    // loadGeneratedAudio and so drop this request, so a recall arriving in the
+    // same pass as a frame-count change does not first re-slice the sound it
+    // replaces. The LRO ones install no neural table and leave the request
+    // standing.
+    // Only in a wavetable mode: in Sampler, Freeze or Csound the re-slice would
+    // install raw contiguous chunks (reextractWavetable), which nothing there
+    // plays and which a later switch to Wavetable would play as single cycles.
+    // The request waits instead. Every engine switch comes through here
+    // (authorReconcileWanted_ in parameterChanged), so it runs on the switch
+    // back to Wavetable, unless a load has settled the table before that.
+    // reextractWavetable re-checks the mode itself, with the same read it
+    // extracts by, and drops the request once it runs.
+    if (isWavetableMode() && wtReextractWanted_.load(std::memory_order_acquire))
+        reextractWavetable(/*deferredRequest=*/true);
 
     // XL cache button (CC 49): toggle the inference cache 4 ↔ Off via the editor (keeps the
     // on-screen radio buttons in sync).

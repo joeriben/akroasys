@@ -447,6 +447,14 @@ public:
         lcoOscAHasContent_ = oscAHasContent; lcoGainA_ = gainA;
         lcoOscBHasContent_ = oscBHasContent; lcoGainB_ = gainB;
         lcoSnapshotValid_ = true;
+        // A WT Frames re-slice still waiting would clear this again: re-slicing
+        // hands masterOsc back to the neural table and drops the snapshot with it.
+        // A preset load or state restore writes the frame count before it installs
+        // the snapshot, so the re-slice its own frame change asked for would erase
+        // the snapshot it just restored, and the next save would lose the lco
+        // block. The synchronous re-slice that ran there before read the old
+        // count, so dropping the request leaves the table where that one did.
+        wtReextractWanted_.exchange(false, std::memory_order_acq_rel);
     }
     void clearLcoBakeSnapshot() { lcoSnapshotValid_ = false; }
     bool hasLcoBakeSnapshot() const { return lcoSnapshotValid_; }
@@ -716,8 +724,10 @@ public:
     WavetableOscillator& getMasterOsc() { return masterOsc; }
     const WavetableOscillator& getMasterOscConst() const { return masterOsc; }
 
-    /** Re-extract wavetable frames using current bracket region. */
-    void reextractWavetable();
+    /** Re-extract wavetable frames using current bracket region. deferredRequest:
+     *  called for a waiting WT Frames change (handleAsyncUpdate), which runs only in
+     *  a wavetable mode and only if the table is not already sliced at that count. */
+    void reextractWavetable(bool deferredRequest = false);
 
     // ── BPM-sync resolution ──
     // `hostBpmLastSeen` freezes the last live host BPM so paused-DAW behavior
@@ -831,6 +841,27 @@ private:
     // loaders), audio thread reads relaxed. Any neural (re-)extraction into
     // masterOsc clears it.
     std::atomic<bool> dcoTableActive_ { false };
+    // A WT Frames change is waiting for handleAsyncUpdate to re-slice, which it
+    // does only in a wavetable mode (parameterChanged sets it, on any thread: a
+    // MIDI-learned CC sets it on the audio thread). loadGeneratedAudio drops it
+    // in a wavetable mode right before it reads the frame count (outside one it
+    // installs contiguous chunks, and the request waits for the switch back),
+    // reextractWavetable once it runs in one (its early returns, a baked table
+    // or no snapshot, have nothing to re-slice), setLcoBakeSnapshot because a
+    // re-slice would clear the snapshot.
+    // An exchange and not a store: the read-modify-write sees the latest set,
+    // so either its acquire makes the new count visible to the read that
+    // follows, or the set lands after it and the request stands.
+    std::atomic<bool> wtReextractWanted_ { false };
+    // The WT Frames index the neural table in masterOsc was last sliced at, or
+    // -1 (contiguous chunks, a baked table, nothing yet, or a load whose audio
+    // yielded no table but replaced the snapshot a re-slice reads). A waiting
+    // request whose count equals it has nothing to re-slice: a load settled the
+    // table at that count, possibly while the request was still on its way (a
+    // MIDI-learned CC stores the value on the audio thread before its listener
+    // sets the flag, so a load can read the new count and still find no
+    // request). Message thread only, like every load that writes it.
+    int wtSlicedAtFramesIdx_ = -1;
     // Engine mode the user was on before a bake forced a language mode, or -1.
     // Leaving the language oscillator restores it (restoreNeuralEngineMode, the
     // sole consumer) so a bake never permanently hijacks the neural signal path.

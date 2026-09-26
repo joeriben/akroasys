@@ -840,7 +840,8 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
             int id = framesHidden.getSelectedId();
             for (int i = 0; i < kNumFrameBtns; ++i)
                 frameBtns[i].setToggleState(i + 1 == id, juce::dontSendNotification);
-            processorRef.reextractWavetable();
+            // The re-slice follows the parameter, not this box: see the
+            // processor's parameterChanged.
         };
         for (int i = 0; i < kNumFrameBtns; ++i)
         {
