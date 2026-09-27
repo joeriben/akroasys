@@ -54,6 +54,16 @@ bool snapKeyPhysicallyDown (int i)
    #endif
 }
 
+// Space held at its physical position (macOS kVK_Space); false elsewhere.
+bool spaceKeyPhysicallyDown()
+{
+   #if JUCE_MAC
+    return t5::physicalKeyDown (0x31);
+   #else
+    return false;
+   #endif
+}
+
 // The same digit as JUCE's key set holds it: by character, top row or numpad.
 bool snapKeyCharDown (int i)
 {
@@ -2956,6 +2966,7 @@ bool MainPanel::keyPressed(const juce::KeyPress& key)
             if (! spaceRestKeyDown_)
             {
                 spaceRestKeyDown_ = true;
+                spaceRestPhysical_ = spaceKeyPhysicallyDown();   // as the Snap keys below
                 processorRef.recordStepRest();
             }
             return true;
@@ -4185,8 +4196,13 @@ void MainPanel::pollComputerKeyboard()
 {
     // Re-arm the Space-rest edge once the key physically lifts. Runs every tick,
     // independent of piano mode (Space-rest is gated only on step-record). Global
-    // read — worst case is a missed rest while another app holds space.
-    if (! juce::KeyPress::isKeyCurrentlyDown(juce::KeyPress::spaceKey))
+    // read — worst case is a missed rest while another app holds space. By
+    // position where the key-down was seen there, for the reasons given for the
+    // Snap keys just below: a modifier change re-armed a Space still held, so its
+    // auto-repeat inserted another rest, and a key-up lost to the host's window
+    // left Space-rest dead.
+    if (! (spaceRestPhysical_ ? spaceKeyPhysicallyDown()
+                              : juce::KeyPress::isKeyCurrentlyDown(juce::KeyPress::spaceKey)))
         spaceRestKeyDown_ = false;
     // The Snap keys re-arm once the digit is up, top row or numpad (keyPressed
     // takes both). By position where the key-down was seen there

@@ -235,6 +235,7 @@ private:
     bool computerKeyboardEnabled = false;
     int computerKeyboardOctaveOffset = 0;
     bool spaceRestKeyDown_ = false;   // step-record: Space-rest edge (re-armed when the key lifts)
+    bool spaceRestPhysical_ = false;  // ...by key position (macOS), when the key-down was seen there
     bool snapKeyDown_[4] {};          // Snap recall keys 1-4: the same edge, re-armed the same way
     bool snapKeyPhysical_[4] {};      // ...by key position (macOS), when the key-down was seen there
     // Octave-key edge, kept per editor because that is the only place it may live
