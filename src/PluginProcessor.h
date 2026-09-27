@@ -1315,15 +1315,32 @@ private:
     // which the instrument was borrowing. The gain is now a function of the
     // voice-count switch, so the control that steps it is a front-panel button
     // and the ramp matters more, not less -- moving Mono to 16 is 15.7 dB.
-    // Seeded in prepareToPlay and refreshed on the deep-idle path, so the first
-    // block after a device change or after ten silent seconds does not ramp from
-    // a value that no longer applies.
+    // Seeded by seedOutputStageGains() below -- prepareToPlay and the deep-idle
+    // path call it, so the first block after a device change or after ten
+    // silent seconds ramps from the current settings.
     float outputGainPrev_ = 1.0f;
 
     // The same, for the sequencer's one-shot samples. They are not voices, so
     // they are referred to a FIXED switch position and pre-divided by whatever
     // the master stage is about to multiply by (PluginProcessor.cpp, addOneShots).
     float oneShotPreGainPrev_ = 1.0f;
+
+    // Master volume, one block behind, same reasoning as outputGainPrev_ above:
+    // a moved master_vol RAMPS instead of stepping at the boundary -- but over
+    // kMasterRampMs (1 ms, the declick minimum), not the whole block; see
+    // kMasterRampMs's comment in PluginProcessor.cpp. Seeded wherever
+    // outputGainPrev_ is seeded -- see seedOutputStageGains() below.
+    float masterGainPrev_ = 1.0f;
+
+    // Sets outputGainPrev_, oneShotPreGainPrev_ and masterGainPrev_ to what a
+    // block starting right now would settle at. Otherwise only processBlock
+    // advances them, oneShotPreGainPrev_ where the one-shots are pre-divided
+    // and the other two in the master stage at its end, so anywhere that code
+    // does not run -- prepareToPlay (nothing has played yet) and the deep-idle
+    // early return (both sites are below it) -- re-seeds them here instead, or
+    // the next real block would ramp from a value left over from before the
+    // gap. Defined in PluginProcessor.cpp right before processBlock.
+    void seedOutputStageGains() noexcept;
 
     // Sequencer
     T5ynthStepSequencer stepSequencer;

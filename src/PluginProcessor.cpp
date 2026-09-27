@@ -368,8 +368,9 @@ inline float outputGainForThreshold(float thresholdDb, int voiceSwitchIndex) noe
 // rate, and back again at the next block boundary. On a small step that corner
 // is inaudible; on a large one it clicks in its own right, separately from the
 // step it exists to smooth. A raised cosine has zero slope at both ends, so
-// there is no jump to click on -- same one-block ramp length, only the shape
-// changes. Measured on a held note across a
+// there is no jump to click on. The ramp is as long as the straight line was,
+// one block, except in a block where master volume moves too (see
+// outputRampLen); only the shape changes. Measured on a held note across a
 // 16-voices -> Mono switch, 48 kHz, with the log-domain curve below: at block
 // 128 the straight line puts 16 dB of broadband (>6 kHz) energy above the
 // settled sound at the corner, the raised cosine none (-1.9 dB, under the
@@ -378,22 +379,48 @@ inline float outputGainForThreshold(float thresholdDb, int voiceSwitchIndex) noe
 // for this switch; those figures include that.)
 //
 // The shape is applied in the log domain, g(i) = start * (end/start)^shape(i),
-// not linearly, because the one-shots' pre-gain K/o and the output gain o it
-// is divided by are both ramped, and a linear ramp of each is not K in between
-// -- +6.3 dB at the middle of a Mono <-> 16 block. In the log domain
-// (K/o)(i) * o(i) == K at every sample, to float rounding.
+// not linearly, for two reasons that only show up once more than one such gain
+// moves in the same block. First, two gains ramped independently can move in
+// opposite directions and overshoot their settled product under linear
+// interpolation: master 0 -> -20 dB together with 16 -> Mono in the same block
+// peaks at +5.8 dB over the start. Second, the one-shots' pre-gain K/o and the
+// output gain o it is divided by are both ramped, and a linear ramp of each is
+// not K in between -- +6.3 dB at the middle of a Mono <-> 16 block. Log-domain
+// interpolation fixes both: the log of a product of such gains moves
+// monotonically along the same shape, and (K/o)(i) * o(i) == K at every sample,
+// to float rounding.
 inline float blockRampShape (int i, int n) noexcept
 {
     return 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * (float) i / (float) n);
 }
 
+// Master volume used to step at the block boundary; a ramp there is a
+// declick, so it gets the declick minimum, 1 ms, and not the whole block the
+// output gain below ramps over (43 ms at a 2048-sample buffer). A block
+// shorter than that ramps over the whole block. Measured on the real
+// processor, offline (held C3 and C2 at 16 voices and at Mono, block 96,
+// master stepped 11.1 and 20 dB down and back up; HF above 6 kHz in 1 ms
+// windows, maximum in the 20 ms after the step, against the 99.5th percentile
+// of the settled sound on both sides): stepped +42.6..+62.5 dB, over 1 ms
+// -1.6..+10.4 dB, the loudest at -100.8 dBFS.
+constexpr float kMasterRampMs = 1.0f;
+
 // The shaped counterpart of buf.applyGainRamp(0, numSamples, start, end), for
 // start != end: a gain per sample like that one's, but along blockRampShape's
 // curve in the log domain (see the comment above) instead of a straight line.
-void applyGainRampShaped (juce::AudioBuffer<float>& buf, int numSamples, float start, float end) noexcept
+// The curve runs over the first rampLen samples (clamped to [1, numSamples]);
+// samples rampLen..numSamples-1 hold flat at `end` -- a caller ramping a
+// large step over less than the whole block (master volume's declick) passes
+// its own rampLen instead of always taking numSamples.
+void applyGainRampShaped (juce::AudioBuffer<float>& buf, int numSamples, float start, float end, int rampLen) noexcept
 {
     if (buf.hasBeenCleared())
         return;   // applyGainRamp does the same; getWritePointer below would clear the flag
+
+    if (numSamples <= 0)
+        return;
+
+    rampLen = juce::jlimit (1, numSamples, rampLen);
 
     if (start > 0.0f && end > 0.0f)
     {
@@ -401,20 +428,24 @@ void applyGainRampShaped (juce::AudioBuffer<float>& buf, int numSamples, float s
         for (int ch = 0; ch < buf.getNumChannels(); ++ch)
         {
             auto* d = buf.getWritePointer(ch);
-            for (int i = 0; i < numSamples; ++i)
-                d[i] *= start * std::exp(logRatio * blockRampShape(i, numSamples));
+            for (int i = 0; i < rampLen; ++i)
+                d[i] *= start * std::exp(logRatio * blockRampShape(i, rampLen));
+            for (int i = rampLen; i < numSamples; ++i)
+                d[i] *= end;
         }
     }
     else
     {
-        // Cannot happen with this file's parameter ranges (output gain >= 0.37)
-        // -- a ratio through zero or a negative gain has no logarithm, so fall
-        // back to the linear-domain raised cosine instead.
+        // Cannot happen with this file's parameter ranges (master_vol -60..0 dB,
+        // output gain >= 0.37) -- a ratio through zero or a negative gain has no
+        // logarithm, so fall back to the linear-domain raised cosine instead.
         for (int ch = 0; ch < buf.getNumChannels(); ++ch)
         {
             auto* d = buf.getWritePointer(ch);
-            for (int i = 0; i < numSamples; ++i)
-                d[i] *= start + (end - start) * blockRampShape(i, numSamples);
+            for (int i = 0; i < rampLen; ++i)
+                d[i] *= start + (end - start) * blockRampShape(i, rampLen);
+            for (int i = rampLen; i < numSamples; ++i)
+                d[i] *= end;
         }
     }
 }
@@ -422,26 +453,34 @@ void applyGainRampShaped (juce::AudioBuffer<float>& buf, int numSamples, float s
 // The shaped counterpart of dest.addFromWithRamp(destChannel, 0, src,
 // numSamples, start, end), for start != end -- same convention and the same
 // log-domain curve as applyGainRampShaped, added into the destination rather
-// than applied in place.
-void addFromWithRampShaped (juce::AudioBuffer<float>& dest, int destChannel, const float* src, int numSamples, float start, float end) noexcept
+// than applied in place. Same rampLen convention as applyGainRampShaped: the
+// curve runs over the first rampLen samples (clamped to [1, numSamples]),
+// `end` holds flat for the rest.
+void addFromWithRampShaped (juce::AudioBuffer<float>& dest, int destChannel, const float* src, int numSamples, float start, float end, int rampLen) noexcept
 {
     if (numSamples <= 0)
         return;
+
+    rampLen = juce::jlimit (1, numSamples, rampLen);
 
     auto* d = dest.getWritePointer(destChannel);   // sets isClear = false, as addFromWithRamp does
 
     if (start > 0.0f && end > 0.0f)
     {
         const float logRatio = std::log(end / start);
-        for (int i = 0; i < numSamples; ++i)
-            d[i] += src[i] * (start * std::exp(logRatio * blockRampShape(i, numSamples)));
+        for (int i = 0; i < rampLen; ++i)
+            d[i] += src[i] * (start * std::exp(logRatio * blockRampShape(i, rampLen)));
+        for (int i = rampLen; i < numSamples; ++i)
+            d[i] += src[i] * end;
     }
     else
     {
         // Same safety net as applyGainRampShaped above; cannot happen with this
         // file's parameter ranges.
-        for (int i = 0; i < numSamples; ++i)
-            d[i] += src[i] * (start + (end - start) * blockRampShape(i, numSamples));
+        for (int i = 0; i < rampLen; ++i)
+            d[i] += src[i] * (start + (end - start) * blockRampShape(i, rampLen));
+        for (int i = rampLen; i < numSamples; ++i)
+            d[i] += src[i] * end;
     }
 }
 } // namespace
@@ -2794,13 +2833,12 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     ampChorus.prepare(sampleRate, samplesPerBlock);
     ampPhaser.prepare(sampleRate, samplesPerBlock);
     ampTremolo.prepare(sampleRate, samplesPerBlock);
-    // OutputCeiling holds no state and needs no preparing. The output gain does:
-    // seeded here so the first block after a rate/size change starts AT the
-    // parameter's gain instead of ramping up to it from whatever the last
-    // session left behind.
-    outputGainPrev_ = outputGainForThreshold(paramCache.limiterThresh->load(),
-                                             static_cast<int>(paramCache.voiceCount->load()));
-    oneShotPreGainPrev_ = kOneShotReferenceGain / juce::jmax(1.0e-6f, outputGainPrev_);
+    // OutputCeiling holds no state and needs no preparing. The three output-
+    // stage gains do: seeded here so the first block after a rate/size change
+    // starts AT the current parameters' gain instead of ramping up to it from
+    // whatever the last session left behind. Same seeding as the deep-idle
+    // re-seed uses -- see seedOutputStageGains' own comment.
+    seedOutputStageGains();
     // Pre-size the internal note-event buffer so the audio thread never grows it
     // (a push_back reallocation would be a heap alloc on the audio thread). Worst
     // case is pathological — max BPM (300) + smallest division + all 5 strands +
@@ -3623,6 +3661,17 @@ bool T5ynthProcessor::snapshotExternalCapture (juce::AudioBuffer<float>& dest,
     return true;
 }
 
+// The same three expressions processBlock computes these gains from; see the
+// declaration for where they are advanced and why they need seeding.
+void T5ynthProcessor::seedOutputStageGains() noexcept
+{
+    const float g = outputGainForThreshold(paramCache.limiterThresh->load(),
+                                           static_cast<int>(paramCache.voiceCount->load()));
+    outputGainPrev_     = g;
+    oneShotPreGainPrev_ = kOneShotReferenceGain / juce::jmax(1.0e-6f, g);
+    masterGainPrev_     = juce::Decibels::decibelsToGain(paramCache.masterVol->load());
+}
+
 void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     // Taken before the lock, the earliest point of this callback the processor can
@@ -3979,19 +4028,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         audioIdle.store(true, std::memory_order_relaxed);
         // The master stage below this return is never reached while idle, so the
-        // two gain ramps have to be re-seeded HERE or they start the next block
-        // from a value that can be ten seconds old. Both now follow the
+        // three gain ramps have to be re-seeded HERE or they start the next block
+        // from a value that can be ten seconds old. Two of them follow the
         // voice-count SWITCH, which is a front-panel button: press "16" on a
         // silent instrument, play a chord, and a stale start value would ramp the
         // onset from the Mono gain -- 15.7 dB too hot for the length of one
         // block. Idle is exactly when a switch gets pressed, so this is the
-        // normal case and not an edge one.
-        {
-            const float g = outputGainForThreshold(paramCache.limiterThresh->load(),
-                                                   static_cast<int>(paramCache.voiceCount->load()));
-            outputGainPrev_     = g;
-            oneShotPreGainPrev_ = kOneShotReferenceGain / juce::jmax(1.0e-6f, g);
-        }
+        // normal case and not an edge one. The third, masterGainPrev_, follows
+        // master_vol instead -- a fader move landing while idle must not ramp
+        // from a value just as stale.
+        seedOutputStageGains();
         // The arp edges below this return are never evaluated while idle, so the
         // edge state has to track the parameter here — otherwise switching the arp
         // off during idle leaves arpWasEnabled true, and the first block after the
@@ -6037,6 +6083,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                                         static_cast<int>(paramCache.voiceCount->load()));
     const float oneShotPreGain = kOneShotReferenceGain / juce::jmax(1.0e-6f, outputGainNow);
 
+    // When master volume and the output gain move in the same block, both --
+    // and the one-shots' pre-gain, which must stay on the output gain's curve
+    // -- take the master's length, so the log of their product still moves
+    // monotonically along one curve and pre-gain times output gain stays
+    // kOneShotReferenceGain at every sample, to float rounding. A block where
+    // only the output gain moves keeps its one-block ramp.
+    const bool masterMoves = ! juce::exactlyEqual (masterGainPrev_, masterGain);
+    const int masterRampLen = juce::jmin (numSamples, juce::jmax (1, juce::roundToInt (kMasterRampMs * 0.001 * getSampleRate())));
+    const int outputRampLen = masterMoves ? masterRampLen : numSamples;
+
     // Advanced HERE and not inside the lambda: the lambda runs in at most one of
     // four mutually exclusive routing branches, so a block that takes a branch
     // with no one-shots would otherwise leave the ramp's start value a block or
@@ -6050,8 +6106,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // The one-shots are pre-divided by the output gain above and multiplied
         // back by it downstream (the master and output stages apply to `dest`
         // too). Their pre-gain follows the output gain's curve over the same
-        // block, so the two multiply to kOneShotReferenceGain, to float
-        // rounding, at every sample of a block where the output gain moves.
+        // length (outputRampLen), so the two multiply to kOneShotReferenceGain,
+        // to float rounding, at every sample of a block where the output gain
+        // moves.
         if (juce::exactlyEqual(oneShotPreGainPrev, oneShotPreGain))
         {
             for (int c = 0; c < ch; ++c)
@@ -6062,7 +6119,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         {
             for (int c = 0; c < ch; ++c)
                 addFromWithRampShaped(dest, c, oneShotBuffer.getReadPointer(c), numSamples,
-                                      oneShotPreGainPrev, oneShotPreGain);
+                                      oneShotPreGainPrev, oneShotPreGain, outputRampLen);
         }
     };
 
@@ -6493,7 +6550,17 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     }
 
     // ── Master volume ───────────────────────────────────────────────────────
-    buffer.applyGain(masterGain);
+    // A moved master_vol ramps as a raised cosine (applyGainRampShaped) over
+    // kMasterRampMs -- or the whole block, when the block is shorter -- instead
+    // of stepping at the block boundary, where it used to click. See
+    // kMasterRampMs's comment for why master gets the short declick rather
+    // than the one-block ramp the output gain below still uses. Unchanged, it
+    // is the single multiply it always was.
+    if (juce::exactlyEqual(masterGainPrev_, masterGain))
+        buffer.applyGain(masterGain);
+    else
+        applyGainRampShaped(buffer, numSamples, masterGainPrev_, masterGain, masterRampLen);
+    masterGainPrev_ = masterGain;
 
     // ── Output gain ─────────────────────────────────────────────────────────
     // The static half of what juce::dsp::Limiter used to do here. Ramped across
@@ -6504,13 +6571,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // outputGainNow was read once, above at the one-shot pre-gain site (see
         // its comment). Both of its inputs are SWITCH positions, not anything
         // the sounding voices do, so this gain cannot couple one held note to
-        // another. A move of either control ramps across the block as a raised
-        // cosine (applyGainRampShaped), whose zero slope at both ends leaves no
-        // corner for a large step to click on. Unchanged, the gain is constant.
+        // another. A move of either control ramps as a raised cosine
+        // (applyGainRampShaped), whose zero slope at both ends leaves no corner
+        // for a large step to click on: across the block, or over master
+        // volume's kMasterRampMs when master_vol moves in the same block (see
+        // outputRampLen). Unchanged, the gain is constant.
         if (juce::exactlyEqual(outputGainPrev_, outputGainNow))
             buffer.applyGainRamp(0, numSamples, outputGainPrev_, outputGainNow);
         else
-            applyGainRampShaped(buffer, numSamples, outputGainPrev_, outputGainNow);
+            applyGainRampShaped(buffer, numSamples, outputGainPrev_, outputGainNow, outputRampLen);
         outputGainPrev_ = outputGainNow;
     }
 
