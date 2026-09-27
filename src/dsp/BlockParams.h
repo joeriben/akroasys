@@ -574,8 +574,9 @@ namespace ModCalib {
 // These are RELATIVE, and they are applied AT THE VCA (SynthVoice.cpp), i.e.
 // at the end of the voice chain, so that they move the level and touch neither
 // the noise balance nor the drive into the saturating stages. The absolute
-// level is `outputGainForThreshold` in PluginProcessor.cpp; the two are set
-// together, and the engine that grows fastest with polyphony is what fixes it.
+// level is `outputGainForThreshold` in PluginProcessor.cpp, one gain for every
+// voice-count position; its comment states how many notes of each engine reach
+// the output ceiling's knee at that gain.
 namespace EngineCalib {
     static constexpr float kSampler   = 0.7765f;  // 0.278 / 0.358
     static constexpr float kWavetable = 0.2986f;  // 0.278 / 0.931

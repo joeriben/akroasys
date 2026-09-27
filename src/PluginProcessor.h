@@ -1316,9 +1316,8 @@ private:
     // the block instead of stepping. It replaces the makeup gain that
     // juce::dsp::Limiter used to apply (and smoothed over 1 ms for the same
     // reason); what went away with that widget is its compression AND its level,
-    // which the instrument was borrowing. The gain is now a function of the
-    // voice-count switch, so the control that steps it is a front-panel button
-    // and the ramp matters more, not less -- moving Mono to 16 is 15.7 dB.
+    // which the instrument was borrowing. The gain follows `limiterThresh`,
+    // which a preset load or host automation can move at any time.
     // Seeded by seedOutputStageGains() below -- prepareToPlay, the deep-idle
     // path, and processBlockBypassed all call it, so the first block after a
     // device change, after ten silent seconds, or after a host un-bypasses the
@@ -1328,7 +1327,7 @@ private:
     float outputGainPrev_ = 1.0f;
 
     // The same, for the sequencer's one-shot samples. They are not voices, so
-    // they are referred to a FIXED switch position and pre-divided by whatever
+    // they are referred to kOneShotReferenceGain and pre-divided by whatever
     // the master stage is about to multiply by (PluginProcessor.cpp, addOneShots).
     float oneShotPreGainPrev_ = 1.0f;
 

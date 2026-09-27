@@ -249,8 +249,8 @@ into being.
 - **The LRO plays at the same level as the other engines.** It was 12.4 dB
   quieter than what it is A/B'd against, so every comparison was decided by
   loudness before it was decided by sound.
-- **The output gain follows the voice-count switch**, so moving between Mono and
-  16 voices no longer steps the level mid-note.
+- **Louder, and one level at every voice count**: the voice-count switch no
+  longer changes how loud a note is.
 - **MPE**: the zone layout is now JUCE's own, and a controller's NRPN messages
   can no longer be mistaken for a zone declaration or a bend range.
 - **The in-app manual** describes the instrument as it is, without arguing for it.

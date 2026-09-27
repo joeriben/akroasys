@@ -278,89 +278,76 @@ inline int osQualityIndexFromFactor(int factor) noexcept
 // calibration, it is a leftover -- and it was 6.75 dB of the instrument's
 // loudness borrowed from a stage that was squashing every chord to pay for it.
 //
-// WHAT IT IS NOW: how loud the instrument is, as a function of the VOICE COUNT
-// SWITCH.
+// WHAT IT IS NOW: one gain, the same at every position of the voice-count
+// switch.
 //
-// Setting it from one polyphony was wrong, and BJ said so: the voice count is a
-// SWITCH -- seven positions on the panel, Mono to 64 -- so the circuit can read
-// it. It is not a hidden dependence on how many notes happen to be sounding
-// (that would be the paraphony this whole repair removed, and VoiceManager's
-// 1/N^0.1 is the only thing in the instrument allowed to depend on THAT). It is
-// a static function of a control the player sets deliberately, and it changes
-// only when they move it.
+// BJ, 2026-09-27: *„DASS DER SYNTH OUTPUT ERHEBLICH ZU LEISE IST. KEIN EINZIGER
+// meiner Softsynths auf diesm Gerät ist DERMASSEN LEISE."*
 //
-// What it buys is the loudness back where it is actually missed. A mono lead no
-// longer pays for headroom a sixteen-voice pad needs and it never uses.
+// WHAT WAS HERE BEFORE, and why it is gone. From 2026-08-05 the gain was a
+// function of the switch: 0.9 / (the voice-chain peak of a chord FILLING the
+// selected polyphony), so that such a chord landed exactly on the ceiling's
+// knee. That priced every position for its densest possible chord, and the
+// price was paid by every note: the same single note was 15.7 dB apart between
+// Mono (x3.237) and 16 voices (x0.533), and a 16-voice patch played it at
+// -16.6 dBFS. Measured over 27 presets of the bank (BS.1770-4, held C3, 4 s,
+// built standalone), the median sat at -21.7 LUFS against -13.8 in 3.0.0 of
+// 2026-08-02, and the 16-voice Sampler, Wavetable and Granular presets had
+// lost 13 to 22 LU.
 //
-// Measured (tools/measure_engine_levels), post-trim voice-chain peak with EVERY
-// switch position held full. The wavetable engine is the steepest at every one
-// of them -- its voices all read one spectrum, so their partials coincide far
-// more often -- so it sets the table:
+// WHERE THE NUMBER COMES FROM. The softsynths on the maintainer's Mac, rendered
+// the same way (held C3, 4 s, BS.1770-4), default patches of eighteen of them:
+// median -20.2 LUFS, loudest Vital -14.6 and Pigments -15.5. At x1.6 the median
+// of the same 27 presets moves to about -15.4 LUFS, i.e. level with the
+// loudest of them. The neutral patch's single note (voice-chain peak 0.278,
+// the table below) then peaks at -7.0 dBFS.
+//
+// WHAT IT COSTS, stated rather than hidden. A chord now reaches the ceiling's
+// knee (0.9) in the standalone well before it fills the polyphony. The
+// voice-chain peak with N notes held, measured (tools/measure_engine_levels)
+// with every partial coinciding as often as it can -- the worst case, not the
+// typical one:
 //
 //   notes held      1      4      6      8     12     16     64
-//   Wavetable   0.278  0.724  0.904  1.079  1.498  1.688  5.498   <- sets this
+//   Wavetable   0.278  0.724  0.904  1.079  1.498  1.688  5.498
 //   Sampler     0.278  0.606  0.703  0.828  1.051  1.151  2.707
 //   Granular    0.278  0.433  0.603  0.717  0.857  1.000  2.444
 //   LRO         0.278  0.499  0.613  0.697  0.936  0.958      --  (capped at 16)
 //
-// The gain is 0.9 / (that peak), so a chord that fills the selected polyphony
-// lands exactly on the ceiling's knee: at every position the VOICE SUM is as
-// loud as it can be while still passing the ceiling bit-identically.
+// x1.6 puts the knee at a voice-chain peak of 0.5625. The table has no
+// columns between 1 and 4 or 4 and 6, so it says only this much: four such
+// notes on Wavetable or Sampler are already past it (Wavetable by 29%), and six
+// on Granular or the LRO. Past it the ceiling saturates -- gently
+// just above the knee, a flat top by +4.56 dBFS (dsp/Limiter.h). That is the
+// ceiling's job, and it runs in the standalone only: a plugin hands its float
+// buffer to the host, which lets it exceed 0 dBFS as it does for every other
+// synth. Delay and reverb add up to ~2.7x on top of the voice sum (the
+// gain-staging block below), so a wet patch reaches the ceiling sooner.
 //
-// The voice sum, and not the output. Delay and reverb add up to ~2.7x on top of
-// it (the gain-staging block below), and the sequencer's one-shots join after
-// the voices too. A wet patch WILL reach the ceiling, and no calibration at a
-// useful loudness can prevent that -- the FX gain alone is +8.6 dB. What this
-// table fixes is the dry voice sum; the ceiling is what catches the rest, which
-// is the job it exists for.
-//
-// ABOVE 16 THE LAW STOPS, and holds the 16-voice value. The switch stops
-// meaning "a chord this big" there: 64 notes at once is not a hand, it is a
-// sequencer or MPE texture where notes come and go, and calibrating for a
-// 64-note cluster would cost 10 dB that essentially never sounds. A dense
-// moment at that setting reaches the ceiling. That is the ceiling's job.
-//
-// The `limiterThresh` parameter still offsets the whole table, over the same
+// The `limiterThresh` parameter still offsets the gain, over the same
 // -30..0 dB range and in the same direction (more negative is louder). Its
-// DEFAULT is the reference: at -3.0 dB the table is exactly what is written
-// above.
+// DEFAULT is the reference: at -3.0 dB the gain is exactly kOutputGain.
 //
-// NO CALIBRATION EPOCH, deliberately, and this is the place to say why because
-// `voiceCount` IS stored in every preset and every DAW session, so every one of
-// them changes absolute level on load -- against the pre-repair chain, Mono
-// +3.4 dB, "4" -4.9, "8" -8.3, "16" -12.2. An epoch exists to keep a stored
-// preset sounding as authored across a law change; here the law change IS the
-// repair, and an epoch would have to undo it preset by preset. There is also no
-// room to undo it in: `master_vol` is attenuate-only and `limiterThresh` reaches
-// just -3 dB at its quiet end, against the 12.2 dB a 16-voice preset moved.
+// NO CALIBRATION EPOCH, for the same reason the 08-05 repair gave: `voiceCount`
+// is stored in every preset and every DAW session, so every one of them changes
+// absolute level on load, and an epoch would have to undo the change preset by
+// preset. Against the switch-dependent gain: Mono -6.1 dB, "4" +2.2, "6" +4.1,
+// "8" +5.7, "12" +8.5, "16" and above +9.5; the sequencer's one-shots +5.7 at
+// every position (they were referred to the "8" gain, see below).
 constexpr float kThresholdRef = -3.0f;   // == the parameter default
+constexpr float kOutputGain   = 1.6f;
 
-constexpr float kOutputGainForVoiceSwitch[] = {
-    3.237f,   // Mono   0.9 / 0.278   single note at -0.9 dBFS
-    1.243f,   // 4      0.9 / 0.724               -9.2 dBFS
-    0.996f,   // 6      0.9 / 0.904              -11.2 dBFS
-    0.834f,   // 8      0.9 / 1.079              -12.7 dBFS   (the shipped default)
-    0.601f,   // 12     0.9 / 1.498              -15.5 dBFS
-    0.533f,   // 16     0.9 / 1.688              -16.6 dBFS
-    0.533f,   // 64     held, see above
-    0.533f    // 128    hidden from the UI, same
-};
-static_assert(sizeof(kOutputGainForVoiceSwitch) / sizeof(kOutputGainForVoiceSwitch[0])
-                  == VoiceCount::kCount,
-              "one gain per voice-count switch position: adding a position to "
-              "VoiceCount::kEntries without one here would zero-fill it and make "
-              "that position silent, with no compile error.");
+// Anything that is NOT a voice -- the sequencer's one-shot samples -- leaves
+// the master stage at this level: it is pre-divided by the output gain and
+// multiplied back by it (addOneShots). So at the default threshold one-shots
+// and voices sit against each other as they did at the "8" position before,
+// now at every position; `limiterThresh` moves the voices and not the
+// one-shots, as it has since the pre-divide was introduced.
+constexpr float kOneShotReferenceGain = kOutputGain;
 
-// The shipped default position. Anything that is NOT a voice -- the sequencer's
-// one-shot samples -- is referred to this, so that moving a polyphony switch
-// does not move the level of something the polyphony does not bound.
-constexpr float kOneShotReferenceGain = 0.834f;   // == kOutputGainForVoiceSwitch[VoiceCount::V8]
-
-inline float outputGainForThreshold(float thresholdDb, int voiceSwitchIndex) noexcept
+inline float outputGainForThreshold(float thresholdDb) noexcept
 {
-    const int i = juce::jlimit(0, VoiceCount::kCount - 1, voiceSwitchIndex);
-    return kOutputGainForVoiceSwitch[i]
-         * juce::Decibels::decibelsToGain(kThresholdRef - thresholdDb, -100.0f);
+    return kOutputGain * juce::Decibels::decibelsToGain(kThresholdRef - thresholdDb, -100.0f);
 }
 
 // A straight-line gain ramp (buffer.applyGainRamp) has a corner at each end of
@@ -370,8 +357,10 @@ inline float outputGainForThreshold(float thresholdDb, int voiceSwitchIndex) noe
 // step it exists to smooth. A raised cosine has zero slope at both ends, so
 // there is no jump to click on. The ramp is as long as the straight line was,
 // one block, except in a block where master volume moves too (see
-// outputRampLen); only the shape changes. Measured on a held note across a
-// 16-voices -> Mono switch, 48 kHz, with the log-domain curve below: at block
+// outputRampLen); only the shape changes. Measured while the output gain
+// still followed the voice-count switch (today only `limiterThresh` moves it,
+// and the same shape serves it), on a held note across a 16-voices -> Mono
+// switch, 48 kHz, with the log-domain curve below: at block
 // 128 the straight line puts 16 dB of broadband (>6 kHz) energy above the
 // settled sound at the corner, the raised cosine none (-1.9 dB, under the
 // settled sound); at block 96, +19 dB vs -1.0 dB. (In the log domain the
@@ -437,7 +426,7 @@ void applyGainRampShaped (juce::AudioBuffer<float>& buf, int numSamples, float s
     else
     {
         // Cannot happen with this file's parameter ranges (master_vol -60..0 dB,
-        // output gain >= 0.37) -- a ratio through zero or a negative gain has no
+        // output gain >= 1.13) -- a ratio through zero or a negative gain has no
         // logarithm, so fall back to the linear-domain raised cosine instead.
         for (int ch = 0; ch < buf.getNumChannels(); ++ch)
         {
@@ -2398,13 +2387,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout T5ynthProcessor::createParam
     // "Limiter is internal only"), so both are reachable only through a preset
     // or host automation.
     //
-    // `limiterThresh` now OFFSETS the static output gain, which is itself a
-    // function of the voice-count switch (outputGainForThreshold). Same range,
-    // same direction it always ran; its default is the reference the table is
-    // written at. A stored value no longer means the same absolute level it did
-    // when the master stage still carried a compressor's makeup -- that makeup
-    // is gone, and how far below it the instrument now sits depends on the
-    // polyphony the preset also stores. `limiterRelease` drives nothing any more -- a release time is
+    // `limiterThresh` now OFFSETS the static output gain
+    // (outputGainForThreshold). Same range, same direction it always ran; its
+    // default is the reference the gain is written at. A stored value no longer
+    // means the same absolute level it did when the master stage still carried a
+    // compressor's makeup -- that makeup is gone. `limiterRelease` drives nothing any more -- a release time is
     // exactly what the master stage no longer has, and having one was the
     // paraphony (dsp/Limiter.h). It is KEPT rather than removed because the
     // APVTS stores a DAW session by parameter index: dropping it would re-point
@@ -3679,8 +3666,7 @@ bool T5ynthProcessor::snapshotExternalCapture (juce::AudioBuffer<float>& dest,
 // declaration for where they are advanced and why they need seeding.
 void T5ynthProcessor::seedOutputStageGains() noexcept
 {
-    const float g = outputGainForThreshold(paramCache.limiterThresh->load(),
-                                           static_cast<int>(paramCache.voiceCount->load()));
+    const float g = outputGainForThreshold(paramCache.limiterThresh->load());
     outputGainPrev_     = g;
     oneShotPreGainPrev_ = kOneShotReferenceGain / juce::jmax(1.0e-6f, g);
     masterGainPrev_     = juce::Decibels::decibelsToGain(paramCache.masterVol->load());
@@ -4083,12 +4069,11 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         audioIdle.store(true, std::memory_order_relaxed);
         // The master stage below this return is never reached while idle, so the
         // three gain ramps have to be re-seeded HERE or they start the next block
-        // from a value that can be ten seconds old. Two of them follow the
-        // voice-count SWITCH, which is a front-panel button: press "16" on a
-        // silent instrument, play a chord, and a stale start value would ramp the
-        // onset from the Mono gain -- 15.7 dB too hot for the length of one
-        // block. Idle is exactly when a switch gets pressed, so this is the
-        // normal case and not an edge one. The third, masterGainPrev_, follows
+        // from a value that can be ten seconds old. Two of them follow
+        // `limiterThresh`, which a preset load can move while the instrument is
+        // silent: a stale start value would ramp the next onset from the old
+        // gain for the length of one block. Idle is exactly when a preset gets
+        // loaded, so this is the normal case and not an edge one. The third, masterGainPrev_, follows
         // master_vol instead -- a fader move landing while idle must not ramp
         // from a value just as stale. The reverb crossfade's dry gain (also
         // below this return) is the same story, so seedReverbCrossfade()
@@ -4177,7 +4162,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     //            (gain-neutral, reso +12dB)
     // Sum:       N voices * 1/N^0.1 (VoiceManager::updateGainTarget)
     // Post-Sum:  Delay+Reverb up to ~2.7x → Master 0dB max → output gain
-    //            (x3.24 Mono .. x0.53 at 16, per the voice-count SWITCH)
+    //            (x1.6 at every voice count, outputGainForThreshold)
     //            → ceiling, STANDALONE only
     //
     // Three numbers here were stale and are corrected rather than carried:
@@ -4190,11 +4175,11 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     //
     // WHERE THE HEADROOM WENT, measured (tools/measure_engine_levels.cpp). The
     // engines were 13.7 dB apart at a single note and none of them was placed
-    // against full scale; EngineCalib now matches them, and the output gain is a
-    // function of the voice-count SWITCH, set so that a chord filling the
-    // selected polyphony lands on the ceiling's knee. Everything a given switch
-    // position can play stays below 1.0, and Mono is 15.7 dB louder than 16
-    // rather than paying for headroom it never uses.
+    // against full scale; EngineCalib now matches them, and the output gain is
+    // one number for every voice count, set so that the bank's median sits level
+    // with the loudest softsynths measured beside it. Chords reach the
+    // ceiling's knee well before they fill the polyphony; outputGainForThreshold's
+    // comment has the numbers per engine.
     //
     // What still does NOT fit is the mod matrix on top of it: with all four mod
     // envelopes pointed at the DCA at Amt 1.0 the VCA alone is x16, and on
@@ -6130,23 +6115,17 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     oneShotBuffer.clear();
     renderSequencerOneShots(oneShotBuffer);
 
-    // The output gain at the end of this function is a function of the VOICE
-    // COUNT switch, and the one-shots are not voices: they never pass through
-    // VoiceManager, the switch does not bound how many of them can sound
-    // (MAX_STEPS * ONE_SHOT_SLOTS do, regardless), and EngineCalib and the
-    // 1/N^0.1 law never touch them. Left alone they would ride the switch
-    // anyway, moving by 15.7 dB between Mono and 16 for a control that says
-    // nothing about them. Pre-divided here, they come out of the master stage at
-    // kOneShotReferenceGain whatever the switch says.
+    // The one-shots are not voices: they never pass through VoiceManager, and
+    // EngineCalib and the 1/N^0.1 law never touch them. Pre-divided here by the
+    // output gain applied at the end of this function, they come out of the
+    // master stage at kOneShotReferenceGain whatever `limiterThresh` says.
     //
     // Read ONCE, here, and reused at the output gain stage below instead of
-    // read again there: limiterThresh and voiceCount are both message-thread
-    // params (a Snap recall writes voiceCount at any time), so two reads this
-    // far apart in the same block can straddle a write and see different
-    // switch positions -- the one-shots pre-divided by one gain, the mix
-    // multiplied back by another, 15.7 dB apart at the extremes.
-    const float outputGainNow = outputGainForThreshold(paramCache.limiterThresh->load(),
-                                                        static_cast<int>(paramCache.voiceCount->load()));
+    // read again there: limiterThresh is a message-thread param (a preset load
+    // or host automation writes it at any time), so two reads this far apart in
+    // the same block can straddle a write and see different values -- the
+    // one-shots pre-divided by one gain, the mix multiplied back by another.
+    const float outputGainNow = outputGainForThreshold(paramCache.limiterThresh->load());
     const float oneShotPreGain = kOneShotReferenceGain / juce::jmax(1.0e-6f, outputGainNow);
 
     // When master volume and the output gain move in the same block, both --
@@ -6686,9 +6665,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // 1 ms for the same reason.
     {
         // outputGainNow was read once, above at the one-shot pre-gain site (see
-        // its comment). Both of its inputs are SWITCH positions, not anything
-        // the sounding voices do, so this gain cannot couple one held note to
-        // another. A move of either control ramps as a raised cosine
+        // its comment). Its one input is a control, not anything the sounding
+        // voices do, so this gain cannot couple one held note to another. A move
+        // of the control ramps as a raised cosine
         // (applyGainRampShaped), whose zero slope at both ends leaves no corner
         // for a large step to click on: across the block, or over master
         // volume's kMasterRampMs when master_vol moves in the same block (see
@@ -6727,8 +6706,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 // has the plugin bypassed, so processBlock -- the only other place the three
 // output-stage gains are advanced -- never runs. Left alone, the first block
 // after un-bypassing would ramp from whatever those gains were when the
-// bypass began, however long ago and however far master_vol or the
-// voice-count switch have moved since. Same fix as the deep-idle re-seed, for
+// bypass began, however long ago and however far master_vol or
+// limiterThresh have moved since. Same fix as the deep-idle re-seed, for
 // the same reason. The reverb crossfade is left where it was: a held note
 // resumes through it (see seedReverbCrossfade()).
 void T5ynthProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)

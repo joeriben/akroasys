@@ -49,8 +49,9 @@ unbroken.
 - **The LRO is at the level of the engines it is A/B'd against.** It was 12.4 dB
   quieter, so every comparison was decided by loudness before it was decided by
   sound.
-- **The output gain follows the voice-count switch** instead of stepping
-  mid-note; Mono to 16 voices is 15.7 dB.
+- **Louder, and one level at every voice count.** The output gain no longer
+  depends on the voice-count switch, so a single note is as loud at 16 voices
+  as at Mono. Dense chords reach the standalone's output ceiling sooner.
 - **MPE:** the zone layout is `juce::MPEZoneLayout`'s now, and an NRPN can no
   longer declare a zone or have its data byte read as a bend range. A parity
   suite freezes what the hand-written path could do.

@@ -249,20 +249,20 @@ int main (int argc, char** argv)
     setParam (proc, PID::limiterThresh, -3.0f);      // the shipped default
     pump (150);
 
-    // What the master stage multiplies by AT THE PARKED SWITCH POSITION (64),
-    // so table A below can be read back to the voice chain. Restated here rather
+    // What the master stage multiplies by (one gain at every voice-count
+    // position), so table A below can be read back to the voice chain. Restated here rather
     // than taken from the processor, because the tool must not depend on a
     // private helper -- and must NOT be kept in step silently either: if this
-    // number and PluginProcessor's table disagree, table A is wrong and the
+    // number and PluginProcessor's kOutputGain disagree, table A is wrong and the
     // reader has to be able to see which one moved. Table B needs no such
     // number; it reads the buffer as the host receives it.
-    const double outGain = 0.533;   // kOutputGainForVoiceSwitch[VoiceCount::V64]
+    const double outGain = 1.6;   // kOutputGain, the same at every switch position
 
     std::printf ("engine levels, neutral patch (filter OFF, one amp envelope at"
                  " sustain, nothing else)\n");
     std::printf ("sample rate %.0f Hz, block %d, velocity 100, %d runs per cell"
                  " (median)\n", gSampleRate, gBlockSize, kRuns);
-    std::printf ("output gain at the parked switch position x%.4f\n\n", outGain);
+    std::printf ("output gain x%.4f\n\n", outGain);
 
     const Engine engines[] = {
         { "Sampler",        EngineMode::Sampler,   false },
@@ -276,7 +276,7 @@ int main (int argc, char** argv)
     // ── Table 1: the voice chain, i.e. what the calibration acts ON ────────
     std::printf ("A. VOICE CHAIN -- peak before the output gain, voice switch"
                  " parked at 64 so that\n   every chord fits under it. This is"
-                 " what the gain table is derived FROM.\n\n");
+                 " what the output gain's knee figures are read from.\n\n");
     std::printf ("%-16s", "");
     for (int c : chords) std::printf ("  %5d", c);
     std::printf ("   notes held\n");
@@ -306,11 +306,13 @@ int main (int argc, char** argv)
 
     // ── Table 2: the OUTPUT, with the switch set where the chord says ──────
     //
-    // This is the one that decides whether the design holds: each cell sets the
-    // voice-count switch to that position AND plays a chord that fills it, then
-    // reads the buffer the host receives. Two things have to be true of it --
-    // no cell above the ceiling's 0.9 knee up to 16, and the single-note column
-    // getting LOUDER as the switch narrows.
+    // Each cell sets the voice-count switch to that position AND plays a chord
+    // that fills it, then reads the buffer the host receives. With one output
+    // gain at every position this is table A times that gain, and what it
+    // checks is exactly that: B / A has to be the same number in every cell, or
+    // the switch is moving the level again. It also shows which chords pass the
+    // ceiling's 0.9 knee -- from four notes on Wavetable and Sampler at x1.6,
+    // the cost PluginProcessor.cpp's outputGainForThreshold states.
     std::printf ("\nB. OUTPUT -- voice switch AT that position, chord filling it."
                  " The knee is 0.90.\n\n");
     std::printf ("%-16s", "");
@@ -332,8 +334,9 @@ int main (int argc, char** argv)
     }
     setParam (proc, PID::voiceCount, 6.0f);
 
-    std::printf ("\nA is the measurement the gain table in PluginProcessor.cpp is"
-                 " built from; B is that\ntable in force. The LRO caps at 16 voices"
+    std::printf ("\nA is the voice chain the output gain in PluginProcessor.cpp acts"
+                 " on; B is the output\nat that gain, the same at every switch"
+                 " position. The LRO caps at 16 voices"
                  " (CsoundEngine::kMaxVoices), so its 64 column\nis 16 voices"
                  " playing a denser cluster, not 64.\n");
     return 0;
