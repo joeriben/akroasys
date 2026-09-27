@@ -15,6 +15,12 @@
 // A plain regenerate (GENERATE) calls only the middle line, which is why the
 // invariant guard passes while a recall can still click.
 //
+// Not reproduced: the Snap fade (T5ynthProcessor::snapFadeOut/snapFadeIn) that
+// activateSnapshot now puts around the recall's parameter writes and the first
+// applyMarkers. The sample swap measured here comes after the fade-in, where it
+// still has to crossfade on its own, so this remains its test; it says nothing
+// about the fade itself.
+//
 // Metric is audition_sampler_follow's: the largest sample-to-sample step in the
 // crossfade window against the material's own natural step. WAVs are written so
 // the seam can be heard rather than only read.

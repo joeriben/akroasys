@@ -38,6 +38,30 @@ constexpr int kComputerKeyboardOctaveUpKey   = 0x07; // physical X
 constexpr int kComputerKeyboardBaseMidiNote = 60;
 constexpr int kComputerKeyboardMinOctaveOffset = -5;
 constexpr int kComputerKeyboardMaxOctaveOffset = 4;
+
+// Snap digit i (0..3) held at its physical position, top row or keypad (macOS
+// kVK_ANSI_1..4, kVK_ANSI_Keypad1..4). Only macOS has a position source; false
+// elsewhere, and false for a layout that types the digit from another key.
+bool snapKeyPhysicallyDown (int i)
+{
+   #if JUCE_MAC
+    static constexpr int kTopRow[4] = { 0x12, 0x13, 0x14, 0x15 };
+    static constexpr int kKeypad[4] = { 0x53, 0x54, 0x55, 0x56 };
+    return t5::physicalKeyDown (kTopRow[i]) || t5::physicalKeyDown (kKeypad[i]);
+   #else
+    juce::ignoreUnused (i);
+    return false;
+   #endif
+}
+
+// The same digit as JUCE's key set holds it: by character, top row or numpad.
+bool snapKeyCharDown (int i)
+{
+    const int numpad[4] = { juce::KeyPress::numberPad1, juce::KeyPress::numberPad2,
+                            juce::KeyPress::numberPad3, juce::KeyPress::numberPad4 };
+    return juce::KeyPress::isKeyCurrentlyDown ('1' + i)
+        || juce::KeyPress::isKeyCurrentlyDown (numpad[i]);
+}
 constexpr const char* kUiSettingsFileName = "ui_settings.json";
 constexpr const char* kOscEasyModeKey = "oscEasyMode";
 constexpr const char* kSa3TierKey = "sa3Tier";
@@ -2903,8 +2927,14 @@ bool MainPanel::keyPressed(const juce::KeyPress& key)
                 captureSnapshotPress(slot);   // neural audio, or the LCO orchestra
                 storeSnapshotFromPress(slot);
             }
-            else
+            else if (! snapKeyDown_[slot - 1])
             {
+                // Edge-gated like Space below: OS auto-repeat must not recall the
+                // slot again and again, now that every recall is a fade.
+                snapKeyDown_[slot - 1] = true;
+                // Which source can see this key, decided while it is down (the
+                // key monitor has already recorded this very key-down).
+                snapKeyPhysical_[slot - 1] = snapKeyPhysicallyDown(slot - 1);
                 activateSnapshot(slot);
             }
             return true;
@@ -3434,6 +3464,38 @@ void MainPanel::restoreMainSnapshot(const MainSnapshot& snapshot)
                                                    : legacySourceFallback(id, pitchRaised));
     }
 
+    auto applyMarkers = [&]()
+    {
+        const float loopStart = juce::jlimit(0.0f, 0.99f, snapshot.loopStart);
+        float loopEnd = juce::jlimit(0.01f, 1.0f, snapshot.loopEnd);
+        if (loopEnd < loopStart + 0.01f)
+            loopEnd = juce::jmin(1.0f, loopStart + 0.01f);
+
+        auto& sampler = processorRef.getSampler();
+        sampler.setPointsLocked(true);
+        // One call, not the open-it-first dance: this lambda runs a SECOND time
+        // after loadGeneratedAudio has published the slot's sample, and the old
+        // sequence's intermediate setLoopEnd(1.0f) marked the master for a
+        // re-prepare even though the pair ends where it already was. The
+        // re-prepare republished the same audio ~10 ms later, and a held note
+        // had to follow a publication that carried no change at all.
+        sampler.setLoopRegion(loopStart, loopEnd);
+        sampler.setStartPos(juce::jlimit(0.0f, 1.0f, snapshot.startPos));
+        sampler.setWtExtractStart(juce::jlimit(0.0f, 1.0f, snapshot.wtExtractStart));
+        sampler.setWtExtractEnd(juce::jlimit(0.0f, 1.0f, snapshot.wtExtractEnd));
+    };
+
+    {
+        const juce::ScopedLock sl(processorRef.getCallbackLock());
+        applyMarkers();
+    }
+    // The parameters and the markers are everything a sounding voice reads,
+    // and they were written in the Snap fade's silence (activateSnapshot). The
+    // output comes back now: what follows is the panels, the stored generation
+    // state and the sample, which is conditioned for a while and arrives
+    // through the engines' own crossfade.
+    processorRef.snapFadeIn();
+
     promptPanel.loadPresetData(snapshot.promptA, snapshot.promptB,
                                snapshot.seed, snapshot.randomSeed,
                                snapshot.device, snapshot.model,
@@ -3476,31 +3538,6 @@ void MainPanel::restoreMainSnapshot(const MainSnapshot& snapshot)
         dimensionExplorer.clear();
     }
 
-    auto applyMarkers = [&]()
-    {
-        const float loopStart = juce::jlimit(0.0f, 0.99f, snapshot.loopStart);
-        float loopEnd = juce::jlimit(0.01f, 1.0f, snapshot.loopEnd);
-        if (loopEnd < loopStart + 0.01f)
-            loopEnd = juce::jmin(1.0f, loopStart + 0.01f);
-
-        auto& sampler = processorRef.getSampler();
-        sampler.setPointsLocked(true);
-        // One call, not the open-it-first dance: this lambda runs a SECOND time
-        // after loadGeneratedAudio has published the slot's sample, and the old
-        // sequence's intermediate setLoopEnd(1.0f) marked the master for a
-        // re-prepare even though the pair ends where it already was. The
-        // re-prepare republished the same audio ~10 ms later, and a held note
-        // had to follow a publication that carried no change at all.
-        sampler.setLoopRegion(loopStart, loopEnd);
-        sampler.setStartPos(juce::jlimit(0.0f, 1.0f, snapshot.startPos));
-        sampler.setWtExtractStart(juce::jlimit(0.0f, 1.0f, snapshot.wtExtractStart));
-        sampler.setWtExtractEnd(juce::jlimit(0.0f, 1.0f, snapshot.wtExtractEnd));
-    };
-
-    {
-        const juce::ScopedLock sl(processorRef.getCallbackLock());
-        applyMarkers();
-    }
     processorRef.loadGeneratedAudio(snapshot.audio, snapshot.sampleRate);
     {
         const juce::ScopedLock sl(processorRef.getCallbackLock());
@@ -3598,6 +3635,17 @@ void MainPanel::restoreLcoSnapshot(const LcoSnapshot& snapshot)
             restoreParameterFromState(apvts, snapshot.parameters, id);
     }
 
+    // Force Csound -- a slot can be recalled in the LCO before anything was ever
+    // authored this session -- while the Snap fade still holds the sound, then
+    // open it: everything above is what the recall itself writes into the sound.
+    // What follows is the panel and the orchestra hand-off, and requestCsoundOrchestra
+    // waits on csoundLifecycleMutex_, which a compile in flight holds for over a
+    // second; a held note must not sit in the silence for that. The recalled
+    // orchestra itself arrives through the engine's own crossfaded swap, as a
+    // bake's does.
+    processorRef.forceCsoundEngineMode();
+    processorRef.snapFadeIn();
+
     // The disclosure travels with the code, so the card explains the orchestra
     // that is actually sounding — and a Save right after a recall round-trips the
     // recalled sound rather than the last bake's (exportJsonPreset reads these).
@@ -3620,11 +3668,9 @@ void MainPanel::restoreLcoSnapshot(const LcoSnapshot& snapshot)
     // replaced (docs/DCO_REPROMPT_CONCEPT.md).
     promptPanel.adoptRecalledOrchestra(snapshot.prompt, snapshot.reading);
 
-    // Same hand-off as a fresh bake (PromptPanel::triggerDcoBake): force Csound —
-    // a slot can be recalled in the LCO before anything was ever authored this
-    // session — then queue the orchestra. requestCsoundOrchestra() compiles on the
-    // processor's own background thread and crossfades the swap in.
-    processorRef.forceCsoundEngineMode();
+    // Same hand-off as a fresh bake (PromptPanel::triggerDcoBake): Csound was
+    // forced above, then queue the orchestra. requestCsoundOrchestra() compiles on
+    // the processor's own background thread and crossfades the swap in.
     processorRef.requestCsoundOrchestra(snapshot.orchestra);
     promptPanel.beginCsoundCompileWatch();
 }
@@ -3846,7 +3892,10 @@ void MainPanel::activateSnapshot(int slot)
             syncSnapshotUi();
             return;
         }
+        if (hasSound)
+            processorRef.snapFadeOut();
         restoreLcoSnapshot(lcoSnap);
+        processorRef.snapFadeIn();   // no-op unless restoreLcoSnapshot returned before it faded in
         activeSnapshotIndex = slot;
         syncSnapshotUi();
         statusBar.setStatusText(hasSound
@@ -3862,7 +3911,9 @@ void MainPanel::activateSnapshot(int slot)
         return;
     }
 
+    processorRef.snapFadeOut();
     restoreMainSnapshot(mainSnapshots[static_cast<size_t>(slot - 1)]);
+    processorRef.snapFadeIn();   // no-op: restoreMainSnapshot already faded in
     activeSnapshotIndex = slot;
     syncSnapshotUi();
     statusBar.setStatusText("Snapshot " + juce::String(slot) + " recalled");
@@ -4137,6 +4188,17 @@ void MainPanel::pollComputerKeyboard()
     // read — worst case is a missed rest while another app holds space.
     if (! juce::KeyPress::isKeyCurrentlyDown(juce::KeyPress::spaceKey))
         spaceRestKeyDown_ = false;
+    // The Snap keys re-arm once the digit is up, top row or numpad (keyPressed
+    // takes both). By position where the key-down was seen there
+    // (t5::physicalKeyDown, macOS): JUCE's key set is emptied by a Shift, Option,
+    // Control or Caps Lock change, which re-armed a digit still held, and keeps a
+    // key whose key-up went to another window, which left that slot's key dead.
+    // Otherwise by character, as JUCE's key set holds it. Left open: the position
+    // map is emptied on a Command edge, so holding a digit through a Command tap
+    // still recalls once more.
+    for (int i = 0; i < 4; ++i)
+        if (! (snapKeyPhysical_[i] ? snapKeyPhysicallyDown(i) : snapKeyCharDown(i)))
+            snapKeyDown_[i] = false;
 
     if (!computerKeyboardEnabled || isTextEditingFocus()
         || settingsVisible || manualVisible || presetManagerVisible || seqLibraryVisible

@@ -1331,6 +1331,28 @@ private:
     // the master stage is about to multiply by (PluginProcessor.cpp, addOneShots).
     float oneShotPreGainPrev_ = 1.0f;
 
+    // The Snap switch fade (snapFadeOut/snapFadeIn). The state is set by the
+    // message thread and advanced by the audio thread. The position (1 = open,
+    // 0 = silent; the gain is a raised cosine of it) belongs to the audio
+    // thread, and to prepareToPlay while no block runs.
+    enum : int { kSnapFadeOpen = 0, kSnapFadeClosing, kSnapFadeClosed, kSnapFadeOpening };
+    std::atomic<int> snapFadeState_ { kSnapFadeOpen };
+    float snapFadePos_ = 1.0f;
+    // How far apart the host's blocks arrive, for snapFadeOut's wait: the longest
+    // gap between two block starts, or the longest block, relaxing over seconds.
+    // Not the last block's length -- a host may run a 2048-frame device period as
+    // eight 256-frame blocks back to back.
+    // Until the gaps between blocks have been measured. Long enough that the wait
+    // (25 + 3 x 60 ms) covers an 8192-frame period at 44.1 kHz even when the host
+    // runs it as short blocks and reports only those as its maximum.
+    static constexpr float  kSnapHostPeriodSeedMs = 60.0f;
+    static constexpr double kSnapHostPauseMs      = 500.0;    // a longer gap is a pause, not a period
+    std::atomic<float> hostPeriodMs_ { kSnapHostPeriodSeedMs };
+    juce::int64 prevBlockStartTicks_ = 0;   // audio thread
+    void noteHostBlock (juce::int64 startTicks, int numSamples) noexcept;
+    void applySnapFade (juce::AudioBuffer<float>& buffer, int numSamples) noexcept;
+    void settleSnapFadeWhileSilent() noexcept;
+
     // Master volume, one block behind, same reasoning as outputGainPrev_ above:
     // a moved master_vol RAMPS instead of stepping at the boundary -- but over
     // kMasterRampMs (1 ms, the declick minimum), not the whole block; see
@@ -2260,6 +2282,14 @@ public:
     /** Fired on the message thread when an XL snapshot button (CC 45-48) is pressed.
      *  Argument = slot 1-4. The editor wires this to MainPanel::activateSnapshot. */
     std::function<void(int slot)> onSnapshotRequested;
+
+    /** The Snap switch fade, for MainPanel::activateSnapshot, on the message
+     *  thread. snapFadeOut() fades the output to silence and returns once it is
+     *  silent (or after a short wait when no audio block runs); the snap is
+     *  written in that silence; snapFadeIn() fades the output back in. A
+     *  snapFadeIn() with no fade pending does nothing. */
+    void snapFadeOut();
+    void snapFadeIn();
 
     /** Fired on the message thread when the XL cache button (CC 49) is pressed.
      *  The editor wires this to toggle the inference cache between 4 and Off. */

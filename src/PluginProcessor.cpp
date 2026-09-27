@@ -2840,6 +2840,17 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // re-seed and the bypass override use -- see seedOutputStageGains' own
     // comment.
     seedOutputStageGains();
+    settleSnapFadeWhileSilent();
+    // The host period starts over with the new device settings: the restart's own
+    // gap is not a period, and the old one may no longer apply. Seeded with the
+    // host's maximum block, at least kSnapHostPeriodSeedMs: too long a seed costs
+    // waiting time only when no block runs at all (snapFadeOut returns as soon as
+    // the fade has closed), too short a one lets a recall in the first period go
+    // unfaded.
+    prevBlockStartTicks_ = 0;
+    hostPeriodMs_.store ((float) juce::jlimit ((double) kSnapHostPeriodSeedMs, kSnapHostPauseMs,
+                                               1000.0 * samplesPerBlock / juce::jmax (1.0, sampleRate)),
+                         std::memory_order_relaxed);
     // Pre-size the internal note-event buffer so the audio thread never grows it
     // (a push_back reallocation would be a heap alloc on the audio thread). Worst
     // case is pathological — max BPM (300) + smallest division + all 5 strands +
@@ -3717,6 +3728,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // Taken before the lock, the earliest point of this callback the processor can
     // see; the filter-change pre-roll budget below counts from here.
     const juce::int64 blockStartTicks = juce::Time::getHighResolutionTicks();
+    noteHostBlock (blockStartTicks, buffer.getNumSamples());
 
     // Hold the callback lock ourselves, for the whole block.
     //
@@ -4081,6 +4093,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // mix, with every envelope at 0.
         seedOutputStageGains();
         seedReverbCrossfade();
+        // Silent here, so a pending Snap fade has nothing to fade: it completes.
+        settleSnapFadeWhileSilent();
         // The arp edges below this return are never evaluated while idle, so the
         // edge state has to track the parameter here — otherwise switching the arp
         // off during idle leaves arpWasEnabled true, and the first block after the
@@ -6173,6 +6187,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         }
     };
 
+    // The Snap switch fade, on the voice sum and nothing after it: the amp
+    // chain, the delay and the reverb take the faded signal, so a step the
+    // recall writes during the silence never enters their memory to come back
+    // as an echo, and what they already hold keeps sounding across the switch.
+    applySnapFade(buffer, numSamples);
+
     // ── The amplifier chain: distortion → chorus → phaser → tremolo ────────
     // Ahead of delay and reverb, which is the order an instrument goes through an
     // amp and its pedals: the dirt is on the note, the modulation is on the dirty
@@ -6712,8 +6732,137 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 // resumes through it (see seedReverbCrossfade()).
 void T5ynthProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    noteHostBlock (juce::Time::getHighResolutionTicks(), buffer.getNumSamples());
     seedOutputStageGains();
+    settleSnapFadeWhileSilent();
     AudioProcessor::processBlockBypassed(buffer, midiMessages);
+}
+
+// ── Snap switch fade ─────────────────────────────────────────────────────────
+// BJ, 2026-09-27, on a Snap switch that crackled on every recall: *„WAS BITTE
+// IST KOMPLIZIERT DARAN HIER EIN KURZES XFADE ZU VERWENDEN"*. A recall changes
+// most of the patch at once -- parameters, markers, sample -- so the recall is
+// written in silence: the voice sum fades out over kSnapFadeMs, the message
+// thread writes the snap, and the voice sum fades back in over the same time.
+// Delay and reverb sit after the fade and keep sounding across it. The cost: a
+// dip of the dry sound of 2 x kSnapFadeMs plus the time the parameter writes
+// take (a few ms), and the recall reaching the sound kSnapFadeMs plus up to one
+// block later. A new sample the snap brings arrives after the fade-in and is
+// crossfaded by the engines' own Regen XFade morph, as any regeneration is.
+//
+// Not in an offline render (isNonRealtime): the render thread would keep
+// rendering the silence at many times real time while the message thread
+// writes the snap, and the bounce would carry a gap of that length.
+static constexpr double kSnapFadeMs = 5.0;
+
+void T5ynthProcessor::snapFadeOut()
+{
+    if (isNonRealtime())
+        return;
+    snapFadeState_.store (kSnapFadeClosing, std::memory_order_release);
+    // Long enough for the fade plus three of the host's periods, however long
+    // they are, so a host calling every 85 ms (4096 frames) is waited for. A
+    // host that runs no block at all is not sounding either, and after this
+    // the snap is written anyway.
+    const double waitMs = kSnapFadeMs + 20.0 + 3.0 * (double) hostPeriodMs_.load (std::memory_order_relaxed);
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    while (snapFadeState_.load (std::memory_order_acquire) == kSnapFadeClosing
+           && juce::Time::getMillisecondCounterHiRes() - t0 < waitMs)
+        juce::Thread::sleep (1);
+}
+
+void T5ynthProcessor::snapFadeIn()
+{
+    // One read-modify-write loop, not two separate exchanges: the audio thread
+    // can move Closing to Closed between two of them, and both would miss.
+    int s = snapFadeState_.load (std::memory_order_acquire);
+    while (s == kSnapFadeClosing || s == kSnapFadeClosed)
+        if (snapFadeState_.compare_exchange_weak (s, kSnapFadeOpening, std::memory_order_acq_rel))
+            return;
+}
+
+void T5ynthProcessor::noteHostBlock (juce::int64 startTicks, int numSamples) noexcept
+{
+    const double blockMs = 1000.0 * numSamples / juce::jmax (1.0, getSampleRate());
+    double periodMs = (double) hostPeriodMs_.load (std::memory_order_relaxed);
+    if (prevBlockStartTicks_ != 0)
+    {
+        const double gapMs = 1000.0 * (double) (startTicks - prevBlockStartTicks_)
+                           / (double) juce::Time::getHighResolutionTicksPerSecond();
+        // A gap of kSnapHostPauseMs is the host pausing, not its period: keep
+        // what was measured before it.
+        if (gapMs >= 0.0 && gapMs < kSnapHostPauseMs)
+            periodMs = juce::jmax (gapMs, blockMs, periodMs * juce::jmax (0.0, 1.0 - gapMs / 2000.0));
+    }
+    else
+    {
+        periodMs = juce::jmax (periodMs, blockMs);
+    }
+    prevBlockStartTicks_ = startTicks;
+    // Capped at the pause length, so no block size -- or a host reporting a
+    // sample rate of 0 -- can stretch snapFadeOut's wait past 25 ms + 3 x that.
+    hostPeriodMs_.store ((float) juce::jmin (periodMs, kSnapHostPauseMs), std::memory_order_relaxed);
+}
+
+void T5ynthProcessor::applySnapFade (juce::AudioBuffer<float>& buffer, int numSamples) noexcept
+{
+    if (numSamples <= 0)
+        return;
+
+    const int state = snapFadeState_.load (std::memory_order_acquire);
+    const bool closing = (state == kSnapFadeClosing || state == kSnapFadeClosed);
+    const float target = closing ? 0.0f : 1.0f;
+
+    if (! juce::exactlyEqual (snapFadePos_, target))
+    {
+        const float step = (float) (1000.0 / (kSnapFadeMs * getSampleRate()));
+        const bool write = ! buffer.hasBeenCleared();
+        const int numCh = buffer.getNumChannels();
+        auto* const* ch = write ? buffer.getArrayOfWritePointers() : nullptr;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            snapFadePos_ = closing ? juce::jmax (0.0f, snapFadePos_ - step)
+                                   : juce::jmin (1.0f, snapFadePos_ + step);
+            if (write)
+            {
+                const float g = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * snapFadePos_);
+                for (int c = 0; c < numCh; ++c)
+                    ch[c][i] *= g;
+            }
+        }
+    }
+    else if (closing)
+    {
+        buffer.clear (0, numSamples);
+    }
+
+    if (state == kSnapFadeClosing && snapFadePos_ <= 0.0f)
+    {
+        int expected = kSnapFadeClosing;
+        snapFadeState_.compare_exchange_strong (expected, kSnapFadeClosed, std::memory_order_acq_rel);
+    }
+    else if (state == kSnapFadeOpening && snapFadePos_ >= 1.0f)
+    {
+        int expected = kSnapFadeOpening;
+        snapFadeState_.compare_exchange_strong (expected, kSnapFadeOpen, std::memory_order_acq_rel);
+    }
+}
+
+void T5ynthProcessor::settleSnapFadeWhileSilent() noexcept
+{
+    int expected = kSnapFadeClosing;
+    if (snapFadeState_.compare_exchange_strong (expected, kSnapFadeClosed, std::memory_order_acq_rel))
+    {
+        snapFadePos_ = 0.0f;
+        return;
+    }
+    expected = kSnapFadeOpening;
+    if (snapFadeState_.compare_exchange_strong (expected, kSnapFadeOpen, std::memory_order_acq_rel))
+    {
+        snapFadePos_ = 1.0f;
+        return;
+    }
+    snapFadePos_ = (snapFadeState_.load (std::memory_order_acquire) == kSnapFadeClosed) ? 0.0f : 1.0f;
 }
 
 T5ynthProcessor::WtTraversalMapping T5ynthProcessor::makeWtTraversalMapping(int totalSamples) const
