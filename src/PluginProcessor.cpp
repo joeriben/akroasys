@@ -6252,6 +6252,33 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             reverb.processBlock(buf);
     };
 
+    // Runs the reverb on this block's send, in place in reverbSendBuffer. Both
+    // reverbs process the whole buffer -- buf.getNumSamples() samples, not a
+    // length passed alongside it, and both channels (Freeverb sums its two
+    // inputs) -- so every sample and every channel is rewritten here first:
+    // the buffer is sized to numSamples, and on a mono bus the second channel
+    // gets the same send as the first. Anything left over would be the
+    // reverb's own output from the last block, which the algorithmic reverb
+    // feeds back into itself without bound. Allocated at samplesPerBlock in
+    // prepareToPlay, so the resize is a no-op while the host honours its
+    // declared max block (same RT-safety assumption as oneShotBuffer above).
+    // A call with no samples runs no reverb.
+    auto runReverbOnSend = [&]
+    {
+        reverbSendBuffer.setSize(2, numSamples, false, false, true);
+        for (int ch = 0; ch < reverbSendBuffer.getNumChannels(); ++ch)
+        {
+            if (ch < numChannels)
+                reverbSendBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
+            else if (numChannels > 0)
+                reverbSendBuffer.copyFrom(ch, 0, buffer, 0, 0, numSamples);
+            else
+                reverbSendBuffer.clear(ch, 0, numSamples);
+        }
+        if (numSamples > 0)
+            processReverb(reverbSendBuffer);
+    };
+
     auto crossfadeReverbInto = [&](juce::AudioBuffer<float>& dest, float mix)
     {
         // Constant-power law on the normalised wet path — identical for Algo and
@@ -6286,10 +6313,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
         addOneShots(buffer);  // one-shots skip the delay, join before the reverb send
 
-        for (int ch = 0; ch < numChannels; ++ch)
-            reverbSendBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
-
-        processReverb(reverbSendBuffer);
+        runReverbOnSend();
 
         float revMix = juce::jlimit(0.0f, 1.0f,
             paramCache.reverbMix->load() + modReverbMix);
@@ -6306,10 +6330,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         addOneShots(buffer);  // one-shots reverberate with everything else
 
-        for (int ch = 0; ch < numChannels; ++ch)
-            reverbSendBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
-
-        processReverb(reverbSendBuffer);
+        runReverbOnSend();
 
         float revMix = juce::jlimit(0.0f, 1.0f,
             paramCache.reverbMix->load() + modReverbMix);
