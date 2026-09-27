@@ -2825,6 +2825,19 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     delay.prepare(sampleRate, samplesPerBlock);
     reverb.prepare(sampleRate, samplesPerBlock);
     algoReverb.prepare(sampleRate, samplesPerBlock);
+    // Have the first block ramp the crossfade's dry gain from its own mix,
+    // with every envelope at 0: left alone, the first block of a Mix 1.0
+    // patch would ramp down from the bypass value (dry 1), the dry note at
+    // full level. Only with no voice active: one whose ENV 1 is not routed to
+    // the DCA keeps sounding through this call, and its crossfade goes on
+    // from where it was, both halves together. hasActiveVoices() also counts
+    // a voice this call silences (a held key whose ENV 1 is on the DCA, a
+    // voice in its release); after one of those the crossfade ramps from
+    // where it was, as before. The wet gain ramps from where it was, as
+    // before. Same seeding as the deep-idle return -- see
+    // seedReverbCrossfade().
+    if (! voiceManager.hasActiveVoices())
+        seedReverbCrossfade();
     // Load default IR (medium plate)
     reverb.loadImpulseResponse(BinaryData::emt_140_plate_medium_wav,
                                static_cast<size_t>(BinaryData::emt_140_plate_medium_wavSize));
@@ -2837,7 +2850,8 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // stage gains do: seeded here so the first block after a rate/size change
     // starts AT the current parameters' gain instead of ramping up to it from
     // whatever the last session left behind. Same seeding as the deep-idle
-    // re-seed uses -- see seedOutputStageGains' own comment.
+    // re-seed and the bypass override use -- see seedOutputStageGains' own
+    // comment.
     seedOutputStageGains();
     // Pre-size the internal note-event buffer so the audio thread never grows it
     // (a push_back reallocation would be a heap alloc on the audio thread). Worst
@@ -3672,6 +3686,46 @@ void T5ynthProcessor::seedOutputStageGains() noexcept
     masterGainPrev_     = juce::Decibels::decibelsToGain(paramCache.masterVol->load());
 }
 
+// The reverb-crossfade counterpart of seedOutputStageGains() above, for the
+// gap in which no voice sounds and the FX section that advances the crossfade
+// does not run -- prepareToPlay with no voice active, and the deep-idle
+// return. The first block with samples that runs the FX section then ramps
+// the dry gain from its own mix with every envelope at 0, instead of from a
+// value set before the gap (reverbDrySeedPending_, taken in
+// crossfadeReverbInto): the knob plus the drift's share and, where the block
+// renders its synthesis, the LFOs' at their knobs' depth. After such a gap
+// the only envelopes are those of a note that starts in the block; they rise
+// from 0 across it, and their share ramps in, the part they add through an
+// LFO's Amt included -- except after deep idle, for an envelope a freed
+// voice left at its level (routed inside the voice or nowhere while it
+// sounded, then to Reverb Mix or an LFO's Amt): the next note on that slot
+// resumes it from there. Only that block knows the rest: its
+// updateDriftState() configures the drift, which after prepareToPlay, or
+// after a change to its routing, may not have been yet, and prepareToPlay
+// restarts the LFOs. A host bypass does not call this. The voices,
+// envelopes, LFOs and drift stand still through it, and a held note
+// resumes with the crossfade where it was, both halves together, as it does
+// after a change the next block delivers. The wet gain is left where the last
+// block put it: the wet path carries the reverb's own state, and neither
+// reverb is reset outside prepareToPlay, so one that was switched out of
+// circuit still holds the tail it had then. Seeded to the settled wet gain,
+// re-entering would start that tail at full level from the first sample. A
+// reverb that left through Off re-enters ramping from the 0 the Off branch
+// stored, which fades the tail in, as it always has; one that the type switch
+// replaced with the other reverb (plate <-> algorithmic) re-enters from that
+// one's wet gain, trim included, which this does not change. With the reverb
+// Off, both gains take the values the Off branch stores, so a reverb switched
+// on later in the gap fades its tail in too.
+void T5ynthProcessor::seedReverbCrossfade() noexcept
+{
+    if (static_cast<int>(paramCache.reverbType->load()) <= 0)   // processBlock's reverbEnabled test
+    {
+        prevReverbDry_ = 1.0f;
+        prevReverbWet_ = 0.0f;
+    }
+    reverbDrySeedPending_ = true;
+}
+
 void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     // Taken before the lock, the earliest point of this callback the processor can
@@ -4036,8 +4090,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // block. Idle is exactly when a switch gets pressed, so this is the
         // normal case and not an edge one. The third, masterGainPrev_, follows
         // master_vol instead -- a fader move landing while idle must not ramp
-        // from a value just as stale.
+        // from a value just as stale. The reverb crossfade's dry gain (also
+        // below this return) is the same story, so seedReverbCrossfade()
+        // has the first block after the idle ramp it from that block's own
+        // mix, with every envelope at 0.
         seedOutputStageGains();
+        seedReverbCrossfade();
         // The arp edges below this return are never evaluated while idle, so the
         // edge state has to track the parameter here — otherwise switching the arp
         // off during idle leaves arpWasEnabled true, and the first block after the
@@ -5157,6 +5215,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     modDelayFb   += driftLfo.getOffsetForTarget(DriftLFO::TgtDelayFb);
     modDelayMix  += driftLfo.getOffsetForTarget(DriftLFO::TgtDelayMix);
     modReverbMix += driftLfo.getOffsetForTarget(DriftLFO::TgtReverbMix);
+    // modReverbMix with every envelope at 0, the mix the reverb crossfade's
+    // seed takes (see crossfadeReverbInto).
+    float modReverbMixNoEnv = modReverbMix;
     VoiceManager::VoiceOutput voiceOut;
 
     if (!skipSynthesis)
@@ -6035,6 +6096,11 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         if (bp.lfo3Target == LfoTarget::DelayFB)    modDelayFb += lastLfo3Val;
         if (bp.lfo3Target == LfoTarget::DelayMix)   modDelayMix += lastLfo3Val;
         if (bp.lfo3Target == LfoTarget::ReverbMix)  modReverbMix += lastLfo3Val;
+        // The same LFO shares at their knobs' depth, without what the
+        // envelopes add to it (see modReverbMixNoEnv).
+        if (bp.lfo1Target == LfoTarget::ReverbMix)  modReverbMixNoEnv += rawLastLfo1Val * baseLfo1Depth;
+        if (bp.lfo2Target == LfoTarget::ReverbMix)  modReverbMixNoEnv += rawLastLfo2Val * baseLfo2Depth;
+        if (bp.lfo3Target == LfoTarget::ReverbMix)  modReverbMixNoEnv += rawLastLfo3Val * baseLfo3Depth;
     }
     else
     {
@@ -6098,7 +6164,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // with no one-shots would otherwise leave the ramp's start value a block or
     // more behind and step the next one-shot that does sound.
     const float oneShotPreGainPrev = oneShotPreGainPrev_;
-    oneShotPreGainPrev_ = oneShotPreGain;
+    // Only on a real block -- a numSamples == 0 call (a host flushing
+    // parameters with its buses set) ramps nothing, so it must not move the
+    // ramp's start either, or the next real block would start AT this gain
+    // instead of ramping to it: a step where the ramp is supposed to be.
+    if (numSamples > 0)
+        oneShotPreGainPrev_ = oneShotPreGain;
 
     auto addOneShots = [&](juce::AudioBuffer<float>& dest)
     {
@@ -6292,14 +6363,25 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         // envelope rides Reverb Mix high in its travel.
         const float wetAmt = FxMixLaw::wetGain(mix) * reverbWetTrim;
         const float dryAmt = FxMixLaw::dryGain(mix);
+        // After a gap no voice sounded through (seedReverbCrossfade()), ramp
+        // the dry path from this block's mix with every envelope at 0: the
+        // envelopes are a starting note's, rising from 0 across the block.
+        if (reverbDrySeedPending_ && numSamples > 0)
+            prevReverbDry_ = FxMixLaw::dryGain(juce::jlimit(0.0f, 1.0f,
+                paramCache.reverbMix->load() + modReverbMixNoEnv));
         for (int ch = 0; ch < numChannels; ++ch)
         {
             dest.applyGainRamp(ch, 0, numSamples, prevReverbDry_, dryAmt);
             dest.addFromWithRamp(ch, 0, reverbSendBuffer.getReadPointer(ch), numSamples,
                                  prevReverbWet_, wetAmt);
         }
-        prevReverbDry_ = dryAmt;
-        prevReverbWet_ = wetAmt;
+        // Only on a real block -- see the same guard at the one-shot pre-gain
+        // site above for why.
+        if (numSamples > 0)
+        {
+            prevReverbDry_ = dryAmt;
+            prevReverbWet_ = wetAmt;
+        }
     };
 
     if (delayEnabled && reverbEnabled)
@@ -6323,8 +6405,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     {
         delay.processBlock(buffer);
         addOneShots(buffer);  // one-shots bypass the delay entirely
-        prevReverbDry_ = 1.0f;   // reverb bypassed: dry passes at unity, no wet
-        prevReverbWet_ = 0.0f;
+        // Real block only -- see crossfadeReverbInto's guard above.
+        if (numSamples > 0)
+        {
+            prevReverbDry_ = 1.0f;   // reverb bypassed: dry passes at unity, no wet
+            prevReverbWet_ = 0.0f;
+        }
     }
     else if (reverbEnabled)
     {
@@ -6339,9 +6425,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     else
     {
         addOneShots(buffer);  // no FX: one-shots still need to reach the output
-        prevReverbDry_ = 1.0f;   // reverb bypassed: dry passes at unity, no wet
-        prevReverbWet_ = 0.0f;
+        // Real block only -- see crossfadeReverbInto's guard above.
+        if (numSamples > 0)
+        {
+            prevReverbDry_ = 1.0f;   // reverb bypassed: dry passes at unity, no wet
+            prevReverbWet_ = 0.0f;
+        }
     }
+    // Whichever branch ran, the gap seedReverbCrossfade() marked is over.
+    if (numSamples > 0)
+        reverbDrySeedPending_ = false;
 
     // ── Update modulated values for GUI ghost indicators ────────────────────
     // LFO-driven ghosts run continuously (LFOs are free-running) so the user
@@ -6581,7 +6674,10 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         buffer.applyGain(masterGain);
     else
         applyGainRampShaped(buffer, numSamples, masterGainPrev_, masterGain, masterRampLen);
-    masterGainPrev_ = masterGain;
+    // Only on a real block -- see the same guard at the one-shot pre-gain site
+    // above for why.
+    if (numSamples > 0)
+        masterGainPrev_ = masterGain;
 
     // ── Output gain ─────────────────────────────────────────────────────────
     // The static half of what juce::dsp::Limiter used to do here. Ramped across
@@ -6601,7 +6697,10 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             buffer.applyGainRamp(0, numSamples, outputGainPrev_, outputGainNow);
         else
             applyGainRampShaped(buffer, numSamples, outputGainPrev_, outputGainNow, outputRampLen);
-        outputGainPrev_ = outputGainNow;
+        // Only on a real block -- see the same guard at the one-shot pre-gain
+        // site above for why.
+        if (numSamples > 0)
+            outputGainPrev_ = outputGainNow;
     }
 
     // ── Output ceiling: the STANDALONE only ─────────────────────────────────
@@ -6622,6 +6721,20 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         outputCeiling.processBlock(buffer);
 
     midiClockBlockStart_ += static_cast<uint64_t>(numSamples);
+}
+
+// The VST3 and AU wrappers call this instead of processBlock while the host
+// has the plugin bypassed, so processBlock -- the only other place the three
+// output-stage gains are advanced -- never runs. Left alone, the first block
+// after un-bypassing would ramp from whatever those gains were when the
+// bypass began, however long ago and however far master_vol or the
+// voice-count switch have moved since. Same fix as the deep-idle re-seed, for
+// the same reason. The reverb crossfade is left where it was: a held note
+// resumes through it (see seedReverbCrossfade()).
+void T5ynthProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+{
+    seedOutputStageGains();
+    AudioProcessor::processBlockBypassed(buffer, midiMessages);
 }
 
 T5ynthProcessor::WtTraversalMapping T5ynthProcessor::makeWtTraversalMapping(int totalSamples) const

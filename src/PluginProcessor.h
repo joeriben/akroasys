@@ -38,6 +38,10 @@ public:
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    // The host calls this instead of processBlock while the plugin is
+    // bypassed -- see its definition (directly after processBlock's) for why
+    // it still needs to run something.
+    void processBlockBypassed(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -1315,9 +1319,12 @@ private:
     // which the instrument was borrowing. The gain is now a function of the
     // voice-count switch, so the control that steps it is a front-panel button
     // and the ramp matters more, not less -- moving Mono to 16 is 15.7 dB.
-    // Seeded by seedOutputStageGains() below -- prepareToPlay and the deep-idle
-    // path call it, so the first block after a device change or after ten
-    // silent seconds ramps from the current settings.
+    // Seeded by seedOutputStageGains() below -- prepareToPlay, the deep-idle
+    // path, and processBlockBypassed all call it, so the first block after a
+    // device change, after ten silent seconds, or after a host un-bypasses the
+    // plugin ramps from the current settings. A host that bypasses without
+    // calling processBlockBypassed, or stops calling the plugin for a while,
+    // resumes ramping from the value before the gap.
     float outputGainPrev_ = 1.0f;
 
     // The same, for the sequencer's one-shot samples. They are not voices, so
@@ -1336,11 +1343,22 @@ private:
     // block starting right now would settle at. Otherwise only processBlock
     // advances them, oneShotPreGainPrev_ where the one-shots are pre-divided
     // and the other two in the master stage at its end, so anywhere that code
-    // does not run -- prepareToPlay (nothing has played yet) and the deep-idle
-    // early return (both sites are below it) -- re-seeds them here instead, or
-    // the next real block would ramp from a value left over from before the
-    // gap. Defined in PluginProcessor.cpp right before processBlock.
+    // does not run -- prepareToPlay (nothing has played yet), the deep-idle
+    // early return (both sites are below it), and processBlockBypassed (the
+    // host runs this instead of processBlock while bypassed) -- re-seeds them
+    // here instead, or the next real block would ramp from a value left over
+    // from before the gap. Defined in PluginProcessor.cpp right before
+    // processBlock.
     void seedOutputStageGains() noexcept;
+
+    // The reverb-crossfade counterpart of seedOutputStageGains() above: marks
+    // a gap no voice sounds through (prepareToPlay with no voice active, the
+    // deep-idle return), so that the first block with samples after it ramps
+    // the dry gain (prevReverbDry_, declared with the FX members below) from
+    // its own mix with every envelope at 0; the wet gain keeps ramping from
+    // the last block's value (see the definition for why). Defined in
+    // PluginProcessor.cpp right next to seedOutputStageGains().
+    void seedReverbCrossfade() noexcept;
 
     // Sequencer
     T5ynthStepSequencer stepSequencer;
@@ -1685,8 +1703,16 @@ private:
     // ~8x the old `dry = 1-mix` slope — so a modulated Mix high in its travel would
     // otherwise zipper at block rate. Audio thread only; reset to bypass (dry 1,
     // wet 0) whenever the reverb is not in circuit, so re-enabling fades in.
+    // After a gap no voice sounded through (seedReverbCrossfade():
+    // prepareToPlay, the deep-idle path), reverbDrySeedPending_ has the first
+    // block with samples ramp the dry gain from its own mix with every
+    // envelope at 0, so the next note does not ramp from a stale bypass
+    // value. The wet gain keeps ramping from the last block's. A zero-sample
+    // call leaves them untouched outside deep idle -- it produced no audio, so
+    // the gains last heard are still the ones to ramp from.
     float prevReverbDry_ = 1.0f;
     float prevReverbWet_ = 0.0f;
+    bool reverbDrySeedPending_ = false;
 
     std::atomic<int> lastSeqPreset { -1 };
     // Set by setStateInformation, consumed once by the next processBlock preset
