@@ -31,6 +31,16 @@ private:
     void timerCallback() override;
     float fs() const;
     void updateVisibility();
+    /** updateVisibility() and resized(), once, on the next message-loop pass.
+     *  For the choice boxes a parameter drives: a Snap recall writes several of
+     *  them in one go, and a relayout per box, synchronously, cost ~12 ms each
+     *  (profiled) -- all of it inside the Snap fade's silence. */
+    void relayoutSoon();
+    bool relayoutPending_ = false;
+    /** The engine the visible layout was built for, set by updateVisibility().
+     *  paint() and paintOverChildren() draw for it rather than for the combo box,
+     *  which a recall moves before relayoutSoon() has run. */
+    int laidOutEngineId_ = 0;
     void reconcileWaveformDisplayMode();   // WT fan vs sample view + region label
     void followModParamToTab(const juce::String& paramId);  // easy-mode tab follows controller
     /** The LRO card's inner rectangle — the one area both the knob grid and the

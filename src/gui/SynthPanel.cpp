@@ -82,7 +82,7 @@ void SynthPanel::initEnv(EnvSection& env, const juce::String& name, int defaultT
     for (const auto& e : EnvTarget::kEntries) envItems.add(e.label);
     env.targetBox.addItemList(envItems, 1);
     env.targetBox.setSelectedId(defaultTarget, juce::dontSendNotification);
-    env.targetBox.onChange = [this] { updateVisibility(); resized(); };
+    env.targetBox.onChange = [this] { relayoutSoon(); };
     addAndMakeVisible(env.targetBox);
 
     // Easy-view "Target" left-header band (accent@0.7 + white, like SNAP/CACHE).
@@ -207,7 +207,7 @@ void SynthPanel::initLfo(LfoSection& lfo, const juce::String& name,
     for (const auto& e : LfoTarget::kEntries) lfoItems.add(e.label);
     lfo.targetBox.addItemList(lfoItems, 1);
     lfo.targetBox.setSelectedId(1, juce::dontSendNotification);
-    lfo.targetBox.onChange = [this] { updateVisibility(); resized(); };
+    lfo.targetBox.onChange = [this] { relayoutSoon(); };
     addAndMakeVisible(lfo.targetBox);
 
     juce::StringArray lfoWaveItems;
@@ -369,7 +369,7 @@ void SynthPanel::initDrift(DriftSection& drift, const juce::String& name,
     juce::StringArray driftTargetItems;
     for (const auto& e : DriftTarget::kEntries) driftTargetItems.add(e.label);
     drift.targetBox.addItemList(driftTargetItems, 1);
-    drift.targetBox.onChange = [this] { updateVisibility(); resized(); };
+    drift.targetBox.onChange = [this] { relayoutSoon(); };
     addAndMakeVisible(drift.targetBox);
 
     juce::StringArray driftWaveItems;
@@ -514,8 +514,7 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
         samplerBtn.setToggleState(isSampler, juce::dontSendNotification);
         wavetableBtn.setToggleState(isWavetable, juce::dontSendNotification);
         freezeBtn.setToggleState(isFreeze, juce::dontSendNotification);
-        updateVisibility();
-        resized();
+        relayoutSoon();
     };
     samplerBtn.onClick = [this] { engineModeHidden.setSelectedId(1); };
     wavetableBtn.onClick = [this] { engineModeHidden.setSelectedId(2); };
@@ -640,8 +639,7 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
         oneshotBtn.setToggleState(id == 1, juce::dontSendNotification);
         loopModeBtn.setToggleState(id == 2, juce::dontSendNotification);
         pingpongBtn.setToggleState(id == 3, juce::dontSendNotification);
-        updateVisibility();
-        resized();
+        relayoutSoon();
     };
     oneshotBtn.onClick  = [this] { loopModeHidden.setSelectedId(1); };
     loopModeBtn.onClick = [this] { loopModeHidden.setSelectedId(2); };
@@ -977,12 +975,11 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
         filterTypeBox.setColour(juce::ComboBox::outlineColourId, kFilterCol);
         filterTypeBox.setJustificationType(juce::Justification::centred);
         filterTypeBox.onChange = [this] {
-            updateVisibility();
             // updateVisibility() hides lfoHeader/driftHeader; in the columnar mod
             // view they double as the LFO/DRIFT column header bars and are
-            // re-shown only by layoutModEasy. Re-run layout so they don't vanish
-            // when the filter is toggled. (Mirrors every other onChange in this file.)
-            resized();
+            // re-shown only by layoutModEasy. relayoutSoon() runs both, so they
+            // don't vanish when the filter is toggled.
+            relayoutSoon();
         };
         addAndMakeVisible(filterTypeBox);
     }
@@ -1019,13 +1016,13 @@ SynthPanel::SynthPanel(T5ynthProcessor& processor)
         filterAlgHidden.addItemList(algLabels, 1);
         filterAlgHidden.onChange = [this] {
             int id = filterAlgHidden.getSelectedId();
+            const bool filterOn = filterTypeBox.getSelectedId() > 1;   // as updateVisibility lights them
             for (int i = 0; i < kNumAlgBtns; ++i)
-                filterAlgBtns[i].setToggleState(i + 1 == id, juce::dontSendNotification);
-            updateVisibility();
-            // See filterTypeBox.onChange: re-run layout so the columnar
-            // LFO/DRIFT header bars (re-shown only in layoutModEasy) survive a
-            // filter-algorithm change in easy mode.
-            resized();
+                filterAlgBtns[i].setToggleState(filterOn && i + 1 == id, juce::dontSendNotification);
+            // See filterTypeBox.onChange: relayoutSoon() re-runs the layout so
+            // the columnar LFO/DRIFT header bars (re-shown only in layoutModEasy)
+            // survive a filter-algorithm change in easy mode.
+            relayoutSoon();
         };
         for (int i = 0; i < kNumAlgBtns; ++i)
         {
@@ -1747,6 +1744,21 @@ void SynthPanel::reconcileWaveformDisplayMode()
                                                                   : "Loop interval");
 }
 
+void SynthPanel::relayoutSoon()
+{
+    if (relayoutPending_)
+        return;
+    relayoutPending_ = true;
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<SynthPanel> (this)]
+    {
+        if (safe == nullptr)
+            return;
+        safe->relayoutPending_ = false;
+        safe->updateVisibility();
+        safe->resized();
+    });
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Visibility
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1808,6 +1820,7 @@ void SynthPanel::updateVisibility()
         juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
 
     const int engineId = engineModeHidden.getSelectedId();
+    laidOutEngineId_ = engineId;
     // LCO (id EngineMode::Lco+1 = 4) is a Wavetable bake — same control set
     // as plain Wavetable (see the engineModeHidden.onChange mapping above).
     bool isWavetable = engineId == 2 || engineId == EngineMode::Lco + 1;
@@ -2897,7 +2910,7 @@ void SynthPanel::paint(juce::Graphics& g)
         // sliders too. The widget itself is hidden in this mode
         // (reconcileWaveformDisplayMode), so there is nothing left to mask —
         // this only gives the rows and the captions a ground to sit on.
-        if (engineModeHidden.getSelectedId() == EngineMode::Csound + 1)
+        if (laidOutEngineId_ == EngineMode::Csound + 1)
         {
             const auto wf = waveformDisplay.getBounds();
             if (! wf.isEmpty())
@@ -3043,7 +3056,7 @@ void SynthPanel::paintOverChildren(juce::Graphics& g)
     // no file I/O in a paint callback, no new timer or repaint loop
     // (docs/PERFORMANCE_GUIDE.md: idle-CPU regressions are this project's #1
     // historical bug class). Non-interactive; no other new UI.
-    if (engineModeHidden.getSelectedId() == EngineMode::Csound + 1)
+    if (laidOutEngineId_ == EngineMode::Csound + 1)
     {
         auto wfBounds = waveformDisplay.getBounds();
         if (!wfBounds.isEmpty())
