@@ -279,6 +279,38 @@ private:
     std::vector<float> perVoiceLfoBuf1_;
     std::vector<float> perVoiceLfoBuf2_;
     std::vector<float> perVoiceLfoBuf3_;
+    // Everything about the filter that a coefficient cannot carry: which model
+    // runs, which of its stages or taps is the output, and at what rate. A
+    // change to any of it is a transition (see renderBlock), never an
+    // in-place switch — the model/stage it switches INTO has stale or zero
+    // state and the output steps (measured +31..+46 dB of HF over the steady
+    // state on Snap recalls that change only that setting).
+    struct FilterCfg
+    {
+        bool enabled    = false;
+        int  algorithm  = FilterAlgorithm::SVF;
+        int  slope      = 0;
+        int  type       = 0;
+        int  warpStyle  = 0;   // Warp only
+        bool svfDrive   = false; // SVF only: the Phase B tanh is in circuit
+        int  svfDriveOs = 0;   // SVF only, and only with svfDrive: FilterDriveOs index
+        int  nlOs       = 1;   // Ladder/Warp only: 1, 2 or 4
+
+        bool operator== (const FilterCfg& o) const noexcept
+        {
+            return enabled == o.enabled && algorithm == o.algorithm && slope == o.slope
+                && type == o.type && warpStyle == o.warpStyle && svfDrive == o.svfDrive
+                && svfDriveOs == o.svfDriveOs && nlOs == o.nlOs;
+        }
+        bool operator!= (const FilterCfg& o) const noexcept { return ! (*this == o); }
+    };
+
+    // Canonical form of this block's filter configuration (BlockParams' loose
+    // fields collapsed to only what a coefficient cannot carry). A private
+    // static helper rather than a free function because FilterCfg above is
+    // private — defined in SynthVoice.cpp.
+    static FilterCfg filterCfgFrom (const BlockParams& p);
+
     // Stereo filter pairs — L processes output[], R processes outputRBuf[].
     // Same coefficients (mirrored at setCutoff/setReso/etc.), separate state.
     T5ynthFilter       filter;       // linear TPT SVF (low-CPU default)
@@ -297,6 +329,155 @@ private:
     // 1 = base rate. renderBlock re-prepares them at sr×factor only when the
     // requested factor differs (rare → no per-block state reset). SVF never OS.
     int filterPreparedOsFactor_ = 1;
+
+    // ── Filter transition bank ──────────────────────────────────────────
+    // A second, independent set of the same six filters + three oversamplers,
+    // used only while a discrete filter change is in flight. beginFilterTransition
+    // (SynthVoice.cpp) configures it with the NEW configuration; renderBlock
+    // crossfades its output in over the fade (FilterXf::Fade) and
+    // completeFilterTransition promotes it to live when the fade ends. The
+    // live members above keep running their OLD configuration, untouched,
+    // for the whole transition.
+    //
+    // Two kinds, decided once in beginFilterTransition and latched in
+    // filterXfShared_ below. SHARED (same model, same rate, same drive
+    // stage) copies the live model's sounding state across and runs both
+    // models through the LIVE bank's drive stage and oversampler
+    // (processFilterPathShared) — the xf oversamplers are untouched. SEPARATE
+    // (everything else: model change, rate change, drive-stage change,
+    // filter on/off) starts the xf bank at zero and runs its own full path,
+    // including its own oversamplers. Either way the target configuration is
+    // pre-rolled once, in the transition's first sub-block, over
+    // FILTER_XF_PREROLL_MS of the recent filter input
+    // (preRollFilterTransition) so it starts settled instead of ringing up
+    // from zero — see filterHistL_/filterHistR_ below.
+    //
+    // Outside a transition (FilterXf::None) this bank sits idle; the steady
+    // state pays one configuration compare per render call, the history
+    // write below, and two zeroed 32-sample scratch buffers per sub-block.
+    T5ynthFilter     xfFilter_,  xfFilterR_;
+    LadderFilter     xfLadder_,  xfLadderR_;
+    CutoffWarpFilter xfWarp_,    xfWarpR_;
+    std::unique_ptr<juce::dsp::Oversampling<float>> xfOs2x_, xfOs4x_, xfOs8x_;
+    int xfPreparedOsFactor_ = 1;         // what xfLadder_/xfWarp_ (all four) are prepared at
+    // Scratch SVF instances for the SHARED kind's pre-roll only (see
+    // preRollFilterTransition): copy-assigned from xfFilter_/xfFilterR_ at
+    // the target's coefficients, then run over the recent history to settle
+    // the stages the copied live state does not already cover. Real members
+    // (prepared in prepare(), reset in reset()) rather than stack locals — a
+    // stack T5ynthFilter would allocate, since the juce TPT filter it wraps
+    // holds std::vectors.
+    T5ynthFilter xfPreRollSvf_, xfPreRollSvfR_;
+
+    FilterCfg liveFilterCfg_;            // what the EXISTING members run
+    FilterCfg xfFilterCfg_;              // what the transition bank runs
+    // None: only the live bank runs. Fade: both banks are summed, live
+    // fading out and xf fading in, over FILTER_XF_FADE_MS.
+    enum class FilterXf { None, Fade };
+    FilterXf filterXf_ = FilterXf::None;
+    int  filterXfLeft_ = 0;              // samples left in the current phase
+    int  filterXfFadeTotal_ = 1;
+    // Which of the two kinds above the transition in flight is — set once in
+    // beginFilterTransition, read by renderBlock's filter-path section
+    // (which bank(s) run the drive stage/oversampler) and by
+    // completeFilterTransition (whether the xf oversamplers hold this
+    // signal's history to promote, or untouched instances to leave alone).
+    // Cleared by the adopt branch and by completeFilterTransition;
+    // meaningless outside a transition.
+    bool filterXfShared_ = false;
+    // True for exactly the transition's first sub-block (the coefficient
+    // block): preRollFilterTransition has not yet run the recent history
+    // through the target configuration. Cleared by adopt, prepare, reset,
+    // and once the pre-roll has run.
+    bool filterXfPreRollPending_ = false;
+    // True right after prepare()/reset(), and for a note struck from idle
+    // (noteOn): nothing is sounding through the filter yet, so the next
+    // renderBlock takes p's configuration outright instead of transitioning
+    // into it — there is nothing to fade FROM. Also set by beginRestartFade (a
+    // fresh strike on a voice that is still sounding): the restart fade already
+    // carries the output from the old note's last sample into the new one, so
+    // the new note takes the configuration in force from its first sample
+    // instead of starting out through the old one.
+    bool filterCfgAdopt_ = true;
+
+    // Ring buffer of the last FILTER_XF_PREROLL_MS of DRY filter input — the
+    // signal any filter bank sees before Phase B/C run — written
+    // unconditionally every sub-block, filter on or off, so a "filter on"
+    // transition has something to pre-roll from too. filterHistPos_ is the
+    // next WRITE index; filterHistCount_ is the number of valid samples
+    // held (<= capacity). Sized and zeroed only in prepare() — the one place
+    // this class may allocate.
+    std::vector<float> filterHistL_, filterHistR_;
+    int filterHistPos_ = 0;
+    int filterHistCount_ = 0;
+
+    // FILTER_XF_FADE_MS: the declick minimum (1 ms), the only smoothing this
+    // project allows without the owner's order.
+    static constexpr float FILTER_XF_FADE_MS    = 1.0f;
+    // How much of the recent input (filterHistL_/R_) the target configuration
+    // is run over, once, before the fade makes it audible, so that it starts
+    // settled instead of ringing up from zero. It adds no latency: the fade
+    // still starts in the sub-block the change arrives in. The cost is one
+    // pass of the new path over this much input per transitioning voice, all
+    // of it in that sub-block. Measured in the built standalone (48 kHz, held
+    // C3, a source that holds still; the error 2 ms after the fade against
+    // the settled new sound): a model change or the filter switching on lands
+    // at -34..-68 dB at resonance 0.43 (from zero state: -6..-12 dB), and at
+    // -15..-34 dB at resonance 0.85 (from zero state: -4..-5 dB). There the
+    // filter rings longer than this history, and the error falls below
+    // -40 dB about 20 ms after the change.
+    // The pre-roll runs only while less than half of the host block's time has
+    // passed (BlockParams::filterPreRollDeadlineTicks): one that would start
+    // later does not run, one that reaches it stops after its current 32
+    // samples, and that voice's new path starts from zero state instead. A
+    // recall moving many voices at once settles the voices that fit instead of
+    // overrunning the block.
+    static constexpr float FILTER_XF_PREROLL_MS = 10.0f;
+
+    // A lightweight VIEW onto one bank's six filters, three oversamplers and
+    // prepared-OS-factor. Built on demand at each call site, never stored —
+    // the oversampler pointers change when completeFilterTransition swaps
+    // them, so a stored view could go stale. Lets configureFilterBank /
+    // processFilterPath / prepareNonlinearAt run against either bank without
+    // duplicating their body per bank.
+    struct FilterBank
+    {
+        T5ynthFilter& svf;  T5ynthFilter& svfR;
+        LadderFilter& ladder;  LadderFilter& ladderR;
+        CutoffWarpFilter& warp;  CutoffWarpFilter& warpR;
+        juce::dsp::Oversampling<float>* os2;
+        juce::dsp::Oversampling<float>* os4;
+        juce::dsp::Oversampling<float>* os8;
+        int& preparedOs;
+    };
+    FilterBank liveBank() noexcept { return { filter, filterR, filterLadder, filterLadderR, filterWarp, filterWarpR,
+                                              driveOs2x_.get(), driveOs4x_.get(), driveOs8x_.get(), filterPreparedOsFactor_ }; }
+    FilterBank xfBank() noexcept   { return { xfFilter_, xfFilterR_, xfLadder_, xfLadderR_, xfWarp_, xfWarpR_,
+                                              xfOs2x_.get(), xfOs4x_.get(), xfOs8x_.get(), xfPreparedOsFactor_ }; }
+
+    // Filter-switch transition helpers (defined in SynthVoice.cpp). Together
+    // they implement the bank handoff described above the xf members:
+    // prepareNonlinearAt/configureFilterBank are the per-bank versions of
+    // what renderBlock used to do only on the live members.
+    // processDriveStage/processFilterStages are processFilterPath's own two
+    // phases, split out so processFilterPathShared can run them once,
+    // shared, for the shared kind's single drive stage/oversampler;
+    // processFilterPath itself stays the live bank's (and the separate
+    // kind's xf bank's) entry point — early-out then both phases, unchanged
+    // in behaviour. preRollFilterTransition settles the target configuration
+    // on the recent history; beginFilterTransition arms the xf bank and the
+    // pre-roll; completeFilterTransition promotes the xf bank to live once
+    // the fade ends.
+    void prepareNonlinearAt (FilterBank b, int factor);
+    void configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p);
+    void processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain);
+    void processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo);
+    void processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain);
+    void preRollFilterTransition (bool stereo, float driveGain, long long deadlineTicks);
+    void beginFilterTransition (const FilterCfg& target);
+    void completeFilterTransition();
+    void processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain);
+
     NoiseGenerator noise;
 
     EngineMode engineMode = EngineMode::Sampler;

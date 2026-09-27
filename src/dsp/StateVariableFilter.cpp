@@ -100,6 +100,13 @@ void T5ynthFilter::reset()
     onePoleState = 0.0f;  // filter1/filter2 don't cover the 6dB/18dB one-pole stage
 }
 
+void T5ynthFilter::takeStagesFrom (const T5ynthFilter& src, bool stage1, bool stage2, bool onePole)
+{
+    if (stage1)  filter1 = src.filter1;
+    if (stage2)  filter2 = src.filter2;
+    if (onePole) onePoleState = src.onePoleState;
+}
+
 void T5ynthFilter::setMix(float mix)
 {
     mix = juce::jlimit(0.0f, 1.0f, mix);

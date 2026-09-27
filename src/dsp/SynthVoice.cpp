@@ -215,12 +215,27 @@ void SynthVoice::prepare(double sampleRate, int samplesPerBlock)
     filterR.prepare(sampleRate, samplesPerBlock);
     filterLadderR.prepare(sampleRate, samplesPerBlock);
     filterWarpR.prepare(sampleRate, samplesPerBlock);
+    // The transition bank mirrors the live one at base rate; a transition's
+    // prepareNonlinearAt re-preps its nonlinear filters to sr×factor on
+    // demand, exactly like the live bank below.
+    xfFilter_.prepare(sampleRate, samplesPerBlock);
+    xfLadder_.prepare(sampleRate, samplesPerBlock);
+    xfWarp_.prepare(sampleRate, samplesPerBlock);
+    xfFilterR_.prepare(sampleRate, samplesPerBlock);
+    xfLadderR_.prepare(sampleRate, samplesPerBlock);
+    xfWarpR_.prepare(sampleRate, samplesPerBlock);
+    // Pre-roll scratch instances for the shared-kind SVF transition (see the
+    // class declaration comment) — real members so the pre-roll can run
+    // allocation-free on the audio thread.
+    xfPreRollSvf_.prepare(sampleRate, samplesPerBlock);
+    xfPreRollSvfR_.prepare(sampleRate, samplesPerBlock);
     // The nonlinear filters were just (re-)prepared at BASE rate. Invalidate the
     // cached OS factor so the sr×factor re-prepare re-runs on the next render.
     // Without this, a host prepareToPlay (sample-rate / buffer-size change) rewinds
     // the filters to base rate while filterPreparedOsFactor_ still claims 2/4, and
     // Phase C would oversample with base-rate coefficients (cutoff an octave off).
     filterPreparedOsFactor_ = 1;
+    xfPreparedOsFactor_ = 1;
 
     // Build + init the three oversamplers around the pre-filter tanh drive.
     // 2 channels (L+R) for stereo drive — same OS instance handles both with
@@ -233,6 +248,31 @@ void SynthVoice::prepare(double sampleRate, int samplesPerBlock)
     driveOs2x_->initProcessing(static_cast<size_t>(SUB_BLOCK_SIZE));
     driveOs4x_->initProcessing(static_cast<size_t>(SUB_BLOCK_SIZE));
     driveOs8x_->initProcessing(static_cast<size_t>(SUB_BLOCK_SIZE));
+
+    // Transition bank's own oversamplers — same construction as the live
+    // ones, so completeFilterTransition's swap always exchanges like for like.
+    xfOs2x_ = std::make_unique<Os>(2, 1, Os::filterHalfBandPolyphaseIIR, true, false);
+    xfOs4x_ = std::make_unique<Os>(2, 2, Os::filterHalfBandPolyphaseIIR, true, false);
+    xfOs8x_ = std::make_unique<Os>(2, 3, Os::filterHalfBandPolyphaseIIR, true, false);
+    xfOs2x_->initProcessing(static_cast<size_t>(SUB_BLOCK_SIZE));
+    xfOs4x_->initProcessing(static_cast<size_t>(SUB_BLOCK_SIZE));
+    xfOs8x_->initProcessing(static_cast<size_t>(SUB_BLOCK_SIZE));
+
+    // Filter-input history (pre-roll source) — the ONLY place this buffer is
+    // sized. std::max(1, ...) so a division against its capacity is always
+    // safe even at a pathologically low sample rate.
+    filterHistL_.assign(static_cast<size_t>(std::max(1, juce::roundToInt(FILTER_XF_PREROLL_MS * 0.001 * sampleRate))), 0.0f);
+    filterHistR_.assign(filterHistL_.size(), 0.0f);
+    filterHistPos_ = 0;
+    filterHistCount_ = 0;
+
+    // No transition survives a (re-)prepare, and nothing has been heard
+    // through the filter yet — the next renderBlock adopts p's configuration
+    // outright (see noteOn / filterCfgAdopt_).
+    filterXf_ = FilterXf::None;
+    liveFilterCfg_ = FilterCfg{};
+    filterCfgAdopt_ = true;
+    filterXfPreRollPending_ = false;
 
     // Csound engine frequency smoother (Phase-1 spec D7): give it the sample
     // rate up front (mirroring every other per-voice component above) and
@@ -262,10 +302,31 @@ void SynthVoice::reset()
     filterR.reset();
     filterLadderR.reset();
     filterWarpR.reset();
+    // Mirrors the live filters/oversamplers below: a reset voice has no
+    // transition in flight and nothing sounding to preserve state for.
+    xfFilter_.reset();
+    xfLadder_.reset();
+    xfWarp_.reset();
+    xfFilterR_.reset();
+    xfLadderR_.reset();
+    xfWarpR_.reset();
+    xfPreRollSvf_.reset();
+    xfPreRollSvfR_.reset();
     noise.reset();
     if (driveOs2x_) driveOs2x_->reset();
     if (driveOs4x_) driveOs4x_->reset();
     if (driveOs8x_) driveOs8x_->reset();
+    if (xfOs2x_) xfOs2x_->reset();
+    if (xfOs4x_) xfOs4x_->reset();
+    if (xfOs8x_) xfOs8x_->reset();
+    // No transition survives a reset; the next renderBlock adopts p's filter
+    // configuration outright (see noteOn / filterCfgAdopt_).
+    filterXf_ = FilterXf::None;
+    liveFilterCfg_ = FilterCfg{};
+    filterCfgAdopt_ = true;
+    filterXfPreRollPending_ = false;
+    filterHistPos_ = 0;
+    filterHistCount_ = 0;
     active = false;
     noteHeld = false;
     keyGate_.setCurrentAndTargetValue(0.0f);
@@ -290,6 +351,8 @@ void SynthVoice::reset()
 
 void SynthVoice::beginRestartFade()
 {
+    // A fresh strike on a sounding voice: see filterCfgAdopt_ in SynthVoice.h.
+    filterCfgAdopt_ = true;
     restartFadeTailSample_  = lastOutputSample_;
     restartFadeTailSampleR_ = lastOutputSampleR_;
     restartFadeTotalSamples_ = std::max(1,
@@ -313,10 +376,27 @@ void SynthVoice::applyRestartFadeStereo(float& L, float& R)
 
 void SynthVoice::noteOn(int note, float velocity, bool legato)
 {
+    // Captured before active flips, so a note struck from idle (wasActive ==
+    // false) can be told apart from a steal/retrigger/legato on a voice that
+    // is already sounding — see the filterCfgAdopt_ use right below.
+    const bool wasActive = active;
     currentNote = note;
     currentVelocity = velocity;
     noteHeld = true;
     active = true;
+    // A note from idle has nothing sounding through the filter to fade from:
+    // the next renderBlock takes p's filter configuration outright rather
+    // than transitioning into it (see FilterCfg / renderBlock). A steal or
+    // retrigger of a sounding voice does the same through beginRestartFade,
+    // which VoiceManager calls first; only a legato continuation keeps
+    // whatever transition is already running or due.
+    if (! wasActive)
+    {
+        filterCfgAdopt_ = true;
+        // A note from idle has no recent input of its own to pre-roll from.
+        filterHistPos_ = 0;
+        filterHistCount_ = 0;
+    }
     applyVelocityTimedEnvelopeTimes();
 
     if (!legato)
@@ -882,6 +962,682 @@ void SynthVoice::updateSamplerPreStretchNorm(const BlockParams& p)
     samplerPreStretchNormDirty_ = false;
 }
 
+// ── Filter-switch transition (click-free, latency-free discrete filter
+// changes) ──────────────────────────────────────────────────────────────
+// See FilterCfg / the xf* members in SynthVoice.h for the design: a discrete
+// change never lands on the live filters in place. filterCfgFrom reduces a
+// block's params to the canonical, comparable configuration; the functions
+// below run that configuration on a bank (live or transition), pre-roll the
+// transition bank's target configuration over the recent input before it is
+// heard, and hand the live bank off to the transition bank once the fade
+// ends.
+
+SynthVoice::FilterCfg SynthVoice::filterCfgFrom (const BlockParams& p)
+{
+    // Canonical form: a field that cannot matter for the given model/state is
+    // pinned to its default, so two configs that would SOUND identical also
+    // COMPARE identical — otherwise an inaudible field (say, warpStyle while
+    // running SVF) could start a transition for nothing.
+    if (! p.filterEnabled)
+        return {};
+
+    FilterCfg c;
+    c.enabled   = true;
+    c.algorithm = p.filterAlgorithm;
+    c.slope     = p.filterSlope;
+    c.type      = p.filterType;
+    c.warpStyle = (c.algorithm == FilterAlgorithm::Warp) ? p.filterWarpStyle : 0;
+    // Same threshold as Phase B's own drive-active guard.
+    c.svfDrive   = (c.algorithm == FilterAlgorithm::SVF) && (p.filterDriveDb > 0.01f);
+    c.svfDriveOs = c.svfDrive ? p.filterDriveOs : 0;
+    if (c.algorithm != FilterAlgorithm::SVF)
+    {
+        // Today's wantOs mapping (the old block-level OS re-prepare guard):
+        // only 1/2/4 are real oversampler instances, so the request folds
+        // down to the nearest one at or below it.
+        const int req = juce::jmax(1, p.filterOsFactor);
+        c.nlOs = (req >= 4) ? 4 : (req >= 2) ? 2 : 1;
+    }
+    return c;
+}
+
+void SynthVoice::prepareNonlinearAt (FilterBank b, int factor)
+{
+    // Allocation-free (sr + reset + updateCoeffs) — audio-thread safe. Called
+    // only on an actual factor change (see call sites), never per block.
+    const double osr = sr * static_cast<double>(factor);
+    b.ladder.prepare(osr, maxBlockSize_);
+    b.ladderR.prepare(osr, maxBlockSize_);
+    b.warp.prepare(osr, maxBlockSize_);
+    b.warpR.prepare(osr, maxBlockSize_);
+    b.preparedOs = factor;
+}
+
+void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p)
+{
+    // Configure only the active filter model — the inactive ones sit idle, so
+    // touching them would just waste cycles on coefficient updates that no
+    // one hears. Mirror the same coefficients to the right-channel instance
+    // so L and R filter identically (same cutoff/reso/type/slope), with
+    // separate internal state.
+    switch (c.algorithm)
+    {
+        case FilterAlgorithm::SVF:
+            b.svf.setCutoff(cutoffHz);
+            b.svf.setResonance(reso);
+            b.svf.setType(c.type);
+            b.svf.setSlope(c.slope);
+            b.svf.setMix(p.filterMix);
+            b.svfR.setCutoff(cutoffHz);
+            b.svfR.setResonance(reso);
+            b.svfR.setType(c.type);
+            b.svfR.setSlope(c.slope);
+            b.svfR.setMix(p.filterMix);
+            break;
+        case FilterAlgorithm::Ladder:
+            b.ladder.setCutoff(cutoffHz);
+            b.ladder.setResonance(reso);
+            b.ladder.setType(c.type);
+            b.ladder.setSlope(c.slope);
+            b.ladder.setMix(p.filterMix);
+            // Drive feeds the ladder's own tanh stages (Phase B stays linear
+            // for Ladder), so the character comes from the filter
+            // saturating, not from a shortcut pre-filter tanh.
+            b.ladder.setInputDrive(p.filterDriveGain);
+            b.ladderR.setCutoff(cutoffHz);
+            b.ladderR.setResonance(reso);
+            b.ladderR.setType(c.type);
+            b.ladderR.setSlope(c.slope);
+            b.ladderR.setMix(p.filterMix);
+            b.ladderR.setInputDrive(p.filterDriveGain);
+            break;
+        case FilterAlgorithm::Warp:
+            b.warp.setCutoff(cutoffHz);
+            b.warp.setResonance(reso);
+            b.warp.setType(c.type);
+            b.warp.setSlope(c.slope);
+            b.warp.setMix(p.filterMix);
+            b.warp.setStyle(c.warpStyle);
+            b.warp.setInputDrive(p.filterDriveGain);
+            b.warpR.setCutoff(cutoffHz);
+            b.warpR.setResonance(reso);
+            b.warpR.setType(c.type);
+            b.warpR.setSlope(c.slope);
+            b.warpR.setMix(p.filterMix);
+            b.warpR.setStyle(c.warpStyle);
+            b.warpR.setInputDrive(p.filterDriveGain);
+            break;
+    }
+}
+
+void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain)
+{
+    // ── Phase B: drive stage ──
+    // For SVF (linear filter): apply tanh as the saturation, optionally
+    // oversampled — the SVF is LTI so the pre-filter tanh *is* the drive
+    // character.
+    // For Ladder / Warp (own nonlinearities): pre-filter tanh would flat-
+    // clip the signal and leave nothing for the filter's internal stages
+    // to shape. Instead the drive amount is forwarded to the filter via
+    // setInputDrive() in configureFilterBank, and Phase B is a no-op.
+    if (c.algorithm == FilterAlgorithm::SVF && c.svfDrive)
+    {
+        if (c.svfDriveOs == FilterDriveOs::Off)
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                L[j] = std::tanh(L[j] * driveGain);
+                R[j] = std::tanh(R[j] * driveGain);
+            }
+        }
+        else
+        {
+            auto* os = (c.svfDriveOs == FilterDriveOs::X2) ? b.os2
+                     : (c.svfDriveOs == FilterDriveOs::X4) ? b.os4
+                     :                                       b.os8;
+
+            float* const channels[2] = { L, R };
+            juce::dsp::AudioBlock<float> block(channels, 2, static_cast<size_t>(n));
+            juce::dsp::AudioBlock<const float> constBlock(block);
+            auto upBlock = os->processSamplesUp(constBlock);
+            const size_t upN = upBlock.getNumSamples();
+            for (size_t ch = 0; ch < 2; ++ch)
+            {
+                auto* upData = upBlock.getChannelPointer(ch);
+                for (size_t i = 0; i < upN; ++i)
+                    upData[i] = std::tanh(upData[i] * driveGain);
+            }
+            os->processSamplesDown(block);
+        }
+    }
+}
+
+void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo)
+{
+    // ── Phase C: per-sample filter (algorithm dispatch) ──
+    // Stereo when the source is stereo (freeze): L through left filter, R
+    // through right filter, identical coefficients (mirrored in
+    // configureFilterBank), separate state.
+    // Mono sources (sampler / wavetable) skip the right filter entirely —
+    // that's the second-most-expensive piece of the voice. We then sync the
+    // right filter state to the left so a switch into a stereo source
+    // (freeze going active) inherits a sensible state instead of starting
+    // cold. Phase D (renderBlock) mirrors L into the right channel.
+    const int osf = (c.algorithm != FilterAlgorithm::SVF) ? b.preparedOs : 1;
+
+    if (osf > 1)
+    {
+        // ── Oversampled nonlinear filter ──
+        // Upsample the sub-block, run the filter per oversampled sample
+        // (coeffs already set for sr×osf in configureFilterBank), downsample.
+        // Reuses the drive oversamplers — free here, since Phase B (drive) is
+        // a no-op for non-SVF algorithms. Mirrors Phase B's block setup.
+        auto* os = (osf == 2) ? b.os2 : b.os4;
+        float* const channels[2] = { L, R };
+        juce::dsp::AudioBlock<float> block(channels, 2, static_cast<size_t>(n));
+        juce::dsp::AudioBlock<const float> constBlock(block);
+        auto upBlock = os->processSamplesUp(constBlock);
+        const size_t upN = upBlock.getNumSamples();
+        auto* up0 = upBlock.getChannelPointer(0);
+        auto* up1 = upBlock.getChannelPointer(1);
+
+        if (c.algorithm == FilterAlgorithm::Ladder)
+        {
+            for (size_t i = 0; i < upN; ++i) up0[i] = b.ladder.processSample(up0[i]);
+            if (stereo)
+                for (size_t i = 0; i < upN; ++i) up1[i] = b.ladderR.processSample(up1[i]);
+        }
+        else // Warp
+        {
+            for (size_t i = 0; i < upN; ++i) up0[i] = b.warp.processSample(up0[i]);
+            if (stereo)
+                for (size_t i = 0; i < upN; ++i) up1[i] = b.warpR.processSample(up1[i]);
+        }
+
+        os->processSamplesDown(block);
+
+        if (! stereo)
+        {
+            // Mono: only the left filter ran (Phase D mirrors L→R). Sync the
+            // right filter state to the left — matches the base-rate path so
+            // a later switch into a stereo source inherits sensible state.
+            if (c.algorithm == FilterAlgorithm::Ladder) b.ladderR = b.ladder;
+            else                                        b.warpR   = b.warp;
+        }
+    }
+    else if (stereo)
+    {
+        switch (c.algorithm)
+        {
+            case FilterAlgorithm::SVF:
+                for (int j = 0; j < n; ++j)
+                {
+                    L[j] = b.svf.processSample(L[j]);
+                    R[j] = b.svfR.processSample(R[j]);
+                }
+                break;
+            case FilterAlgorithm::Ladder:
+                for (int j = 0; j < n; ++j)
+                {
+                    L[j] = b.ladder.processSample(L[j]);
+                    R[j] = b.ladderR.processSample(R[j]);
+                }
+                break;
+            case FilterAlgorithm::Warp:
+                for (int j = 0; j < n; ++j)
+                {
+                    L[j] = b.warp.processSample(L[j]);
+                    R[j] = b.warpR.processSample(R[j]);
+                }
+                break;
+        }
+    }
+    else
+    {
+        switch (c.algorithm)
+        {
+            case FilterAlgorithm::SVF:
+                for (int j = 0; j < n; ++j)
+                    L[j] = b.svf.processSample(L[j]);
+                b.svfR = b.svf;
+                break;
+            case FilterAlgorithm::Ladder:
+                for (int j = 0; j < n; ++j)
+                    L[j] = b.ladder.processSample(L[j]);
+                b.ladderR = b.ladder;
+                break;
+            case FilterAlgorithm::Warp:
+                for (int j = 0; j < n; ++j)
+                    L[j] = b.warp.processSample(L[j]);
+                b.warpR = b.warp;
+                break;
+        }
+    }
+}
+
+void SynthVoice::processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain)
+{
+    // A disabled path is the identity. The transition machinery in
+    // renderBlock calls this for both banks whenever a transition is in
+    // flight, whether or not each side is actually enabled — this bail-out
+    // is what keeps a disabled bank from touching audio at all.
+    if (! c.enabled || n <= 0)
+        return;
+
+    processDriveStage(b, c, L, R, n, driveGain);
+    processFilterStages(b, c, L, R, n, stereo);
+}
+
+// Once per transition, in its first sub-block (called from the coefficient
+// block in renderBlock, right after the xf bank has been configured at this
+// sub-block's target cutoff/resonance/type/slope/mix/drive): run the recent
+// filter-input history through the target configuration so it starts settled
+// instead of ringing up from zero when the fade makes it audible. With no
+// history yet (a note from idle, or right after prepare/reset —
+// noteOn/prepare/reset all zero filterHistCount_) there is nothing to settle
+// on, and the target starts from zero state, as it does past the deadline.
+//
+// deadlineTicks is the block's pre-roll deadline
+// (BlockParams::filterPreRollDeadlineTicks). A pre-roll that would start
+// after it does not run, and one that reaches it stops after the chunk in
+// flight. Either way the target starts from zero state: never from a state
+// settled on only the older part of the history, which would then continue
+// on the current input and join two points of the signal with nothing in
+// between, and never from the stale state an idle stage of the live filter
+// left in the shared-kind copy.
+void SynthVoice::preRollFilterTransition (bool stereo, float driveGain, long long deadlineTicks)
+{
+    const int cap = static_cast<int>(filterHistL_.size());
+    const int oldestIdx = ((filterHistPos_ - filterHistCount_) + cap) % cap;
+    auto pastDeadline = [deadlineTicks] { return juce::Time::getHighResolutionTicks() >= deadlineTicks; };
+
+    float bufL[SUB_BLOCK_SIZE];
+    float bufR[SUB_BLOCK_SIZE];
+
+    if (! filterXfShared_)
+    {
+        // Separate kind: the xf bank runs its OWN full path (drive stage +
+        // filter stages, oversampled where the model calls for it) over the
+        // recent input, oldest sample first. This also primes the xf
+        // oversampler the new path runs through for real once the fade
+        // starts — beginFilterTransition reset it to empty right before this,
+        // which is also the zero state a skipped pre-roll leaves.
+        if (pastDeadline())
+            return;
+        int readPos = oldestIdx;
+        int remaining = filterHistCount_;
+        while (remaining > 0)
+        {
+            const int len = std::min(remaining, SUB_BLOCK_SIZE);
+            for (int j = 0; j < len; ++j)
+            {
+                const int idx = (readPos + j) % cap;
+                bufL[j] = filterHistL_[static_cast<size_t>(idx)];
+                bufR[j] = filterHistR_[static_cast<size_t>(idx)];
+            }
+            processFilterPath(xfBank(), xfFilterCfg_, bufL, bufR, len, stereo, driveGain);
+            readPos = (readPos + len) % cap;
+            remaining -= len;
+            if (remaining > 0 && pastDeadline())
+            {
+                // Stopped: back to the zero state beginFilterTransition set.
+                switch (xfFilterCfg_.algorithm)
+                {
+                    case FilterAlgorithm::SVF:    xfFilter_.reset(); xfFilterR_.reset(); break;
+                    case FilterAlgorithm::Ladder: xfLadder_.reset(); xfLadderR_.reset(); break;
+                    case FilterAlgorithm::Warp:   xfWarp_.reset();   xfWarpR_.reset();   break;
+                }
+                xfOs2x_->reset();
+                xfOs4x_->reset();
+                xfOs8x_->reset();
+                return;
+            }
+        }
+    }
+    else if (xfFilterCfg_.algorithm == FilterAlgorithm::SVF)
+    {
+        // Shared kind, SVF: the state beginFilterTransition copied from the
+        // live filter is exact for the stages whose input the slope/type
+        // change leaves alone (keep1/keep2/keepOP below) — the others need
+        // settled state.
+        //
+        // Same dispatch as T5ynthFilter::processSample (and
+        // juce::dsp::StateVariableTPTFilter): filter1's input is always the
+        // post-drive signal and its TPT state is type-independent, so a stage
+        // the LIVE config already ran (keep1) stays valid state for any target
+        // type/slope. filter2 (24 dB) and the one-pole instead read another
+        // stage's TYPED output, so keeping their state also needs that
+        // upstream typing to match.
+        auto lpOrHp = [] (int t) { return t == 0 || t == 1; };
+        auto runs1  = [&lpOrHp] (const FilterCfg& c) { return ! (c.slope == 0 && lpOrHp(c.type)); };
+        auto runs2  = [] (const FilterCfg& c) { return c.slope == 3; };
+        auto runsOP = [&lpOrHp] (const FilterCfg& c) { return lpOrHp(c.type) && (c.slope == 0 || c.slope == 2); };
+
+        const FilterCfg& L = liveFilterCfg_;
+        const FilterCfg& X = xfFilterCfg_;
+        const bool keep1  = runs1(L);                        // input always the post-drive signal; TPT state is type-independent
+        const bool keep2  = runs2(L) && L.type == X.type;     // input = filter1's output of the type
+        const bool keepOP = runsOP(L) && L.slope == X.slope
+                          && (X.slope == 0 || L.type == X.type);   // 6 dB: post-drive input (LP and HP both); 18 dB: filter1's output of the type
+        const bool take1  = runs1(X)  && ! keep1;
+        const bool take2  = runs2(X)  && ! keep2;
+        const bool takeOP = runsOP(X) && ! keepOP;
+
+        // A change that brings no stage in (a type change at 12 dB, 18 or
+        // 24 dB -> 12 dB, 6 dB LP <-> HP) finds the copy exact as it stands,
+        // and a pre-roll would be thrown away. Otherwise settle the stages to
+        // take by running the SAME history through a scratch instance
+        // configured at the TARGET coefficients (this sub-block's
+        // configureFilterBank has already run on xfFilter_/xfFilterR_, so
+        // copying from them picks those up).
+        if (! (take1 || take2 || takeOP))
+            return;
+
+        xfPreRollSvf_  = xfFilter_;
+        xfPreRollSvfR_ = xfFilterR_;
+        xfPreRollSvf_.reset();
+        xfPreRollSvfR_.reset();
+
+        // The stages taken below continue on the LIVE drive stage's output,
+        // so they must be settled on that same signal, its oversampler's
+        // latency included: a base-rate tanh would leave them a few samples
+        // ahead of their input, which rings at the cutoff like any other
+        // state error. So the history goes through the xf bank's own drive
+        // stage, which is the live one's configuration (the shared kind
+        // requires it). Its oversamplers are free here: the shared kind runs
+        // the fade on the live bank's and completeFilterTransition leaves
+        // them unswapped. Reset first, so their few samples of memory come
+        // from this history and not from whatever last ran through them.
+        // Past the deadline the scratch stays at its reset state, and the
+        // stages taken below enter from zero.
+        if (! pastDeadline())
+        {
+            if (xfFilterCfg_.svfDrive)
+            {
+                xfOs2x_->reset();
+                xfOs4x_->reset();
+                xfOs8x_->reset();
+            }
+
+            int readPos = oldestIdx;
+            int remaining = filterHistCount_;
+            while (remaining > 0)
+            {
+                const int len = std::min(remaining, SUB_BLOCK_SIZE);
+                for (int j = 0; j < len; ++j)
+                {
+                    const int idx = (readPos + j) % cap;
+                    bufL[j] = filterHistL_[static_cast<size_t>(idx)];
+                    bufR[j] = filterHistR_[static_cast<size_t>(idx)];
+                }
+                processDriveStage(xfBank(), xfFilterCfg_, bufL, bufR, len, driveGain);
+                for (int j = 0; j < len; ++j)
+                    bufL[j] = xfPreRollSvf_.processSample(bufL[j]);
+                if (stereo)
+                    for (int j = 0; j < len; ++j)
+                        bufR[j] = xfPreRollSvfR_.processSample(bufR[j]);
+
+                readPos = (readPos + len) % cap;
+                remaining -= len;
+                if (remaining > 0 && pastDeadline())
+                {
+                    xfPreRollSvf_.reset();
+                    xfPreRollSvfR_.reset();
+                    break;
+                }
+            }
+        }
+
+        xfFilter_.takeStagesFrom(xfPreRollSvf_, take1, take2, takeOP);
+        stereo ? xfFilterR_.takeStagesFrom(xfPreRollSvfR_, take1, take2, takeOP) : (void) (xfFilterR_ = xfFilter_);
+    }
+    // Shared kind, Ladder/Warp: never pending (see beginFilterTransition) —
+    // slope/type/style only select the output tap, so the state evolution
+    // does not depend on them and the plain copy made there is already exact.
+}
+
+void SynthVoice::beginFilterTransition (const FilterCfg& target)
+{
+    const FilterCfg& live = liveFilterCfg_;
+    filterXfShared_ = live.enabled && target.enabled && live.algorithm == target.algorithm
+        && (target.algorithm == FilterAlgorithm::SVF
+              ? (live.svfDrive == target.svfDrive && live.svfDriveOs == target.svfDriveOs)
+              : (live.nlOs == target.nlOs));
+
+    xfFilterCfg_ = target;
+
+    if (target.enabled)
+    {
+        const bool nl = target.algorithm != FilterAlgorithm::SVF;
+        if (nl && xfPreparedOsFactor_ != target.nlOs)
+            prepareNonlinearAt(xfBank(), target.nlOs);
+
+        if (filterXfShared_)
+        {
+            // Same model, same rate, same drive stage: the xf model state
+            // starts as an exact, UNTRIMMED copy of the live one — a stage
+            // the live slope/type left idle may be exactly what the TARGET
+            // needs, and the pre-roll (preRollFilterTransition) is what
+            // settles it, not a zeroing here. The xf bank's oversamplers are
+            // neither reset nor used: both configurations run through the
+            // LIVE bank's drive stage and oversampler for the whole
+            // transition (processFilterPathShared).
+            switch (target.algorithm)
+            {
+                case FilterAlgorithm::SVF:
+                    xfFilter_ = filter;
+                    xfFilterR_ = filterR;
+                    filterXfPreRollPending_ = true;
+                    break;
+                case FilterAlgorithm::Ladder:
+                    // Slope/type only select the output TAP
+                    // (LadderFilter::tapOutput) — the state evolution itself
+                    // does not depend on them, so the copy above is already
+                    // exact. No pre-roll.
+                    xfLadder_ = filterLadder;
+                    xfLadderR_ = filterLadderR;
+                    break;
+                case FilterAlgorithm::Warp:
+                    // Same as Ladder; a style change carries the state into
+                    // the new curve, which is what switching styles on a
+                    // running circuit does. No pre-roll.
+                    xfWarp_ = filterWarp;
+                    xfWarpR_ = filterWarpR;
+                    break;
+            }
+        }
+        else
+        {
+            // A different model, rate or drive stage has no state in common
+            // with what is live: start at zero rather than from whatever
+            // this voice's xf bank held from an earlier, unrelated
+            // transition, and let the pre-roll settle it from the recent
+            // input instead.
+            switch (target.algorithm)
+            {
+                case FilterAlgorithm::SVF:    xfFilter_.reset(); xfFilterR_.reset(); break;
+                case FilterAlgorithm::Ladder: xfLadder_.reset(); xfLadderR_.reset(); break;
+                case FilterAlgorithm::Warp:   xfWarp_.reset();   xfWarpR_.reset();   break;
+            }
+
+            // The transition bank's oversamplers hold whatever last ran
+            // through them — NOT "never the live bank's history": after a
+            // completion the swapped-in instances held exactly that. They
+            // may well have carried live signal once, just not THIS
+            // transition's recent past, which is what the pre-roll below
+            // fills them with instead.
+            xfOs2x_->reset();
+            xfOs4x_->reset();
+            xfOs8x_->reset();
+
+            filterXfPreRollPending_ = true;
+        }
+    }
+    // Filter off (target disabled): the identity has no state to copy,
+    // reset, or pre-roll.
+
+    filterXf_ = FilterXf::Fade;
+    filterXfFadeTotal_ = std::max(1, juce::roundToInt(FILTER_XF_FADE_MS * 0.001 * sr));
+    filterXfLeft_ = filterXfFadeTotal_;
+}
+
+void SynthVoice::completeFilterTransition()
+{
+    if (xfFilterCfg_.enabled)
+    {
+        if (xfFilterCfg_.algorithm == FilterAlgorithm::SVF)
+        {
+            filter  = xfFilter_;
+            filterR = xfFilterR_;
+        }
+        else
+        {
+            // Both nonlinear filters copy across even though only one is the
+            // active algorithm — cheap. The real reason: filterPreparedOsFactor_
+            // below declares the rate of ALL FOUR live nonlinear filters, and
+            // the adopt path trusts it — copying only the active model would
+            // leave the idle one at another rate than declared, and a later
+            // adopt into it would skip its re-prepare and run it an octave
+            // off. (Not, as this comment used to say, to keep a later
+            // transition's shared branch from reading the idle model as
+            // sounding state — that branch requires the live algorithm to
+            // equal the target, so the idle model is never read as sounding
+            // state regardless.)
+            filterLadder  = xfLadder_;
+            filterLadderR = xfLadderR_;
+            filterWarp    = xfWarp_;
+            filterWarpR   = xfWarpR_;
+            filterPreparedOsFactor_ = xfPreparedOsFactor_;   // all four live nonlinear filters now at that factor
+        }
+    }
+
+    // The separate kind's xf oversamplers actually ran this signal's recent
+    // past (the pre-roll, then the fade) and become the live ones. The
+    // shared kind never touched them at all — both models ran through the
+    // LIVE bank's drive stage/oversampler for the whole transition
+    // (processFilterPathShared) — so swapping here would hand the next live
+    // bank a stale or reset instance in place of the one that actually
+    // carries the signal. Only the unique_ptrs move; the Oversampling
+    // objects themselves never do (no heap traffic).
+    if (! filterXfShared_)
+    {
+        std::swap(driveOs2x_, xfOs2x_);
+        std::swap(driveOs4x_, xfOs4x_);
+        std::swap(driveOs8x_, xfOs8x_);
+    }
+
+    liveFilterCfg_ = xfFilterCfg_;
+    filterXf_ = FilterXf::None;
+    filterXfShared_ = false;
+}
+
+void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain)
+{
+    // Same model, same rate, same drive stage (filterXfShared_, decided in
+    // beginFilterTransition): running two independent drive stages and two
+    // independent oversamplers here would double CPU for nothing the two
+    // configurations don't already share, and would leave two independent
+    // phase responses fighting each other for the length of the fade. One
+    // drive stage, one oversampler, both models fed from the SAME
+    // upsampled/driven signal — only the filter stages themselves (the SVF/
+    // Ladder/Warp model state) differ between live and xf.
+    auto live = liveBank();
+    auto xf = xfBank();
+    const int osf = (liveFilterCfg_.algorithm != FilterAlgorithm::SVF) ? live.preparedOs : 1;
+    const int done = filterXfFadeTotal_ - filterXfLeft_;
+
+    if (osf > 1)   // Ladder/Warp at 2x/4x: one oversampler, both models inside it
+    {
+        auto* os = (osf == 2) ? live.os2 : live.os4;
+        float* const channels[2] = { L, R };
+        juce::dsp::AudioBlock<float> block(channels, 2, static_cast<size_t>(n));
+        juce::dsp::AudioBlock<const float> constBlock(block);
+        auto upBlock = os->processSamplesUp(constBlock);
+        const size_t upN = upBlock.getNumSamples();
+        auto* up0 = upBlock.getChannelPointer(0);
+        auto* up1 = upBlock.getChannelPointer(1);
+
+        float xUp0[SUB_BLOCK_SIZE * 4];
+        float xUp1[SUB_BLOCK_SIZE * 4];
+        std::copy(up0, up0 + upN, xUp0);
+        std::copy(up1, up1 + upN, xUp1);
+
+        if (liveFilterCfg_.algorithm == FilterAlgorithm::Ladder)
+        {
+            for (size_t i = 0; i < upN; ++i) up0[i]  = live.ladder.processSample(up0[i]);
+            for (size_t i = 0; i < upN; ++i) xUp0[i] = xf.ladder.processSample(xUp0[i]);
+            if (stereo)
+            {
+                for (size_t i = 0; i < upN; ++i) up1[i]  = live.ladderR.processSample(up1[i]);
+                for (size_t i = 0; i < upN; ++i) xUp1[i] = xf.ladderR.processSample(xUp1[i]);
+            }
+        }
+        else // Warp
+        {
+            for (size_t i = 0; i < upN; ++i) up0[i]  = live.warp.processSample(up0[i]);
+            for (size_t i = 0; i < upN; ++i) xUp0[i] = xf.warp.processSample(xUp0[i]);
+            if (stereo)
+            {
+                for (size_t i = 0; i < upN; ++i) up1[i]  = live.warpR.processSample(up1[i]);
+                for (size_t i = 0; i < upN; ++i) xUp1[i] = xf.warpR.processSample(xUp1[i]);
+            }
+        }
+
+        if (filterXf_ == FilterXf::Fade)
+        {
+            // Raised cosine, summing to one: both paths filter the same input, so they are
+            // correlated and an equal-POWER law would bump the level mid-fade. Time base is
+            // OUTPUT (base-rate) samples: upsampled sample i is (i+1)/osf of one output sample.
+            for (size_t i = 0; i < upN; ++i)
+            {
+                const float t = juce::jlimit(0.0f, 1.0f,
+                    (static_cast<float>(done) + (static_cast<float>(i) + 1.0f) / static_cast<float>(osf))
+                        / static_cast<float>(filterXfFadeTotal_));
+                const float g = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * t);
+                up0[i] += (xUp0[i] - up0[i]) * g;
+                if (stereo)
+                    up1[i] += (xUp1[i] - up1[i]) * g;
+            }
+        }
+
+        os->processSamplesDown(block);
+
+        if (! stereo)   // mono sync, both banks — matches processFilterStages' own
+        {
+            if (liveFilterCfg_.algorithm == FilterAlgorithm::Ladder) { live.ladderR = live.ladder; xf.ladderR = xf.ladder; }
+            else                                                     { live.warpR   = live.warp;   xf.warpR   = xf.warp;   }
+        }
+    }
+    else           // SVF (with or without its drive stage), and Ladder/Warp at base rate
+    {
+        processDriveStage(live, liveFilterCfg_, L, R, n, driveGain);   // identical for both: same drive stage
+
+        float xL[SUB_BLOCK_SIZE];
+        float xR[SUB_BLOCK_SIZE];
+        std::copy(L, L + n, xL);
+        std::copy(R, R + n, xR);
+
+        processFilterStages(live, liveFilterCfg_, L, R, n, stereo);
+        processFilterStages(xf,   xfFilterCfg_,   xL, xR, n, stereo);
+
+        if (filterXf_ == FilterXf::Fade)
+        {
+            // Raised cosine, summing to one: both paths filter the same input, so they are
+            // correlated and an equal-POWER law would bump the level mid-fade.
+            for (int j = 0; j < n; ++j)
+            {
+                const float t = juce::jlimit(0.0f, 1.0f,
+                    static_cast<float>(done + j + 1) / static_cast<float>(filterXfFadeTotal_));
+                const float g = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * t);
+                L[j] += (xL[j] - L[j]) * g;
+                R[j] += (xR[j] - R[j]) * g;
+            }
+        }
+    }
+
+    filterXfLeft_ -= n;
+}
+
 void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParams& p,
                               const float* lfo1Buf, const float* lfo2Buf, const float* lfo3Buf, int numSamples,
                               const float* csoundBuf)
@@ -1007,28 +1763,55 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         sampler.renderPitchedBlock(samplerBlockBuf_.data(), numSamples);
     }
 
-    // ── Nonlinear-filter oversampling: prepare Ladder/Warp at sr × factor ──
-    // Their in-loop saturation aliases at base rate; running the per-sample loop
-    // oversampled (Phase C) fixes it. The filter's coefficient g = tan(π·fc/sr)
-    // is derived from its internal rate, so it must be prepared at sr×factor
-    // BEFORE the sub-block setCutoff calls below. prepare() is allocation-free
-    // (sr + reset + updateCoeffs) → audio-thread safe. Guarded so we only
-    // re-prepare (and thus reset state) on an actual factor change, not per block.
-    // SVF is linear and never oversampled; factor 1 = Off = base rate.
-    if (p.filterEnabled && p.filterAlgorithm != FilterAlgorithm::SVF)
+    // ── Filter configuration: adopt / transition / continue ──
+    // A discrete change (algorithm/slope/type/style/on-off/drive-stage/OS
+    // factor) is never applied in place on the live filters — see FilterCfg
+    // and the xf* members in SynthVoice.h. Ladder/Warp's prepare() at
+    // sr×factor (their coefficient g = tan(π·fc/sr) is derived from the
+    // internal rate, so it must happen BEFORE the sub-block setCutoff calls
+    // below) now lives in prepareNonlinearAt — allocation-free (sr + reset +
+    // updateCoeffs) → audio-thread safe, called only on an actual factor
+    // change, never per block. SVF is linear and never oversampled; factor
+    // 1 = Off = base rate.
+    const FilterCfg want = filterCfgFrom(p);
+    if (filterCfgAdopt_)
     {
-        const int req    = juce::jmax(1, p.filterOsFactor);
-        const int wantOs = (req >= 4) ? 4 : (req >= 2) ? 2 : 1;   // only 1/2/4 — match the OS instances
-        if (wantOs != filterPreparedOsFactor_)
+        // Nothing has been heard through this voice's filter yet (a note from idle, or right
+        // after prepare/reset): take the configuration outright, no transition.
+        if (want != liveFilterCfg_ && want.enabled)
         {
-            const double osr = sr * static_cast<double>(wantOs);
-            filterLadder.prepare(osr, maxBlockSize_);
-            filterLadderR.prepare(osr, maxBlockSize_);
-            filterWarp.prepare(osr, maxBlockSize_);
-            filterWarpR.prepare(osr, maxBlockSize_);
-            filterPreparedOsFactor_ = wantOs;
+            // A model or stage that was not the live one starts from zero, not from whatever it
+            // held the last time this voice used it.
+            switch (want.algorithm)
+            {
+                case FilterAlgorithm::SVF:    filter.reset();       filterR.reset();       break;
+                case FilterAlgorithm::Ladder: filterLadder.reset(); filterLadderR.reset(); break;
+                case FilterAlgorithm::Warp:   filterWarp.reset();   filterWarpR.reset();   break;
+            }
+            driveOs2x_->reset();
+            driveOs4x_->reset();
+            driveOs8x_->reset();
         }
+        if (want.enabled && want.algorithm != FilterAlgorithm::SVF && filterPreparedOsFactor_ != want.nlOs)
+            prepareNonlinearAt(liveBank(), want.nlOs);
+        liveFilterCfg_ = want;
+        filterXf_ = FilterXf::None;
+        filterCfgAdopt_ = false;
+        filterXfPreRollPending_ = false;
+        filterXfShared_ = false;
     }
+    else
+    {
+        // A fade that ended on the last call's final sample is completed here, not in the first
+        // sub-block below, so a target this call brings starts with this call.
+        if (filterXf_ == FilterXf::Fade && filterXfLeft_ <= 0)
+            completeFilterTransition();
+        if (filterXf_ == FilterXf::None && want != liveFilterCfg_)
+            beginFilterTransition(want);
+    }
+    // A fade still running: a newer target waits for it to end and starts at the first sub-block
+    // boundary after that (the phase advance below), in this call or at the top of the next: at
+    // most FILTER_XF_FADE_MS plus 31 samples after the voice first sees it, 1.6 ms at 48 kHz.
 
     // Cutoff-bus depth curve for the sources whose depth is block-constant. The
     // curve is a pow(); these five values cannot change inside the block (drift
@@ -1037,7 +1820,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
     // three LFO depths genuinely vary within the block — an env can be driving
     // them — and stay at the sub-block boundary below.
     float ampCutoffCurve = 0.0f, modCutoffCurve[kNumModEnvs] = {}, atCutoffCurve = 0.0f;
-    if (p.filterEnabled)
+    // want too: a transition the phase advance starts mid-call goes into it.
+    const bool anyFilterPath = liveFilterCfg_.enabled || want.enabled
+        || (filterXf_ != FilterXf::None && xfFilterCfg_.enabled);
+    if (anyFilterPath)
     {
         if (p.ampTarget == EnvTarget::Filter)
             ampCutoffCurve = ModCalib::cutoffDepthCurve(p.ampAmount);
@@ -1053,8 +1839,23 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         int subBlockEnd = std::min(pos + SUB_BLOCK_SIZE, numSamples);
         int subBlockLen = subBlockEnd - pos;
 
+        // ── Filter transition: advance phase ──
+        // Runs before the coefficient block below so a completion landing in
+        // THIS sub-block is reflected in subFilterPath immediately, instead
+        // of running the now-promoted live bank through one more sub-block
+        // of stale xf-bank coefficients.
+        if (filterXf_ == FilterXf::Fade && filterXfLeft_ <= 0)
+        {
+            completeFilterTransition();
+            // A target that arrived while that fade ran starts here, in this call.
+            if (want != liveFilterCfg_)
+                beginFilterTransition(want);
+        }
+
         // ── Sub-block boundary: update filter coefficients ONCE ──
-        if (p.filterEnabled)
+        const bool subFilterPath = liveFilterCfg_.enabled
+            || (filterXf_ != FilterXf::None && xfFilterCfg_.enabled);
+        if (subFilterPath)
         {
             int midIdx = pos + subBlockLen / 2;
             const float lfo1Depth = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
@@ -1122,58 +1923,27 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             lastModulatedCutoff_ = cutoffMod;
             lastModulatedResonance_ = resonanceMod;
 
-            // Configure only the active filter model — the inactive ones sit
-            // idle, so touching them would just waste cycles on coefficient
-            // updates that no one hears. Mirror the same coefficients to the
-            // right-channel instance so L and R filter identically (same
-            // cutoff/reso/type/slope), with separate internal state.
-            switch (p.filterAlgorithm)
+            // Each bank is configured with its OWN discrete config (never
+            // p's directly) — the live bank keeps running whatever it was
+            // switched to, and the xf bank (while a transition is in flight)
+            // runs the newest target; only the continuous cutoff/reso/mix/
+            // drive values track p every sub-block, for both.
+            if (liveFilterCfg_.enabled)
+                configureFilterBank(liveBank(), liveFilterCfg_, cutoffMod, resonanceMod, p);
+            if (filterXf_ != FilterXf::None && xfFilterCfg_.enabled)
             {
-                case FilterAlgorithm::SVF:
-                    filter.setCutoff(cutoffMod);
-                    filter.setResonance(resonanceMod);
-                    filter.setType(p.filterType);
-                    filter.setSlope(p.filterSlope);
-                    filter.setMix(p.filterMix);
-                    filterR.setCutoff(cutoffMod);
-                    filterR.setResonance(resonanceMod);
-                    filterR.setType(p.filterType);
-                    filterR.setSlope(p.filterSlope);
-                    filterR.setMix(p.filterMix);
-                    break;
-                case FilterAlgorithm::Ladder:
-                    filterLadder.setCutoff(cutoffMod);
-                    filterLadder.setResonance(resonanceMod);
-                    filterLadder.setType(p.filterType);
-                    filterLadder.setSlope(p.filterSlope);
-                    filterLadder.setMix(p.filterMix);
-                    // Drive feeds the ladder's own tanh stages (Phase B stays
-                    // linear for Ladder), so the character comes from the
-                    // filter saturating, not from a shortcut pre-filter tanh.
-                    filterLadder.setInputDrive(p.filterDriveGain);
-                    filterLadderR.setCutoff(cutoffMod);
-                    filterLadderR.setResonance(resonanceMod);
-                    filterLadderR.setType(p.filterType);
-                    filterLadderR.setSlope(p.filterSlope);
-                    filterLadderR.setMix(p.filterMix);
-                    filterLadderR.setInputDrive(p.filterDriveGain);
-                    break;
-                case FilterAlgorithm::Warp:
-                    filterWarp.setCutoff(cutoffMod);
-                    filterWarp.setResonance(resonanceMod);
-                    filterWarp.setType(p.filterType);
-                    filterWarp.setSlope(p.filterSlope);
-                    filterWarp.setMix(p.filterMix);
-                    filterWarp.setStyle(p.filterWarpStyle);
-                    filterWarp.setInputDrive(p.filterDriveGain);
-                    filterWarpR.setCutoff(cutoffMod);
-                    filterWarpR.setResonance(resonanceMod);
-                    filterWarpR.setType(p.filterType);
-                    filterWarpR.setSlope(p.filterSlope);
-                    filterWarpR.setMix(p.filterMix);
-                    filterWarpR.setStyle(p.filterWarpStyle);
-                    filterWarpR.setInputDrive(p.filterDriveGain);
-                    break;
+                configureFilterBank(xfBank(), xfFilterCfg_, cutoffMod, resonanceMod, p);
+                // Once per transition, in its first sub-block: settle the xf
+                // bank's target configuration on the recent filter input
+                // before the fade makes it audible, instead of starting it
+                // from zero.
+                // Past the block's pre-roll deadline it starts from zero state
+                // instead (see preRollFilterTransition).
+                if (filterXfPreRollPending_)
+                {
+                    preRollFilterTransition(freezeMode, p.filterDriveGain, p.filterPreRollDeadlineTicks);
+                    filterXfPreRollPending_ = false;
+                }
             }
         }
 
@@ -1397,156 +2167,77 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
 
         const int driveLen = lastI - pos;
 
-        // ── Phase B: drive stage ──
-        // For SVF (linear filter): apply tanh as the saturation, optionally
-        // oversampled — the SVF is LTI so the pre-filter tanh *is* the drive
-        // character.
-        // For Ladder / Warp (own nonlinearities): pre-filter tanh would flat-
-        // clip the signal and leave nothing for the filter's internal stages
-        // to shape. Instead the drive amount is forwarded to the filter via
-        // setInputDrive() at sub-block setup time, and Phase B is a no-op.
-        if (p.filterEnabled && p.filterDriveDb > 0.01f && driveLen > 0
-            && p.filterAlgorithm == FilterAlgorithm::SVF)
+        // ── Filter-input history (pre-roll source) ──
+        // Ring buffer of the DRY signal any filter bank would see, written
+        // unconditionally — also while the filter is off, so a "filter on"
+        // transition has something to pre-roll from too. Must run before
+        // anything below processes this sub-block's dry signal (the xf copy,
+        // and the live filter path itself, which mutates output/outputRBuf
+        // in place).
+        if (driveLen > 0 && ! filterHistL_.empty())
         {
-            const float driveGain = p.filterDriveGain;
-
-            if (p.filterDriveOs == FilterDriveOs::Off)
+            const int cap = static_cast<int>(filterHistL_.size());
+            const int histN = std::min(driveLen, cap);
+            const int srcOff = driveLen - histN;   // pathological sr only: keep the newest `cap` samples
+            const int firstLen = std::min(histN, cap - filterHistPos_);
+            std::copy(output + pos + srcOff, output + pos + srcOff + firstLen, filterHistL_.begin() + filterHistPos_);
+            std::copy(outputRBuf + srcOff, outputRBuf + srcOff + firstLen, filterHistR_.begin() + filterHistPos_);
+            if (histN > firstLen)
             {
-                for (int i = pos; i < lastI; ++i)
-                {
-                    output[i] = std::tanh(output[i] * driveGain);
-                    outputRBuf[i - pos] = std::tanh(outputRBuf[i - pos] * driveGain);
-                }
+                std::copy(output + pos + srcOff + firstLen, output + pos + srcOff + histN, filterHistL_.begin());
+                std::copy(outputRBuf + srcOff + firstLen, outputRBuf + srcOff + histN, filterHistR_.begin());
             }
-            else
-            {
-                auto* os = (p.filterDriveOs == FilterDriveOs::X2) ? driveOs2x_.get()
-                         : (p.filterDriveOs == FilterDriveOs::X4) ? driveOs4x_.get()
-                         :                                           driveOs8x_.get();
-
-                float* chPtrL = output + pos;
-                float* chPtrR = outputRBuf;
-                float* const channels[2] = { chPtrL, chPtrR };
-                juce::dsp::AudioBlock<float> block(channels, 2, static_cast<size_t>(driveLen));
-                juce::dsp::AudioBlock<const float> constBlock(block);
-                auto upBlock = os->processSamplesUp(constBlock);
-                const size_t upN = upBlock.getNumSamples();
-                for (size_t ch = 0; ch < 2; ++ch)
-                {
-                    auto* upData = upBlock.getChannelPointer(ch);
-                    for (size_t i = 0; i < upN; ++i)
-                        upData[i] = std::tanh(upData[i] * driveGain);
-                }
-                os->processSamplesDown(block);
-            }
+            filterHistPos_ = (filterHistPos_ + histN) % cap;
+            filterHistCount_ = std::min(cap, filterHistCount_ + histN);
         }
 
-        // ── Phase C: per-sample filter (algorithm dispatch per sub-block) ──
-        // Stereo when the source is stereo (freeze): L through left filter,
-        // R through right filter, identical coefficients (mirrored at sub-block
-        // setup), separate state.
-        // Mono sources (sampler / wavetable) skip the right filter entirely —
-        // that's the second-most-expensive piece of the voice. We then sync the
-        // right filter state to the left so a switch into a stereo source
-        // (freeze going active) inherits a sensible state instead of starting
-        // cold. Phase D mirrors output[i] into the right channel.
-        if (p.filterEnabled)
+        // ── Filter path: live bank always, transition bank while in flight ──
+        // The live bank runs its own (possibly-just-switched) configuration
+        // on the real output/outputRBuf, exactly as the single-bank code did.
+        // While a transition is running, the SAME dry input also goes through
+        // the xf bank too, crossfaded in over the fade — either sharing the
+        // live bank's drive stage and oversampler (processFilterPathShared,
+        // for a same-model/same-rate/same-drive-stage transition) or running
+        // its own full path (everything else). filterXfPreRollPending_,
+        // consumed above in the coefficient block, is what keeps that xf path
+        // from starting at zero: it has already run the recent history
+        // through whichever of those two paths applies, in this transition's
+        // first sub-block, before any of this was heard.
+        // See FilterCfg / beginFilterTransition / completeFilterTransition in
+        // SynthVoice.h for why a discrete switch is never applied in place.
+        const bool xfRun = filterXf_ != FilterXf::None && driveLen > 0;
+        if (xfRun && filterXfShared_)
         {
-            // Nonlinear filters (Ladder/Warp) optionally run oversampled to kill
-            // their in-loop saturation aliasing; SVF is linear and stays at base
-            // rate. osf = the factor they were prepared at this block (1/2/4),
-            // so the OS instance below always matches the prepared coefficients.
-            const int osf = (p.filterAlgorithm != FilterAlgorithm::SVF) ? filterPreparedOsFactor_ : 1;
-
-            if (osf > 1)
+            processFilterPathShared(output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain);
+        }
+        else
+        {
+            float xfL[SUB_BLOCK_SIZE] {};
+            float xfR[SUB_BLOCK_SIZE] {};
+            if (xfRun)
             {
-                // ── Oversampled nonlinear filter ──
-                // Upsample the sub-block, run the filter per oversampled sample
-                // (coeffs already set for sr×osf at sub-block setup), downsample.
-                // Reuses the drive oversamplers — free here, since Phase B (drive)
-                // is a no-op for non-SVF algorithms. Mirrors Phase B's block setup.
-                auto* os = (osf == 2) ? driveOs2x_.get() : driveOs4x_.get();
-                float* chPtrL = output + pos;
-                float* chPtrR = outputRBuf;
-                float* const channels[2] = { chPtrL, chPtrR };
-                juce::dsp::AudioBlock<float> block(channels, 2, static_cast<size_t>(driveLen));
-                juce::dsp::AudioBlock<const float> constBlock(block);
-                auto upBlock = os->processSamplesUp(constBlock);
-                const size_t upN = upBlock.getNumSamples();
-                auto* up0 = upBlock.getChannelPointer(0);
-                auto* up1 = upBlock.getChannelPointer(1);
-
-                if (p.filterAlgorithm == FilterAlgorithm::Ladder)
-                {
-                    for (size_t i = 0; i < upN; ++i) up0[i] = filterLadder.processSample(up0[i]);
-                    if (freezeMode)
-                        for (size_t i = 0; i < upN; ++i) up1[i] = filterLadderR.processSample(up1[i]);
-                }
-                else // Warp
-                {
-                    for (size_t i = 0; i < upN; ++i) up0[i] = filterWarp.processSample(up0[i]);
-                    if (freezeMode)
-                        for (size_t i = 0; i < upN; ++i) up1[i] = filterWarpR.processSample(up1[i]);
-                }
-
-                os->processSamplesDown(block);
-
-                if (! freezeMode)
-                {
-                    // Mono: only the left filter ran (Phase D mirrors L→R). Sync the
-                    // right filter state to the left — matches the base-rate path so
-                    // a later switch into a stereo source inherits sensible state.
-                    if (p.filterAlgorithm == FilterAlgorithm::Ladder) filterLadderR = filterLadder;
-                    else                                              filterWarpR   = filterWarp;
-                }
+                std::copy(output + pos, output + pos + driveLen, xfL);
+                std::copy(outputRBuf, outputRBuf + driveLen, xfR);
             }
-            else if (freezeMode)
+            processFilterPath(liveBank(), liveFilterCfg_, output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain);
+            if (xfRun)
             {
-                switch (p.filterAlgorithm)
+                processFilterPath(xfBank(), xfFilterCfg_, xfL, xfR, driveLen, freezeMode, p.filterDriveGain);
+                if (filterXf_ == FilterXf::Fade)
                 {
-                    case FilterAlgorithm::SVF:
-                        for (int i = pos; i < lastI; ++i)
-                        {
-                            output[i]            = filter.processSample(output[i]);
-                            outputRBuf[i - pos]  = filterR.processSample(outputRBuf[i - pos]);
-                        }
-                        break;
-                    case FilterAlgorithm::Ladder:
-                        for (int i = pos; i < lastI; ++i)
-                        {
-                            output[i]            = filterLadder.processSample(output[i]);
-                            outputRBuf[i - pos]  = filterLadderR.processSample(outputRBuf[i - pos]);
-                        }
-                        break;
-                    case FilterAlgorithm::Warp:
-                        for (int i = pos; i < lastI; ++i)
-                        {
-                            output[i]            = filterWarp.processSample(output[i]);
-                            outputRBuf[i - pos]  = filterWarpR.processSample(outputRBuf[i - pos]);
-                        }
-                        break;
+                    // Raised cosine, summing to one: both paths filter the same input, so they are
+                    // correlated and an equal-POWER law would bump the level mid-fade.
+                    const int done = filterXfFadeTotal_ - filterXfLeft_;
+                    for (int j = 0; j < driveLen; ++j)
+                    {
+                        const float t = juce::jlimit(0.0f, 1.0f,
+                            static_cast<float>(done + j + 1) / static_cast<float>(filterXfFadeTotal_));
+                        const float g = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * t);
+                        output[pos + j] += (xfL[j] - output[pos + j]) * g;
+                        outputRBuf[j]   += (xfR[j] - outputRBuf[j]) * g;
+                    }
                 }
-            }
-            else
-            {
-                switch (p.filterAlgorithm)
-                {
-                    case FilterAlgorithm::SVF:
-                        for (int i = pos; i < lastI; ++i)
-                            output[i] = filter.processSample(output[i]);
-                        filterR = filter;
-                        break;
-                    case FilterAlgorithm::Ladder:
-                        for (int i = pos; i < lastI; ++i)
-                            output[i] = filterLadder.processSample(output[i]);
-                        filterLadderR = filterLadder;
-                        break;
-                    case FilterAlgorithm::Warp:
-                        for (int i = pos; i < lastI; ++i)
-                            output[i] = filterWarp.processSample(output[i]);
-                        filterWarpR = filterWarp;
-                        break;
-                }
+                filterXfLeft_ -= driveLen;
             }
         }
 

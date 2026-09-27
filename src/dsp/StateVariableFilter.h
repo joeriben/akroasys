@@ -19,6 +19,20 @@ public:
     void processBlock(juce::AudioBuffer<float>& buffer);
     void reset();
 
+    /** Copy individual stages from src, each independently flagged. Used by
+     *  the filter-transition pre-roll (SynthVoice::preRollFilterTransition) to
+     *  take only the stages whose upstream input actually changed, keeping
+     *  the others' already-settled state.
+     *
+     *  PRECONDITION: src is configured identically to this filter (same
+     *  cutoff, resonance, type, slope) — the copy carries filter1/filter2's
+     *  juce::dsp::StateVariableTPTFilter state AND coefficients, which is
+     *  only correct when the two already agree. Copy-assigning the juce
+     *  filter reuses its equal-size std::vectors (both instances prepared
+     *  with numChannels 2) rather than reallocating, so this is
+     *  audio-thread safe. */
+    void takeStagesFrom (const T5ynthFilter& src, bool stage1, bool stage2, bool onePole);
+
     /** Set cutoff frequency in Hz. */
     void setCutoff(float hz);
 

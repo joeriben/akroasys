@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 
 // ── Choice-parameter single-source-of-truth tables ──
 //
@@ -2294,6 +2295,11 @@ struct BlockParams
     int   filterOsFactor = 1;
     // Pre-computed derived value (filled in processBlock, not by user):
     float filterDriveGain = 1.0f;      // 10^(driveDb/20)
+    // juce::Time::getHighResolutionTicks() value after which a filter-change
+    // pre-roll no longer starts in this block, and one that is running stops
+    // after its current 32 samples (SynthVoice::preRollFilterTransition). The
+    // default, and a non-realtime render, never limit it.
+    long long filterPreRollDeadlineTicks = std::numeric_limits<long long>::max();
     float kbdTrack = 0.0f;
 
     // Scan

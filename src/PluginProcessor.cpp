@@ -3543,6 +3543,10 @@ bool T5ynthProcessor::snapshotExternalCapture (juce::AudioBuffer<float>& dest,
 
 void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
+    // Taken before the lock, the earliest point of this callback the processor can
+    // see; the filter-change pre-roll budget below counts from here.
+    const juce::int64 blockStartTicks = juce::Time::getHighResolutionTicks();
+
     // Hold the callback lock ourselves, for the whole block.
     //
     // Every off-thread publisher in this file takes getCallbackLock() before it
@@ -4203,6 +4207,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     bp.filterWarpStyle = static_cast<int>(paramCache.filterWarpStyle->load());
     bp.filterOsFactor = filterOsFactor_.load(std::memory_order_relaxed);  // global, not per-preset
     bp.filterDriveGain = std::pow(10.0f, bp.filterDriveDb * (1.0f / 20.0f));
+    // A filter-model change settles each transitioning voice's new filter on 10 ms
+    // of its recent input, all in the block the change arrives in; a Snap recall
+    // moves every sounding voice at once, so with many voices that one block could
+    // overrun. The pre-roll therefore starts only in the first half of the block's
+    // time; a voice past it changes without it. An offline render has no deadline.
+    if (! isNonRealtime() && getSampleRate() > 0.0 && buffer.getNumSamples() > 0)
+        bp.filterPreRollDeadlineTicks = blockStartTicks
+            + (juce::int64) (0.5 * (double) buffer.getNumSamples() / getSampleRate()
+                              * (double) juce::Time::getHighResolutionTicksPerSecond());
 
     // Scan
     bp.baseScan = paramCache.oscScan->load();
