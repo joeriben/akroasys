@@ -130,10 +130,11 @@ void T5ynthFilter::setCutoff(float hz, bool force)
     updateOnePoleCoeff(hz);
 }
 
-void T5ynthFilter::setResonance(float r)
+void T5ynthFilter::setResonance(float r, bool force)
 {
-    // Skip redundant coefficient update
-    if (std::abs(r - lastSetReso) < 0.001f) return;
+    // Skip redundant coefficient update, unless the caller needs this exact
+    // value to land (force -- see the declaration).
+    if (! force && std::abs(r - lastSetReso) < 0.001f) return;
     lastSetReso = r;
     float q = resonanceToQ(r);
     filter1.setResonance(q);

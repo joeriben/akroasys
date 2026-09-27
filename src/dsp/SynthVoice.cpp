@@ -277,6 +277,13 @@ void SynthVoice::prepare(double sampleRate, int samplesPerBlock)
     for (int m = 0; m < kNumModEnvs; ++m)
         lastModValSm_[m] = lastModVal_[m];
 
+    // Same story again for the continuous filter-control ramp (see
+    // updateFilterCtlGoals / filterCtlAdopt_): nothing is sounding through
+    // the filter's knobs yet either, so the next renderBlock takes p's
+    // cutoff/kbd/reso/mix/drive outright.
+    filterCtlAdopt_ = true;
+    ctlRampLeft_ = 0;
+
     // Csound engine frequency smoother (Phase-1 spec D7): give it the sample
     // rate up front (mirroring every other per-voice component above) and
     // seed it at the voice's default pitch so it reads a valid value even
@@ -333,6 +340,9 @@ void SynthVoice::reset()
     // Same story for the envelope routing/amount ramp (see prepare()).
     envRouteAdopt_ = true;
     envRouteRampLeft_ = 0;
+    // And for the continuous filter-control ramp (see prepare()).
+    filterCtlAdopt_ = true;
+    ctlRampLeft_ = 0;
     active = false;
     noteHeld = false;
     keyGate_.setCurrentAndTargetValue(0.0f);
@@ -362,6 +372,7 @@ void SynthVoice::beginRestartFade()
     // A fresh strike on a sounding voice: see filterCfgAdopt_ in SynthVoice.h.
     filterCfgAdopt_ = true;
     envRouteAdopt_ = true;
+    filterCtlAdopt_ = true;
     restartFadeTailSample_  = lastOutputSample_;
     restartFadeTailSampleR_ = lastOutputSampleR_;
     restartFadeTotalSamples_ = std::max(1,
@@ -403,6 +414,7 @@ void SynthVoice::noteOn(int note, float velocity, bool legato)
     {
         filterCfgAdopt_ = true;
         envRouteAdopt_ = true;
+        filterCtlAdopt_ = true;
         // A note from idle has no recent input of its own to pre-roll from.
         filterHistPos_ = 0;
         filterHistCount_ = 0;
@@ -1213,6 +1225,95 @@ float SynthVoice::computeDcaGainRouted (const float (&w)[kNumEnvSources][EnvTarg
     return std::max(0.0f, vca);
 }
 
+// ── Continuous filter-control de-zippering ────────────────────────────────
+// See the ctlSeen*_ / ctlCutoffOct_ member comments in SynthVoice.h for the
+// design.
+
+void SynthVoice::updateFilterCtlGoals (const BlockParams& p)
+{
+    if (filterCtlAdopt_)
+    {
+        // Nothing sounding through the filter has this voice's knobs baked
+        // into it yet (see filterCtlAdopt_ in SynthVoice.h): take p's values
+        // outright, no ramp.
+        ctlSeenCutoffHz_ = p.baseCutoff;
+        ctlSeenKbd_      = p.kbdTrack;
+        ctlSeenReso_     = p.baseReso;
+        ctlSeenMix_      = p.filterMix;
+        ctlSeenDriveDb_  = p.filterDriveDb;
+        ctlCutoffOct_ = ctlReso_ = ctlMix_ = ctlDriveDb_ = 0.0f;
+        ctlRampLeft_ = 0;
+        filterCtlAdopt_ = false;
+        return;
+    }
+
+    // Only the KNOB values are compared -- envelopes, LFOs, drift, aftertouch
+    // and key position all reach the filter through the coefficient block's
+    // own modulation bus / applyAftertouchTarget, never through ctlSeen*_, so
+    // none of that modulation ever arms this ramp.
+    if (juce::exactlyEqual(p.baseCutoff, ctlSeenCutoffHz_)
+        && juce::exactlyEqual(p.kbdTrack, ctlSeenKbd_)
+        && juce::exactlyEqual(p.baseReso, ctlSeenReso_)
+        && juce::exactlyEqual(p.filterMix, ctlSeenMix_)
+        && juce::exactlyEqual(p.filterDriveDb, ctlSeenDriveDb_))
+        return;
+
+    // Keyboard tracking in OCTAVES, the same sounding note both before and
+    // after -- only the KNOBS moved here, never the note -- so this isolates
+    // exactly what the kbd/cutoff knobs contributed. Mirrors modulatedCutoffHz's
+    // own "Keyboard tracking" term in renderBlock.
+    const auto kbdOct = [this] (float kbd)
+    {
+        return (kbd > 0.0f && currentNote >= 0)
+            ? (static_cast<float>(currentNote + octaveShift_ * 12) - 60.0f) / 12.0f * kbd
+            : 0.0f;
+    };
+
+    const int n = std::max(1, juce::roundToInt(FILTER_CTL_RAMP_MS * 0.001 * sr));
+
+    // Each "+=" is deliberate: a knob change arriving mid-ramp continues from
+    // wherever the ramp currently is rather than restarting it.
+    ctlCutoffOct_ += (std::log2(ctlSeenCutoffHz_) + kbdOct(ctlSeenKbd_))
+                   - (std::log2(p.baseCutoff)     + kbdOct(p.kbdTrack));
+    ctlReso_    += ctlSeenReso_    - p.baseReso;
+    ctlMix_     += ctlSeenMix_     - p.filterMix;
+    ctlDriveDb_ += ctlSeenDriveDb_ - p.filterDriveDb;
+
+    ctlCutoffOctStep_ = ctlCutoffOct_ / static_cast<float>(n);
+    ctlResoStep_      = ctlReso_      / static_cast<float>(n);
+    ctlMixStep_       = ctlMix_       / static_cast<float>(n);
+    ctlDriveDbStep_   = ctlDriveDb_   / static_cast<float>(n);
+    ctlRampLeft_ = n;
+
+    ctlSeenCutoffHz_ = p.baseCutoff;
+    ctlSeenKbd_      = p.kbdTrack;
+    ctlSeenReso_     = p.baseReso;
+    ctlSeenMix_      = p.filterMix;
+    ctlSeenDriveDb_  = p.filterDriveDb;
+}
+
+void SynthVoice::advanceFilterCtl() noexcept
+{
+    if (ctlRampLeft_ <= 0)
+        return;
+    if (--ctlRampLeft_ == 0)
+    {
+        // Snap to exactly 0 rather than trust n steps of float subtraction to
+        // have landed there -- mirrors advanceEnvRoute's own snap.
+        ctlCutoffOct_ = 0.0f;
+        ctlReso_ = 0.0f;
+        ctlMix_ = 0.0f;
+        ctlDriveDb_ = 0.0f;
+    }
+    else
+    {
+        ctlCutoffOct_ -= ctlCutoffOctStep_;
+        ctlReso_      -= ctlResoStep_;
+        ctlMix_       -= ctlMixStep_;
+        ctlDriveDb_   -= ctlDriveDbStep_;
+    }
+}
+
 // ── Filter-switch transition (click-free, latency-free discrete filter
 // changes) ──────────────────────────────────────────────────────────────
 // See FilterCfg / the xf* members in SynthVoice.h for the design: a discrete
@@ -1264,7 +1365,7 @@ void SynthVoice::prepareNonlinearAt (FilterBank b, int factor)
     b.preparedOs = factor;
 }
 
-void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p, bool exact)
+void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, float mix, float driveGain, bool exact)
 {
     // Configure only the active filter model — the inactive ones sit idle, so
     // touching them would just waste cycles on coefficient updates that no
@@ -1275,73 +1376,82 @@ void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cu
     {
         case FilterAlgorithm::SVF:
             b.svf.setCutoff(cutoffHz, exact);
-            b.svf.setResonance(reso);
+            b.svf.setResonance(reso, exact);
             b.svf.setType(c.type);
             b.svf.setSlope(c.slope);
-            b.svf.setMix(p.filterMix);
+            b.svf.setMix(mix);
             b.svfR.setCutoff(cutoffHz, exact);
-            b.svfR.setResonance(reso);
+            b.svfR.setResonance(reso, exact);
             b.svfR.setType(c.type);
             b.svfR.setSlope(c.slope);
-            b.svfR.setMix(p.filterMix);
+            b.svfR.setMix(mix);
             break;
         case FilterAlgorithm::Ladder:
             b.ladder.setCutoff(cutoffHz, exact);
-            b.ladder.setResonance(reso);
+            b.ladder.setResonance(reso, exact);
             b.ladder.setType(c.type);
             b.ladder.setSlope(c.slope);
-            b.ladder.setMix(p.filterMix);
+            b.ladder.setMix(mix);
             // Drive feeds the ladder's own tanh stages (Phase B stays linear
             // for Ladder), so the character comes from the filter
             // saturating, not from a shortcut pre-filter tanh.
-            b.ladder.setInputDrive(p.filterDriveGain);
+            b.ladder.setInputDrive(driveGain);
             b.ladderR.setCutoff(cutoffHz, exact);
-            b.ladderR.setResonance(reso);
+            b.ladderR.setResonance(reso, exact);
             b.ladderR.setType(c.type);
             b.ladderR.setSlope(c.slope);
-            b.ladderR.setMix(p.filterMix);
-            b.ladderR.setInputDrive(p.filterDriveGain);
+            b.ladderR.setMix(mix);
+            b.ladderR.setInputDrive(driveGain);
             break;
         case FilterAlgorithm::Warp:
             b.warp.setCutoff(cutoffHz, exact);
-            b.warp.setResonance(reso);
+            b.warp.setResonance(reso, exact);
             b.warp.setType(c.type);
             b.warp.setSlope(c.slope);
-            b.warp.setMix(p.filterMix);
+            b.warp.setMix(mix);
             b.warp.setStyle(c.warpStyle);
-            b.warp.setInputDrive(p.filterDriveGain);
+            b.warp.setInputDrive(driveGain);
             b.warpR.setCutoff(cutoffHz, exact);
-            b.warpR.setResonance(reso);
+            b.warpR.setResonance(reso, exact);
             b.warpR.setType(c.type);
             b.warpR.setSlope(c.slope);
-            b.warpR.setMix(p.filterMix);
+            b.warpR.setMix(mix);
             b.warpR.setStyle(c.warpStyle);
-            b.warpR.setInputDrive(p.filterDriveGain);
+            b.warpR.setInputDrive(driveGain);
             break;
     }
 }
 
-void SynthVoice::glideCutoff (FilterBank b, const FilterCfg& c, const CutoffGlide& g, int j, bool left, bool right)
+void SynthVoice::glideFilter (FilterBank b, const FilterCfg& c, const FilterGlide& g, int j, bool left, bool right)
 {
-    const float hz = g.hzAt(j);
+    const float hz   = g.hzAt(j);
+    const float reso = g.resoAt(j);
+    const float mix  = g.mixAt(j);
     switch (c.algorithm)
     {
         case FilterAlgorithm::SVF:
-            if (left)  b.svf.setCutoff(hz);
-            if (right) b.svfR.setCutoff(hz);
+            if (left)  { b.svf.setCutoff(hz);  b.svf.setResonance(reso);  b.svf.setMix(mix); }
+            if (right) { b.svfR.setCutoff(hz); b.svfR.setResonance(reso); b.svfR.setMix(mix); }
             break;
         case FilterAlgorithm::Ladder:
-            if (left)  b.ladder.setCutoff(hz);
-            if (right) b.ladderR.setCutoff(hz);
+        {
+            const float drive = g.driveAt(j);
+            if (left)  { b.ladder.setCutoff(hz);  b.ladder.setResonance(reso);  b.ladder.setMix(mix);  b.ladder.setInputDrive(drive); }
+            if (right) { b.ladderR.setCutoff(hz); b.ladderR.setResonance(reso); b.ladderR.setMix(mix); b.ladderR.setInputDrive(drive); }
             break;
+        }
         case FilterAlgorithm::Warp:
-            if (left)  b.warp.setCutoff(hz);
-            if (right) b.warpR.setCutoff(hz);
+        {
+            const float drive = g.driveAt(j);
+            if (left)  { b.warp.setCutoff(hz);  b.warp.setResonance(reso);  b.warp.setMix(mix);  b.warp.setInputDrive(drive); }
+            if (right) { b.warpR.setCutoff(hz); b.warpR.setResonance(reso); b.warpR.setMix(mix); b.warpR.setInputDrive(drive); }
             break;
+        }
     }
 }
 
-void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain)
+void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain,
+                                    const FilterGlide* glide)
 {
     // ── Phase B: drive stage ──
     // For SVF (linear filter): apply tanh as the saturation, optionally
@@ -1353,12 +1463,30 @@ void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, 
     // setInputDrive() in configureFilterBank, and Phase B is a no-op.
     if (c.algorithm == FilterAlgorithm::SVF && c.svfDrive)
     {
+        // A glide whose log2Drive is exactly 0 has driveAt(j) == fromDrive ==
+        // driveGain for every j -- the envelope-routing-only ramp never moves
+        // drive, so this is always the case for it. Treat it as no glide at
+        // all rather than pay exp2() per sample for a constant.
+        const bool driveIsConstant = glide == nullptr || juce::exactlyEqual(glide->log2Drive, 0.0f);
+
         if (c.svfDriveOs == FilterDriveOs::Off)
         {
-            for (int j = 0; j < n; ++j)
+            if (driveIsConstant)
             {
-                L[j] = std::tanh(L[j] * driveGain);
-                R[j] = std::tanh(R[j] * driveGain);
+                for (int j = 0; j < n; ++j)
+                {
+                    L[j] = std::tanh(L[j] * driveGain);
+                    R[j] = std::tanh(R[j] * driveGain);
+                }
+            }
+            else
+            {
+                for (int j = 0; j < n; ++j)
+                {
+                    const float g = glide->driveAt(j);
+                    L[j] = std::tanh(L[j] * g);
+                    R[j] = std::tanh(R[j] * g);
+                }
             }
         }
         else
@@ -1372,11 +1500,38 @@ void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, 
             juce::dsp::AudioBlock<const float> constBlock(block);
             auto upBlock = os->processSamplesUp(constBlock);
             const size_t upN = upBlock.getNumSamples();
-            for (size_t ch = 0; ch < 2; ++ch)
+            if (driveIsConstant)
             {
-                auto* upData = upBlock.getChannelPointer(ch);
-                for (size_t i = 0; i < upN; ++i)
-                    upData[i] = std::tanh(upData[i] * driveGain);
+                for (size_t ch = 0; ch < 2; ++ch)
+                {
+                    auto* upData = upBlock.getChannelPointer(ch);
+                    for (size_t i = 0; i < upN; ++i)
+                        upData[i] = std::tanh(upData[i] * driveGain);
+                }
+            }
+            else
+            {
+                // The glide is defined in BASE-RATE samples (FilterGlide::n ==
+                // driveLen); c.svfDriveOs picks the same factor the
+                // oversampler above was built for (X2=2, X4=4, X8=8), so an
+                // upsampled sample folds back to its base-rate index by
+                // integer division. The gain is the same across the f
+                // upsampled samples of one base-rate sample and for both
+                // channels, so it is precomputed once per base-rate sample
+                // here instead of calling exp2() 2*f times for the same number.
+                const int f = (c.svfDriveOs == FilterDriveOs::X2) ? 2
+                            : (c.svfDriveOs == FilterDriveOs::X4) ? 4
+                            :                                       8;
+                jassert(n <= SUB_BLOCK_SIZE);
+                float gBase[SUB_BLOCK_SIZE];
+                for (int j = 0; j < n; ++j)
+                    gBase[j] = glide->driveAt(j);
+                for (size_t ch = 0; ch < 2; ++ch)
+                {
+                    auto* upData = upBlock.getChannelPointer(ch);
+                    for (size_t i = 0; i < upN; ++i)
+                        upData[i] = std::tanh(upData[i] * gBase[static_cast<int>(i) / f]);
+                }
             }
             os->processSamplesDown(block);
         }
@@ -1384,7 +1539,7 @@ void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, 
 }
 
 void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo,
-                                      const CutoffGlide* glide)
+                                      const FilterGlide* glide)
 {
     // ── Phase C: per-sample filter (algorithm dispatch) ──
     // Stereo when the source is stereo (freeze): L through left filter, R
@@ -1395,13 +1550,14 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
     // right filter state to the left so a switch into a stereo source
     // (freeze going active) inherits a sensible state instead of starting
     // cold. Phase D (renderBlock) mirrors L into the right channel.
-    // With a glide (CutoffGlide), each base-rate sample, and each osf-sample
-    // group of an oversampled one, first takes its own cutoff.
+    // With a glide (FilterGlide), each base-rate sample, and each osf-sample
+    // group of an oversampled one, first takes its own cutoff, resonance,
+    // mix, and (Ladder/Warp) drive -- see glideFilter.
     const int osf = (c.algorithm != FilterAlgorithm::SVF) ? b.preparedOs : 1;
     const auto glideAt = [&] (size_t i, bool left, bool right)
     {
         if (glide != nullptr && i % static_cast<size_t>(osf) == 0)
-            glideCutoff(b, c, *glide, static_cast<int>(i / static_cast<size_t>(osf)), left, right);
+            glideFilter(b, c, *glide, static_cast<int>(i / static_cast<size_t>(osf)), left, right);
     };
 
     if (osf > 1)
@@ -1507,7 +1663,7 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
 }
 
 void SynthVoice::processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain,
-                                    const CutoffGlide* glide)
+                                    const FilterGlide* glide)
 {
     // A disabled path is the identity. The transition machinery in
     // renderBlock calls this for both banks whenever a transition is in
@@ -1516,7 +1672,7 @@ void SynthVoice::processFilterPath (FilterBank b, const FilterCfg& c, float* L, 
     if (! c.enabled || n <= 0)
         return;
 
-    processDriveStage(b, c, L, R, n, driveGain);
+    processDriveStage(b, c, L, R, n, driveGain, glide);
     processFilterStages(b, c, L, R, n, stereo, glide);
 }
 
@@ -1824,7 +1980,7 @@ void SynthVoice::completeFilterTransition()
 }
 
 void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain,
-                                          const CutoffGlide* glide)
+                                          const FilterGlide* glide)
 {
     // Same model, same rate, same drive stage (filterXfShared_, decided in
     // beginFilterTransition): running two independent drive stages and two
@@ -1838,11 +1994,12 @@ void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo
     auto xf = xfBank();
     const int osf = (liveFilterCfg_.algorithm != FilterAlgorithm::SVF) ? live.preparedOs : 1;
     const int done = filterXfFadeTotal_ - filterXfLeft_;
-    // Both banks glide alike (CutoffGlide): the same cutoff, per base-rate sample.
+    // Both banks glide alike (FilterGlide): the same cutoff, resonance, mix
+    // and drive, per base-rate sample.
     const auto glideAt = [&] (FilterBank b, const FilterCfg& c, size_t i, bool left, bool right)
     {
         if (glide != nullptr && i % static_cast<size_t>(osf) == 0)
-            glideCutoff(b, c, *glide, static_cast<int>(i / static_cast<size_t>(osf)), left, right);
+            glideFilter(b, c, *glide, static_cast<int>(i / static_cast<size_t>(osf)), left, right);
     };
 
     if (osf > 1)   // Ladder/Warp at 2x/4x: one oversampler, both models inside it
@@ -1909,7 +2066,7 @@ void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo
     }
     else           // SVF (with or without its drive stage), and Ladder/Warp at base rate
     {
-        processDriveStage(live, liveFilterCfg_, L, R, n, driveGain);   // identical for both: same drive stage
+        processDriveStage(live, liveFilterCfg_, L, R, n, driveGain, glide);   // identical for both: same drive stage
 
         float xL[SUB_BLOCK_SIZE];
         float xR[SUB_BLOCK_SIZE];
@@ -1966,6 +2123,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
     // new one before anything below reads envRouteW_/envAmtDelta_ — the
     // sampler-mode block-rate path just below is the first reader.
     updateEnvRouteGoals(p);
+    // Same idea for the continuous filter knobs (cutoff/kbd/reso/mix/drive):
+    // notice a KNOB change against what this voice last saw and arm a 1 ms
+    // declick before the coefficient block below reads ctlCutoffOct_ etc.
+    updateFilterCtlGoals(p);
 
     // Which of this voice's envelopes drive something OUTSIDE it — the delay,
     // the reverb, an LFO rate or depth? The processor reads ALL FIVE off the
@@ -2142,10 +2303,11 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
     }
 
     // The cutoff the filter runs at, from the voice's envelope and routing
-    // state as it stands when it is asked: at each sub-block boundary for the
-    // coefficients, and, while a routing/amount ramp is in flight, once more
-    // after Phase A for where the ramp has taken it by the sub-block's end
-    // (CutoffGlide in SynthVoice.h).
+    // state as it stands when it is asked, plus a filter-control ramp's own
+    // octave offset (ctlCutoffOct_) if one is in flight: at each sub-block
+    // boundary for the coefficients, and, while either ramp is running, once
+    // more after Phase A for where it has taken the cutoff by the sub-block's
+    // end (FilterGlide in SynthVoice.h).
     const auto modulatedCutoffHz = [&] (int midIdx) -> float
     {
         const float lfo1Depth = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
@@ -2213,7 +2375,23 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         // cutoff the same way every other modulation does: only when the
         // player routes it there, and only as deep as they ask.
         cutoffMod *= std::pow(2.0f, cutoffOctaves * ModCalib::kCutoffModOctaves);
+        // A filter-control ramp in flight (FILTER_CTL_RAMP_MS below) rides on
+        // top of the modulation bus above, in OCTAVES like the bus itself, so
+        // a cutoff/kbd knob's own step declicks exactly like an envelope's
+        // routing change would.
+        if (ctlRampLeft_ > 0)
+            cutoffMod *= std::exp2(ctlCutoffOct_);
         return juce::jlimit(20.0f, 20000.0f, cutoffMod);
+    };
+
+    // The resonance a filter-control ramp is gliding, read the same way at
+    // the sub-block start and (with ctlReso_/ctlRampLeft_ advanced by Phase A)
+    // again for the glide's end value -- mirrors modulatedCutoffHz just
+    // above. Only the base is here; the caller still wraps it in
+    // applyAftertouchTarget, exactly as p.baseReso itself used to be.
+    const auto ctlBaseReso = [&] () -> float
+    {
+        return ctlRampLeft_ > 0 ? juce::jlimit(0.0f, 1.0f, p.baseReso + ctlReso_) : p.baseReso;
     };
 
     int pos = 0;
@@ -2238,9 +2416,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         // ── Sub-block boundary: update filter coefficients ONCE ──
         const bool subFilterPath = liveFilterCfg_.enabled
             || (filterXf_ != FilterXf::None && xfFilterCfg_.enabled);
-        // A routing/amount ramp in flight moves the cutoff across the sub-block
-        // (CutoffGlide), not only at its boundaries.
-        const bool cutoffGlides = subFilterPath && envRouteRampLeft_ > 0;
+        // A routing/amount ramp OR a filter-control ramp in flight moves the
+        // filter across the sub-block (FilterGlide), not only at its
+        // boundaries.
+        const bool cutoffGlides = subFilterPath && (envRouteRampLeft_ > 0 || ctlRampLeft_ > 0);
         // A sub-block that glided owes an exact landing once it stops: the
         // glide's last step is one increment short of the true end value, and
         // the model's own dead-band can otherwise swallow every later push of
@@ -2248,11 +2427,21 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         const bool landExact = filterGlideOwed_ && ! cutoffGlides;
         const int midIdx = pos + subBlockLen / 2;
         float cutoffMod = 0.0f;
+        float resonanceMod = 0.0f;
+        float mixMod = p.filterMix;
+        float driveGainMod = p.filterDriveGain;
         if (subFilterPath)
         {
             cutoffMod = modulatedCutoffHz(midIdx);
-            const float resonanceMod = applyAftertouchTarget(
-                p, AftertouchTarget::Resonance, p.baseReso, expr);
+            resonanceMod = applyAftertouchTarget(p, AftertouchTarget::Resonance, ctlBaseReso(), expr);
+            // Only a KNOB change ramps (updateFilterCtlGoals watches p's raw
+            // values, never a modulated result), so mix and drive glide
+            // exactly like resonance above: the used value plus whatever is
+            // left of an earlier step, none of it while settled.
+            mixMod = ctlRampLeft_ > 0 ? juce::jlimit(0.0f, 1.0f, p.filterMix + ctlMix_) : p.filterMix;
+            driveGainMod = ctlRampLeft_ > 0
+                ? std::pow(10.0f, (p.filterDriveDb + ctlDriveDb_) * (1.0f / 20.0f))
+                : p.filterDriveGain;
             lastModulatedCutoff_ = cutoffMod;
             lastModulatedResonance_ = resonanceMod;
 
@@ -2262,10 +2451,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             // runs the newest target; only the continuous cutoff/reso/mix/
             // drive values track p every sub-block, for both.
             if (liveFilterCfg_.enabled)
-                configureFilterBank(liveBank(), liveFilterCfg_, cutoffMod, resonanceMod, p, landExact);
+                configureFilterBank(liveBank(), liveFilterCfg_, cutoffMod, resonanceMod, mixMod, driveGainMod, landExact);
             if (filterXf_ != FilterXf::None && xfFilterCfg_.enabled)
             {
-                configureFilterBank(xfBank(), xfFilterCfg_, cutoffMod, resonanceMod, p, landExact);
+                configureFilterBank(xfBank(), xfFilterCfg_, cutoffMod, resonanceMod, mixMod, driveGainMod, landExact);
                 // Once per transition, in its first sub-block: settle the xf
                 // bank's target configuration on the recent filter input
                 // before the fade makes it audible, instead of starting it
@@ -2274,7 +2463,7 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
                 // instead (see preRollFilterTransition).
                 if (filterXfPreRollPending_)
                 {
-                    preRollFilterTransition(freezeMode, p.filterDriveGain, p.filterPreRollDeadlineTicks);
+                    preRollFilterTransition(freezeMode, driveGainMod, p.filterPreRollDeadlineTicks);
                     filterXfPreRollPending_ = false;
                 }
             }
@@ -2296,6 +2485,9 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             // below reads envRouteW_ / envAmtDelta_ (see updateEnvRouteGoals, which
             // armed it, at the top of renderBlock).
             advanceEnvRoute();
+            // Same per-sample advance for the continuous filter-control ramp
+            // (updateFilterCtlGoals armed it, also at the top of renderBlock).
+            advanceFilterCtl();
             const bool routeSettled = envRouteRampLeft_ == 0;
             const float ampContour = ampEnv.processSample();
             float ampEnvVal = ampContour * p.ampAmount;
@@ -2577,10 +2769,11 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         // first sub-block, before any of this was heard.
         // See FilterCfg / beginFilterTransition / completeFilterTransition in
         // SynthVoice.h for why a discrete switch is never applied in place.
-        // Where a ramp in flight has taken the cutoff bus by the end of this
-        // sub-block (Phase A advanced it): the filter stages glide there from
-        // cutoffMod instead of stepping at the next boundary.
-        CutoffGlide glide;
+        // Where either ramp has taken the filter's cutoff/resonance/mix/drive
+        // by the end of this sub-block (Phase A advanced it): the filter
+        // stages glide there from this sub-block's start values instead of
+        // stepping at the next boundary.
+        FilterGlide glide;
         const bool glides = cutoffGlides && driveLen > 0;
         if (glides)
         {
@@ -2588,14 +2781,28 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             glide.log2Ratio = std::log2(modulatedCutoffHz(midIdx) / cutoffMod);
             glide.n = driveLen;
 
+            glide.fromReso = resonanceMod;
+            const float resonanceEnd = applyAftertouchTarget(p, AftertouchTarget::Resonance, ctlBaseReso(), expr);
+            glide.dReso = resonanceEnd - resonanceMod;
+
+            glide.fromMix = mixMod;
+            const float mixEnd = ctlRampLeft_ > 0 ? juce::jlimit(0.0f, 1.0f, p.filterMix + ctlMix_) : p.filterMix;
+            glide.dMix = mixEnd - mixMod;
+
+            glide.fromDrive = driveGainMod;
+            const float driveEnd = ctlRampLeft_ > 0
+                ? std::pow(10.0f, (p.filterDriveDb + ctlDriveDb_) * (1.0f / 20.0f))
+                : p.filterDriveGain;
+            glide.log2Drive = std::log2(driveEnd / driveGainMod);
+
             filterGlideOwed_ = true;
         }
-        const CutoffGlide* const glideIn = glides ? &glide : nullptr;
+        const FilterGlide* const glideIn = glides ? &glide : nullptr;
 
         const bool xfRun = filterXf_ != FilterXf::None && driveLen > 0;
         if (xfRun && filterXfShared_)
         {
-            processFilterPathShared(output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain, glideIn);
+            processFilterPathShared(output + pos, outputRBuf, driveLen, freezeMode, driveGainMod, glideIn);
         }
         else
         {
@@ -2606,10 +2813,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
                 std::copy(output + pos, output + pos + driveLen, xfL);
                 std::copy(outputRBuf, outputRBuf + driveLen, xfR);
             }
-            processFilterPath(liveBank(), liveFilterCfg_, output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain, glideIn);
+            processFilterPath(liveBank(), liveFilterCfg_, output + pos, outputRBuf, driveLen, freezeMode, driveGainMod, glideIn);
             if (xfRun)
             {
-                processFilterPath(xfBank(), xfFilterCfg_, xfL, xfR, driveLen, freezeMode, p.filterDriveGain, glideIn);
+                processFilterPath(xfBank(), xfFilterCfg_, xfL, xfR, driveLen, freezeMode, driveGainMod, glideIn);
                 if (filterXf_ == FilterXf::Fade)
                 {
                     // Raised cosine, summing to one: both paths filter the same input, so they are

@@ -38,8 +38,9 @@ public:
      *  have swallowed, and must land it exactly. */
     void setCutoff(float hz, bool force = false);
 
-    /** Set resonance (0-1), mapped internally to Q 0.5-18. */
-    void setResonance(float r);
+    /** Set resonance (0-1), mapped internally to Q 0.5-18. `force` skips the
+     *  dead-band test, same reason as setCutoff. */
+    void setResonance(float r, bool force = false);
 
     /** Set filter type: 0=Lowpass, 1=Highpass, 2=Bandpass. */
     void setType(int type);

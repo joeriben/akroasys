@@ -93,9 +93,10 @@ public:
     // LadderResoLaw in BlockParams.h for the inversion and the measurement.
     // Unlike the old delayed-feedback structure, the threshold is cutoff-
     // independent — no per-frequency boost needed.
-    void setResonance(float r)
+    // `force` skips the dead-band test, same reason as setCutoff.
+    void setResonance(float r, bool force = false)
     {
-        if (std::abs(r - lastReso) < 0.001f) return;
+        if (! force && std::abs(r - lastReso) < 0.001f) return;
         lastReso = juce::jlimit(0.0f, 1.0f, r);
         k = LadderResoLaw::feedback(lastReso, LadderResoLaw::kLadderPole);
     }

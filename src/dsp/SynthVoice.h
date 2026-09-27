@@ -477,17 +477,19 @@ private:
     // pre-roll; completeFilterTransition promotes the xf bank to live once
     // the fade ends.
     void prepareNonlinearAt (FilterBank b, int factor);
-    void configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p, bool exact = false);
-    // While an envelope routing/amount ramp is in flight (ENV_ROUTE_RAMP_MS
-    // below), the cutoff does not stand for the 32 samples of a sub-block and
-    // step at the next boundary: it moves from the sub-block's coefficients
-    // (fromHz) to where the ramp has taken the cutoff bus by the sub-block's
-    // end, geometrically, once per base-rate sample. A cutoff step on a
+    void configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, float mix, float driveGain, bool exact = false);
+    // While either ramp is in flight -- the envelope routing/amount ramp
+    // above (ENV_ROUTE_RAMP_MS) or a filter-control ramp (FILTER_CTL_RAMP_MS
+    // below) -- the filter does not stand for the 32 samples of a sub-block
+    // and step at the next boundary: cutoff, resonance, mix and drive all
+    // move from the sub-block's coefficients (the "from" values) to where
+    // they stand by the sub-block's end, once per base-rate sample --
+    // cutoff and drive geometrically, resonance and mix linearly. A step on a
     // sounding filter steps its output (the TPT SVF's low-pass output carries
     // g times its band-pass state), and a 1 ms ramp read only at sub-block
     // boundaries arrives as two such steps, up to a couple of octaves each.
-    // Outside a ramp nothing glides and the filter stages run as before.
-    struct CutoffGlide
+    // Outside either ramp nothing glides and the filter stages run as before.
+    struct FilterGlide
     {
         float fromHz = 20000.0f;
         float log2Ratio = 0.0f;   // log2 (end cutoff / fromHz)
@@ -496,19 +498,41 @@ private:
         {
             return fromHz * std::exp2 (log2Ratio * static_cast<float> (j) / static_cast<float> (n));
         }
+        float fromReso = 0.0f;
+        float dReso = 0.0f;       // end minus start, linear
+        float resoAt (int j) const noexcept
+        {
+            return fromReso + dReso * static_cast<float> (j) / static_cast<float> (n);
+        }
+        float fromMix = 1.0f;
+        float dMix = 0.0f;        // end minus start, linear
+        float mixAt (int j) const noexcept
+        {
+            return fromMix + dMix * static_cast<float> (j) / static_cast<float> (n);
+        }
+        float fromDrive = 1.0f;
+        float log2Drive = 0.0f;   // log2 (end drive gain / fromDrive)
+        float driveAt (int j) const noexcept
+        {
+            return fromDrive * std::exp2 (log2Drive * static_cast<float> (j) / static_cast<float> (n));
+        }
     };
-    // Sets the active model's cutoff, left and/or right, to g's value at base-rate sample j.
-    static void glideCutoff (FilterBank b, const FilterCfg& c, const CutoffGlide& g, int j, bool left, bool right);
-    void processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain);
+    // Sets the active model's cutoff/resonance/mix, left and/or right, and
+    // (Ladder/Warp only) input drive, to g's value at base-rate sample j. The
+    // SVF's drive is its tanh stage in processDriveStage, not a filter
+    // setter -- see processDriveStage's own glide handling.
+    static void glideFilter (FilterBank b, const FilterCfg& c, const FilterGlide& g, int j, bool left, bool right);
+    void processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain,
+                            const FilterGlide* glide = nullptr);
     void processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo,
-                              const CutoffGlide* glide = nullptr);
+                              const FilterGlide* glide = nullptr);
     void processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain,
-                            const CutoffGlide* glide = nullptr);
+                            const FilterGlide* glide = nullptr);
     void preRollFilterTransition (bool stereo, float driveGain, long long deadlineTicks);
     void beginFilterTransition (const FilterCfg& target);
     void completeFilterTransition();
     void processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain,
-                                  const CutoffGlide* glide = nullptr);
+                                  const FilterGlide* glide = nullptr);
 
     // ── Envelope routing/amount de-zippering ────────────────────────────
     // `p.ampTarget` / `p.modEnv[m].target` and their amounts are read straight
@@ -548,7 +572,7 @@ private:
     // The declick minimum (1 ms) -- the only smoothing this project allows
     // without the owner's explicit order (mirrors FILTER_XF_FADE_MS above).
     // The DCA ramp runs per sample, and so does the cutoff while it runs
-    // (CutoffGlide above), although renderBlock evaluates the cutoff bus only
+    // (FilterGlide above), although renderBlock evaluates the cutoff bus only
     // at SUB_BLOCK_SIZE (32-sample) boundaries.
     static constexpr float ENV_ROUTE_RAMP_MS = 1.0f;
 
@@ -583,6 +607,48 @@ private:
                                                  float ampEnvVal, const float* modEnvVals);
     static float computeDcaGainRouted (const float (&w)[kNumEnvSources][EnvTarget::kCount],
                                        float ampEnvVal, const float* modEnvVals, float keyGate);
+
+    // ── Continuous filter-control de-zippering ──────────────────────────
+    // renderBlock reads p.baseCutoff/p.kbdTrack/p.baseReso/p.filterMix/
+    // p.filterDriveDb (and the processor-derived p.filterDriveGain) once per
+    // sub-block, straight into the coefficient block -- a Snap recall, a
+    // preset change, automation or a MIDI CC that moves one of them
+    // therefore steps a sounding filter's coefficients and clicks (measured:
+    // 15..35 dB of HF above the settled sound on a recall's cutoff/kbd/reso/
+    // drive step). This follows the same 1 ms declick the envelope routing/
+    // amount ramp above uses, but keyed on the KNOB values alone --
+    // envelopes, LFOs, drift, aftertouch and key position keep modulating
+    // exactly as now, ramp or no ramp, since none of those ever touch
+    // ctlSeen*_.
+    static constexpr float FILTER_CTL_RAMP_MS = 1.0f;   // declick minimum, as ENV_ROUTE_RAMP_MS above
+
+    // The five knob values this voice last took from p -- what a change is
+    // noticed against (updateFilterCtlGoals).
+    float ctlSeenCutoffHz_ = 20000.0f;
+    float ctlSeenKbd_ = 0.0f;
+    float ctlSeenReso_ = 0.0f;
+    float ctlSeenMix_ = 1.0f;
+    float ctlSeenDriveDb_ = 0.0f;
+    // Used minus p, in the unit each control glides in: cutoff (with key
+    // tracking) in octaves and drive in dB, so both move geometrically;
+    // resonance and mix linearly. Exactly 0 once settled, the remaining step
+    // mid-ramp -- same shape as envAmtDelta_ above.
+    float ctlCutoffOct_ = 0.0f;   // octaves
+    float ctlReso_ = 0.0f;        // linear
+    float ctlMix_ = 0.0f;         // linear
+    float ctlDriveDb_ = 0.0f;     // dB
+    float ctlCutoffOctStep_ = 0.0f;
+    float ctlResoStep_ = 0.0f;
+    float ctlMixStep_ = 0.0f;
+    float ctlDriveDbStep_ = 0.0f;
+    int  ctlRampLeft_ = 0;                // samples left; 0 = settled
+    bool filterCtlAdopt_ = true;          // next renderBlock takes p's knob values outright
+
+    // Per renderBlock call: notices a knob change against the seen values and
+    // arms a new ramp from wherever the current one is.
+    void updateFilterCtlGoals (const BlockParams& p);
+    // Per sample: advances the ramp one step, snapping to 0 when it ends.
+    void advanceFilterCtl() noexcept;
 
     NoiseGenerator noise;
 

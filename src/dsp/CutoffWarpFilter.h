@@ -87,9 +87,10 @@ public:
     // with that scale rather than fighting it: what gets evened out is where the
     // travel starts to bite, and each style keeps its own compression above the
     // knee — that difference IS the style.
-    void setResonance(float r)
+    // `force` skips the dead-band test, same reason as setCutoff.
+    void setResonance(float r, bool force = false)
     {
-        if (std::abs(r - lastReso) < 0.001f) return;
+        if (! force && std::abs(r - lastReso) < 0.001f) return;
         lastReso = juce::jlimit(0.0f, 1.0f, r);
         updateFeedback();
     }
