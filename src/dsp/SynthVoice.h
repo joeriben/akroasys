@@ -391,14 +391,22 @@ private:
     // and once the pre-roll has run.
     bool filterXfPreRollPending_ = false;
     // True right after prepare()/reset(), and for a note struck from idle
-    // (noteOn): nothing is sounding through the filter yet, so the next
-    // renderBlock takes p's configuration outright instead of transitioning
-    // into it — there is nothing to fade FROM. Also set by beginRestartFade (a
-    // fresh strike on a voice that is still sounding): the restart fade already
-    // carries the output from the old note's last sample into the new one, so
-    // the new note takes the configuration in force from its first sample
-    // instead of starting out through the old one.
+    // (noteOn): nothing is sounding through the filter (or an envelope
+    // routing) yet, so the next renderBlock takes p's configuration outright
+    // instead of transitioning into it — there is nothing to fade FROM. Also
+    // set by beginRestartFade (a fresh strike on a voice that is still
+    // sounding): the restart fade already carries the output from the old
+    // note's last sample into the new one, so the new note takes the
+    // configuration in force from its first sample instead of starting out
+    // through the old one.
     bool filterCfgAdopt_ = true;
+
+    // Set when a sub-block glided the cutoff; the next sub-block that does not
+    // glide pushes its value with force (the filter models' setCutoff force
+    // parameter) and clears this -- a glide's last step is one increment
+    // short of the true end value, and the model's own dead-band would
+    // otherwise swallow every later push of that same value.
+    bool filterGlideOwed_ = false;
 
     // Ring buffer of the last FILTER_XF_PREROLL_MS of DRY filter input — the
     // signal any filter bank sees before Phase B/C run — written
@@ -469,14 +477,112 @@ private:
     // pre-roll; completeFilterTransition promotes the xf bank to live once
     // the fade ends.
     void prepareNonlinearAt (FilterBank b, int factor);
-    void configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p);
+    void configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p, bool exact = false);
+    // While an envelope routing/amount ramp is in flight (ENV_ROUTE_RAMP_MS
+    // below), the cutoff does not stand for the 32 samples of a sub-block and
+    // step at the next boundary: it moves from the sub-block's coefficients
+    // (fromHz) to where the ramp has taken the cutoff bus by the sub-block's
+    // end, geometrically, once per base-rate sample. A cutoff step on a
+    // sounding filter steps its output (the TPT SVF's low-pass output carries
+    // g times its band-pass state), and a 1 ms ramp read only at sub-block
+    // boundaries arrives as two such steps, up to a couple of octaves each.
+    // Outside a ramp nothing glides and the filter stages run as before.
+    struct CutoffGlide
+    {
+        float fromHz = 20000.0f;
+        float log2Ratio = 0.0f;   // log2 (end cutoff / fromHz)
+        int   n = 1;              // base-rate samples it spans
+        float hzAt (int j) const noexcept
+        {
+            return fromHz * std::exp2 (log2Ratio * static_cast<float> (j) / static_cast<float> (n));
+        }
+    };
+    // Sets the active model's cutoff, left and/or right, to g's value at base-rate sample j.
+    static void glideCutoff (FilterBank b, const FilterCfg& c, const CutoffGlide& g, int j, bool left, bool right);
     void processDriveStage (FilterBank b, const FilterCfg& c, float* L, float* R, int n, float driveGain);
-    void processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo);
-    void processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain);
+    void processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo,
+                              const CutoffGlide* glide = nullptr);
+    void processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain,
+                            const CutoffGlide* glide = nullptr);
     void preRollFilterTransition (bool stereo, float driveGain, long long deadlineTicks);
     void beginFilterTransition (const FilterCfg& target);
     void completeFilterTransition();
-    void processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain);
+    void processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain,
+                                  const CutoffGlide* glide = nullptr);
+
+    // ── Envelope routing/amount de-zippering ────────────────────────────
+    // `p.ampTarget` / `p.modEnv[m].target` and their amounts are read straight
+    // per sample elsewhere in this class (`acc += val` when `target == X`); a
+    // Snap recall, a knob, automation or a MIDI CC that changes one while a
+    // note sounds therefore steps the destination from one sample to the next.
+    // For the destinations where that step is a discontinuity — DCA, Filter,
+    // NoiseLevel, and the three LFO depths — renderBlock instead follows a
+    // routing or amount change over ENV_ROUTE_RAMP_MS: routing as a crossfade
+    // of per-target weights (old target's weight 1→0, new target's 0→1,
+    // together), amount as a ramp of the STEP: the voice uses p's amount,
+    // drift and LFO included, plus the difference to the amount it was using
+    // when the change arrived, and that difference shrinks to zero over the
+    // ramp. A change is noticed on the Amt parameter itself
+    // (BlockParams::amountBase / ampAmountBase), so drift or an LFO moving an
+    // Amt passes through exactly as before and starts no ramp. Pitch, Scan,
+    // and everything the processor reads off this voice (delay/reverb/LFO
+    // rate/depth) are deliberately not part of this.
+    //
+    // Envelope sources in routing order: 0 = ENV 1 (amp), 1..4 = ENV 2..5 (modEnvs[0..3]).
+    static constexpr int kNumEnvSources = 1 + kNumModEnvs;
+    float envRouteW_[kNumEnvSources][EnvTarget::kCount] {};      // current weight per target id (0..1)
+    float envRouteWStep_[kNumEnvSources][EnvTarget::kCount] {};  // per-sample increment while ramping
+    int   envRouteGoalTarget_[kNumEnvSources] {};                // target the running/last ramp heads to
+    float envAmtGoal_[kNumEnvSources] {};                        // Amt parameter the running/last ramp heads to
+    // The amount the last rendered sample used, where a new ramp starts. Taken
+    // from the amounts themselves rather than rebuilt from the parameter: drift
+    // and LFO offsets are clamped into [0, 1] with the parameter, so the old
+    // parameter plus the new offset is not always the amount that was heard.
+    float envAmtLast_[kNumEnvSources] {};
+    float envAmtDelta_[kNumEnvSources] {};                       // used minus p's amount; exactly 0 once settled
+    float envAmtDeltaStep_[kNumEnvSources] {};
+    int   envRouteRampLeft_ = 0;                                 // samples left; 0 = settled
+    bool  envRouteAdopt_ = true;                                 // next renderBlock takes p's routing outright
+    float lastAmpEnvLevelSm_ = 0.0f;                             // de-zippered twins of lastAmpEnvLevel /
+    float lastModValSm_[kNumModEnvs] = {};                       // lastModVal_ for the ramped destinations
+    // The declick minimum (1 ms) -- the only smoothing this project allows
+    // without the owner's explicit order (mirrors FILTER_XF_FADE_MS above).
+    // The DCA ramp runs per sample, and so does the cutoff while it runs
+    // (CutoffGlide above), although renderBlock evaluates the cutoff bus only
+    // at SUB_BLOCK_SIZE (32-sample) boundaries.
+    static constexpr float ENV_ROUTE_RAMP_MS = 1.0f;
+
+    // Weights are indexed by the EnvTarget id; an id outside
+    // [0, EnvTarget::kCount) gets no weight (treated as None). Pure reads of
+    // `p`, so private STATIC helpers -- mirrors filterCfgFrom above.
+    static int   envSourceTarget (const BlockParams& p, int e);
+    // Whether target t is one of the destinations the ramp above actually
+    // declicks (DCA, Filter, NoiseLevel, the three LFO depths) -- the ones
+    // read through envRouteW_/envAmtEff rather than straight off p elsewhere
+    // in this class. Pitch, Scan and the processor-side targets (delay/
+    // reverb/LFO rate) are read straight everywhere, so a routing change onto
+    // or off one of those, with neither end in this list, is taken outright
+    // instead of arming a ramp (updateEnvRouteGoals) -- it would only cost
+    // CPU and start the cutoff glide for a destination that cannot hear it.
+    static bool  envTargetRamped (int t);
+    static float envSourceAmount (const BlockParams& p, int e);
+    static float envSourceAmountBase (const BlockParams& p, int e);
+    // Settled (envRouteRampLeft_ == 0): source e's amount, verbatim. Mid-ramp:
+    // p's amount plus the part of the step still left (envAmtDelta_).
+    float envAmtEff (const BlockParams& p, int e) const;
+    // Per renderBlock call: notices a routing/amount change against the
+    // running goal and arms a new ramp from wherever the current one is.
+    void updateEnvRouteGoals (const BlockParams& p);
+    // Per sample: advances the ramp one step, snapping to the goal when it ends.
+    void advanceEnvRoute() noexcept;
+    // An LFO depth and the DCA gain from the routing weights instead of p's
+    // targets. computeDcaGain in SynthVoice.cpp stays on p's targets for
+    // updateSamplerPreStretchNorm, which analyses the patch, not this voice.
+    static float computeEffectiveLfoDepthRouted (const float (&w)[kNumEnvSources][EnvTarget::kCount],
+                                                 int target, float baseDepth,
+                                                 float ampEnvVal, const float* modEnvVals);
+    static float computeDcaGainRouted (const float (&w)[kNumEnvSources][EnvTarget::kCount],
+                                       float ampEnvVal, const float* modEnvVals, float keyGate);
 
     NoiseGenerator noise;
 

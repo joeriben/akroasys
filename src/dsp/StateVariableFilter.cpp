@@ -119,10 +119,11 @@ void T5ynthFilter::setMix(float mix)
     cachedDryGain = std::cos(currentMix * halfPi);
 }
 
-void T5ynthFilter::setCutoff(float hz)
+void T5ynthFilter::setCutoff(float hz, bool force)
 {
-    // Skip redundant coefficient update (std::tan is expensive)
-    if (std::abs(hz - lastSetCutoff) < 0.5f) return;
+    // Skip redundant coefficient update (std::tan is expensive), unless the
+    // caller needs this exact value to land (force -- see the declaration).
+    if (! force && std::abs(hz - lastSetCutoff) < 0.5f) return;
     lastSetCutoff = hz;
     filter1.setCutoffFrequency(hz);
     filter2.setCutoffFrequency(hz);

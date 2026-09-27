@@ -2219,6 +2219,10 @@ struct ModEnvParams
     // choice indices. Attack in [-2,+1], decay and release in [-1,+2].
     float attackBend = 0.0f, decayBend = 0.0f, releaseBend = 1.0f;
     bool  loop = false;
+    // The Amt parameter itself, before drift/LFO modulation. SynthVoice ramps
+    // an amount change it sees HERE, so the drift/LFO riding on `amount`
+    // passes through unsmoothed and starts no ramp.
+    float amountBase = 0.0f;
 };
 
 /**
@@ -2230,6 +2234,10 @@ struct BlockParams
     // Amp envelope
     float ampAttack = 0.0f, ampDecay = 0.0f, ampSustain = 1.0f, ampRelease = 0.0f;
     float ampAmount = 1.0f;
+    // The Amt parameter itself, before drift/LFO modulation. SynthVoice ramps
+    // an amount change it sees HERE, so the drift/LFO riding on `ampAmount`
+    // passes through unsmoothed and starts no ramp.
+    float ampAmountBase = 1.0f;
     // Global velocity → envelope-peak amount [0..1], default 1.0 (full): scales
     // EVERY envelope's note-on peak by (1−velAmt)+velAmt·velocity, so velocity
     // drives the env's depth on any target (DCA loudness, filter, pitch, scan…).

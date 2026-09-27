@@ -4053,6 +4053,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     bp.ampSustain = paramCache.ampSustain->load();
     bp.ampRelease = paramCache.ampRelease->load();
     bp.ampAmount  = paramCache.ampAmount->load();
+    bp.ampAmountBase = bp.ampAmount;
     bp.velAmt     = paramCache.velAmt->load();
     bp.ampTarget  = static_cast<int>(paramCache.ampTarget->load());
     bp.ampLoop    = paramCache.ampLoop->load() > 0.5f;
@@ -4072,6 +4073,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         dst.sustain = src.sustain->load();
         dst.release = src.release->load();
         dst.amount  = src.amount->load();
+        dst.amountBase = dst.amount;
         dst.target  = static_cast<int>(src.target->load());
         dst.loop    = src.loop->load() > 0.5f;
         dst.attackBend  = src.attackCurve->load();

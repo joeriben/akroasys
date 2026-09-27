@@ -69,9 +69,12 @@ public:
         y1 = y2 = y3 = y4 = 0.0f;
     }
 
-    void setCutoff(float hz)
+    // `force` skips the dead-band test below -- for a caller that approached
+    // this value in steps the dead-band may have swallowed, and must land it
+    // exactly.
+    void setCutoff(float hz, bool force = false)
     {
-        if (std::abs(hz - lastCutoff) < 0.5f) return;
+        if (! force && std::abs(hz - lastCutoff) < 0.5f) return;
         lastCutoff = hz;
         updateCoeffs();
     }

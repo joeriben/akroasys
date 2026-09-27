@@ -33,8 +33,10 @@ public:
      *  audio-thread safe. */
     void takeStagesFrom (const T5ynthFilter& src, bool stage1, bool stage2, bool onePole);
 
-    /** Set cutoff frequency in Hz. */
-    void setCutoff(float hz);
+    /** Set cutoff frequency in Hz. `force` skips the dead-band test below --
+     *  for a caller that approached this value in steps the dead-band may
+     *  have swallowed, and must land it exactly. */
+    void setCutoff(float hz, bool force = false);
 
     /** Set resonance (0-1), mapped internally to Q 0.5-18. */
     void setResonance(float r);

@@ -93,18 +93,6 @@ float aftertouchDrive(const BlockParams& p, int target, const ExprSources& src)
         : 0.0f;
 }
 
-float computeEffectiveLfoDepth(const BlockParams& p, int target, float baseDepth,
-                               float ampEnvVal, const float* modEnvVals)
-{
-    float depth = baseDepth;
-    if (p.ampTarget == target)
-        depth = applyNormalizedOffset(depth, ampEnvVal);
-    for (int m = 0; m < kNumModEnvs; ++m)
-        if (p.modEnv[m].target == target)
-            depth = applyNormalizedOffset(depth, modEnvVals[m]);
-    return depth;
-}
-
 // [0..1]-range additive targets (Scan, Resonance, Noise, Env Sustain, LFO Depth).
 float applyAftertouchTarget(const BlockParams& p, int target, float baseValue,
                             const ExprSources& src)
@@ -274,6 +262,21 @@ void SynthVoice::prepare(double sampleRate, int samplesPerBlock)
     filterCfgAdopt_ = true;
     filterXfPreRollPending_ = false;
 
+    // Same story for the envelope routing/amount ramp (see noteOn /
+    // envRouteAdopt_): nothing is sounding through it yet, so the next
+    // renderBlock takes p's routing outright. The de-zippered twins are
+    // copied from the raw levels they mirror rather than zeroed: prepare()
+    // can land mid-note (a host prepareToPlay while a note is held survives
+    // the sample-rate change), and a block-rate reader that runs before
+    // Phase A writes them for real this block (the sampler-mode pitch
+    // computation below) would otherwise see a phantom zero next to a real,
+    // sounding envelope level.
+    envRouteAdopt_ = true;
+    envRouteRampLeft_ = 0;
+    lastAmpEnvLevelSm_ = lastAmpEnvLevel;
+    for (int m = 0; m < kNumModEnvs; ++m)
+        lastModValSm_[m] = lastModVal_[m];
+
     // Csound engine frequency smoother (Phase-1 spec D7): give it the sample
     // rate up front (mirroring every other per-voice component above) and
     // seed it at the voice's default pitch so it reads a valid value even
@@ -327,6 +330,9 @@ void SynthVoice::reset()
     filterXfPreRollPending_ = false;
     filterHistPos_ = 0;
     filterHistCount_ = 0;
+    // Same story for the envelope routing/amount ramp (see prepare()).
+    envRouteAdopt_ = true;
+    envRouteRampLeft_ = 0;
     active = false;
     noteHeld = false;
     keyGate_.setCurrentAndTargetValue(0.0f);
@@ -334,6 +340,8 @@ void SynthVoice::reset()
     aftertouch_ = 0.0f;
     lastAmpEnvLevel = 0.0f;
     for (auto& v : lastModVal_) v = 0.0f;
+    lastAmpEnvLevelSm_ = 0.0f;
+    for (auto& v : lastModValSm_) v = 0.0f;
     lastModulatedCutoff_ = 20000.0f;
     lastModulatedResonance_ = 0.0f;
     lastModulatedScan_ = 0.0f;
@@ -353,6 +361,7 @@ void SynthVoice::beginRestartFade()
 {
     // A fresh strike on a sounding voice: see filterCfgAdopt_ in SynthVoice.h.
     filterCfgAdopt_ = true;
+    envRouteAdopt_ = true;
     restartFadeTailSample_  = lastOutputSample_;
     restartFadeTailSampleR_ = lastOutputSampleR_;
     restartFadeTotalSamples_ = std::max(1,
@@ -384,15 +393,16 @@ void SynthVoice::noteOn(int note, float velocity, bool legato)
     currentVelocity = velocity;
     noteHeld = true;
     active = true;
-    // A note from idle has nothing sounding through the filter to fade from:
-    // the next renderBlock takes p's filter configuration outright rather
-    // than transitioning into it (see FilterCfg / renderBlock). A steal or
-    // retrigger of a sounding voice does the same through beginRestartFade,
-    // which VoiceManager calls first; only a legato continuation keeps
-    // whatever transition is already running or due.
+    // A note from idle has nothing sounding through the filter (or an
+    // envelope routing) to fade from: the next renderBlock takes p's filter
+    // configuration outright rather than transitioning into it (see FilterCfg
+    // / renderBlock). A steal or retrigger of a sounding voice does the same
+    // through beginRestartFade, which VoiceManager calls first; only a legato
+    // continuation keeps whatever transition is already running or due.
     if (! wasActive)
     {
         filterCfgAdopt_ = true;
+        envRouteAdopt_ = true;
         // A note from idle has no recent input of its own to pre-roll from.
         filterHistPos_ = 0;
         filterHistCount_ = 0;
@@ -606,23 +616,44 @@ float SynthVoice::pitchBusRatioFromRawLfo(const BlockParams& p,
     // per host block when no events fall inside it) that lag is well under a
     // millisecond of envelope travel and inaudible -- whereas the LFO term it
     // carries is the whole point.
-    const float d1 = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
-        computeEffectiveLfoDepth(p, EnvTarget::LFO1Depth, p.lfo1Depth,
-                                 lastAmpEnvLevel, lastModVal_), expr);
-    const float d2 = applyAftertouchTarget(p, AftertouchTarget::LFO2Depth,
-        computeEffectiveLfoDepth(p, EnvTarget::LFO2Depth, p.lfo2Depth,
-                                 lastAmpEnvLevel, lastModVal_), expr);
-    const float d3 = applyAftertouchTarget(p, AftertouchTarget::LFO3Depth,
-        computeEffectiveLfoDepth(p, EnvTarget::LFO3Depth, p.lfo3Depth,
-                                 lastAmpEnvLevel, lastModVal_), expr);
-    const float semis = pitchBusSemitones(p, lastAmpEnvLevel, lastModVal_,
-                                          lfo1Raw * d1, lfo2Raw * d2, lfo3Raw * d3);
+    //
     // Clamped like the freeze path's own pitch ratio: a full-scale bus is +-1
     // octave, but several sources summing can exceed that, and the orchestra's
     // `limit kfreq, 20, 12000` would then pin the note to a rail rather than
     // bend it.
-    return juce::jlimit(0.0625f, 16.0f,
-                        std::pow(2.0f, semis * ModCalib::kPitchModSemitones / 12.0f));
+    auto ratio = [&] (const float (&w)[kNumEnvSources][EnvTarget::kCount],
+                      float ampLevel, const float* modLevels) -> float
+    {
+        const float d1 = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
+            computeEffectiveLfoDepthRouted(w, EnvTarget::LFO1Depth, p.lfo1Depth, ampLevel, modLevels), expr);
+        const float d2 = applyAftertouchTarget(p, AftertouchTarget::LFO2Depth,
+            computeEffectiveLfoDepthRouted(w, EnvTarget::LFO2Depth, p.lfo2Depth, ampLevel, modLevels), expr);
+        const float d3 = applyAftertouchTarget(p, AftertouchTarget::LFO3Depth,
+            computeEffectiveLfoDepthRouted(w, EnvTarget::LFO3Depth, p.lfo3Depth, ampLevel, modLevels), expr);
+        const float semis = pitchBusSemitones(p, lastAmpEnvLevel, lastModVal_,
+                                              lfo1Raw * d1, lfo2Raw * d2, lfo3Raw * d3);
+        return juce::jlimit(0.0625f, 16.0f,
+                            std::pow(2.0f, semis * ModCalib::kPitchModSemitones / 12.0f));
+    };
+
+    if (envRouteAdopt_)
+    {
+        // VoiceManager calls this before the voice's first renderBlock of a
+        // new note, so while adopt is pending envRouteW_ still describes the
+        // SLOT'S PREVIOUS note. Reproduce what renderBlock's own adopt branch
+        // is about to do instead: a one-hot weight built from p's own targets.
+        // That branch also copies the raw levels into their de-zippered twins,
+        // so the raw levels used below are the same arithmetic either way.
+        float w[kNumEnvSources][EnvTarget::kCount] {};
+        for (int e = 0; e < kNumEnvSources; ++e)
+        {
+            const int t = envSourceTarget(p, e);
+            if (t >= 0 && t < EnvTarget::kCount)
+                w[e][t] = 1.0f;
+        }
+        return ratio(w, lastAmpEnvLevel, lastModVal_);
+    }
+    return ratio(envRouteW_, lastAmpEnvLevelSm_, lastModValSm_);
 }
 
 float SynthVoice::readCsoundFreq(int samplesToAdvance)
@@ -962,6 +993,226 @@ void SynthVoice::updateSamplerPreStretchNorm(const BlockParams& p)
     samplerPreStretchNormDirty_ = false;
 }
 
+// ── Envelope routing/amount de-zippering ──────────────────────────────────
+// See the envRouteW_ / envAmtDelta_ member comments in SynthVoice.h for the
+// design. e indexes envelope sources: 0 = ENV 1 (amp), 1..4 = ENV 2..5.
+
+int SynthVoice::envSourceTarget (const BlockParams& p, int e)
+{
+    return e == 0 ? p.ampTarget : p.modEnv[e - 1].target;
+}
+
+float SynthVoice::envSourceAmount (const BlockParams& p, int e)
+{
+    return e == 0 ? p.ampAmount : p.modEnv[e - 1].amount;
+}
+
+float SynthVoice::envSourceAmountBase (const BlockParams& p, int e)
+{
+    return e == 0 ? p.ampAmountBase : p.modEnv[e - 1].amountBase;
+}
+
+float SynthVoice::envAmtEff (const BlockParams& p, int e) const
+{
+    if (envRouteRampLeft_ == 0)
+        return envSourceAmount(p, e);
+    // Mid-ramp: p's amount, drift and LFO included, plus the part of the step
+    // still left. Both lie in [0, 1] at the ramp's start, so the clamp only
+    // catches drift moving p's amount during the ramp itself.
+    return juce::jlimit(0.0f, 1.0f, envSourceAmount(p, e) + envAmtDelta_[e]);
+}
+
+void SynthVoice::updateEnvRouteGoals (const BlockParams& p)
+{
+    int tgt[kNumEnvSources];
+    float base[kNumEnvSources];
+    for (int e = 0; e < kNumEnvSources; ++e)
+    {
+        tgt[e]  = envSourceTarget(p, e);
+        base[e] = envSourceAmountBase(p, e);
+    }
+
+    if (envRouteAdopt_)
+    {
+        // Nothing is sounding through this routing yet (note from idle,
+        // prepare/reset): take it outright, no ramp.
+        for (int e = 0; e < kNumEnvSources; ++e)
+        {
+            for (int t = 0; t < EnvTarget::kCount; ++t)
+                envRouteW_[e][t] = 0.0f;
+            if (tgt[e] >= 0 && tgt[e] < EnvTarget::kCount)
+                envRouteW_[e][tgt[e]] = 1.0f;
+            envAmtGoal_[e] = base[e];
+            envAmtLast_[e] = envSourceAmount(p, e);
+            envAmtDelta_[e] = 0.0f;
+            envRouteGoalTarget_[e] = tgt[e];
+        }
+        // The de-zippered twins may still hold the SLOT'S PREVIOUS note (freed
+        // mid-ramp, or mid-transition via beginRestartFade), and two readers run
+        // before this call's Phase A sets them for real: the sampler-mode pitch
+        // (computed once per renderBlock, before the sub-block loop) and the
+        // first sub-block's cutoff (modulatedCutoffHz). Settled, twin == raw
+        // everywhere else, so this just makes that true immediately.
+        lastAmpEnvLevelSm_ = lastAmpEnvLevel;
+        for (int m = 0; m < kNumModEnvs; ++m)
+            lastModValSm_[m] = lastModVal_[m];
+        envRouteRampLeft_ = 0;
+        envRouteAdopt_ = false;
+        return;
+    }
+
+    // Per source: did ITS OWN routing move against the running goal? Only
+    // this test arms anything -- a neighbour's change never restarts a
+    // source that did not itself move.
+    bool changed[kNumEnvSources];
+    for (int e = 0; e < kNumEnvSources; ++e)
+        changed[e] = tgt[e] != envRouteGoalTarget_[e] || ! juce::exactlyEqual(base[e], envAmtGoal_[e]);
+
+    // A change entirely between non-ramped destinations (Pitch, Scan, and the
+    // processor-side targets: delay/reverb/LFO rate) has nothing to declick --
+    // those are read straight off p everywhere, never through envRouteW_/
+    // envAmtEff. Take it outright instead of arming a ramp: a ramp there would
+    // only spend CPU and (via cutoffGlides below) start the per-sample cutoff
+    // glide for a destination that cannot hear it.
+    // Not while the source still carries weight on a ramped destination,
+    // though: a change off one less than a ramp ago is still fading it out,
+    // and taking the next change outright would cut that fade off in a step.
+    const auto carriesRampedWeight = [this] (int e)
+    {
+        for (int t = 0; t < EnvTarget::kCount; ++t)
+            if (envTargetRamped(t) && ! juce::exactlyEqual(envRouteW_[e][t], 0.0f))
+                return true;
+        return false;
+    };
+    bool armRamp = false;
+    for (int e = 0; e < kNumEnvSources; ++e)
+    {
+        if (! changed[e])
+            continue;
+        if (! envTargetRamped(envRouteGoalTarget_[e]) && ! envTargetRamped(tgt[e])
+            && ! carriesRampedWeight(e))
+        {
+            for (int t = 0; t < EnvTarget::kCount; ++t)
+                envRouteW_[e][t] = 0.0f;
+            if (tgt[e] >= 0 && tgt[e] < EnvTarget::kCount)
+                envRouteW_[e][tgt[e]] = 1.0f;
+            for (int t = 0; t < EnvTarget::kCount; ++t)
+                envRouteWStep_[e][t] = 0.0f;
+            envAmtGoal_[e] = base[e];
+            envRouteGoalTarget_[e] = tgt[e];
+            // envAmtDelta_[e] is left as it is: no ramped destination reads this
+            // source (no weight on one, now or before), and nothing here starts it.
+            changed[e] = false;
+        }
+        else
+        {
+            armRamp = true;
+        }
+    }
+    if (! armRamp)
+        return;
+
+    // A new goal -- from WHEREVER the ramp currently is, so a second change
+    // mid-ramp stays continuous rather than restarting from the last target.
+    // Only a source that ITSELF changed takes a new amount delta, measured
+    // against what the last sample actually used (envAmtLast_). An unchanged
+    // source (including one just taken outright above) keeps its current
+    // envAmtDelta_ -- exactly 0 once settled, or whatever is left of an
+    // earlier ramp -- and only its step is rebuilt, so it still reaches 0
+    // exactly when this ramp ends. That is what makes the routing comment's
+    // claim true: drift or an LFO moving an Amt (which moves envSourceAmount
+    // but never envAmtGoal_/the base) never restarts a ramp on a source a
+    // neighbour's change happens to be re-arming.
+    const int n = std::max(1, juce::roundToInt(ENV_ROUTE_RAMP_MS * 0.001 * sr));
+    for (int e = 0; e < kNumEnvSources; ++e)
+    {
+        for (int t = 0; t < EnvTarget::kCount; ++t)
+        {
+            const float goal = (t == tgt[e]) ? 1.0f : 0.0f;
+            envRouteWStep_[e][t] = (goal - envRouteW_[e][t]) / static_cast<float>(n);
+        }
+        if (changed[e])
+            envAmtDelta_[e] = envAmtLast_[e] - envSourceAmount(p, e);
+        envAmtDeltaStep_[e] = envAmtDelta_[e] / static_cast<float>(n);
+        envAmtGoal_[e] = base[e];
+        envRouteGoalTarget_[e] = tgt[e];
+    }
+    envRouteRampLeft_ = n;
+}
+
+// Ramped destinations: the ones renderBlock reads through envRouteW_/
+// envAmtEff rather than straight off p (see the class comment above). Kept as
+// a plain OR rather than a lookup table -- six names read faster than an
+// array only EnvTarget.h's constants explain.
+bool SynthVoice::envTargetRamped (int t)
+{
+    return t == EnvTarget::DCA || t == EnvTarget::Filter || t == EnvTarget::NoiseLevel
+        || t == EnvTarget::LFO1Depth || t == EnvTarget::LFO2Depth || t == EnvTarget::LFO3Depth;
+}
+
+void SynthVoice::advanceEnvRoute() noexcept
+{
+    if (envRouteRampLeft_ <= 0)
+        return;
+    if (--envRouteRampLeft_ == 0)
+    {
+        // Snap to the exact goal rather than trust n steps of float addition
+        // to have landed there -- the steady-state test right after this
+        // depends on the weights being EXACTLY 0.0f/1.0f, not merely close.
+        for (int e = 0; e < kNumEnvSources; ++e)
+        {
+            for (int t = 0; t < EnvTarget::kCount; ++t)
+                envRouteW_[e][t] = (t == envRouteGoalTarget_[e]) ? 1.0f : 0.0f;
+            envAmtDelta_[e] = 0.0f;
+        }
+    }
+    else
+    {
+        for (int e = 0; e < kNumEnvSources; ++e)
+        {
+            for (int t = 0; t < EnvTarget::kCount; ++t)
+                envRouteW_[e][t] += envRouteWStep_[e][t];
+            envAmtDelta_[e] -= envAmtDeltaStep_[e];
+        }
+    }
+}
+
+// An LFO's depth with the envelopes routed to it added on: weighted by
+// envRouteW_ rather than read from p.ampTarget/p.modEnv[m].target, so a
+// routing change ramps instead of stepping. Amp envelope first, then ENV 2..5,
+// the running depth clamped into [0, 1] after each, and a zero weight adds
+// nothing, so settled (every weight exactly 0.0f or 1.0f) this is the sum of
+// the envelopes routed to that LFO's depth.
+float SynthVoice::computeEffectiveLfoDepthRouted (const float (&w)[kNumEnvSources][EnvTarget::kCount],
+                                                  int target, float baseDepth,
+                                                  float ampEnvVal, const float* modEnvVals)
+{
+    float depth = baseDepth;
+    if (! juce::exactlyEqual(w[0][target], 0.0f))
+        depth = applyNormalizedOffset(depth, w[0][target] * ampEnvVal);
+    for (int m = 0; m < kNumModEnvs; ++m)
+        if (! juce::exactlyEqual(w[m + 1][target], 0.0f))
+            depth = applyNormalizedOffset(depth, w[m + 1][target] * modEnvVals[m]);
+    return depth;
+}
+
+// computeDcaGain above with the routing weights instead of p's targets. The
+// XOR its comment describes holds whenever envRouteW_[0][DCA] is 0.0f or
+// 1.0f; while a routing change is in flight the level is a linear blend of
+// the envelope and the key instead of a switch between them.
+float SynthVoice::computeDcaGainRouted (const float (&w)[kNumEnvSources][EnvTarget::kCount],
+                                        float ampEnvVal, const float* modEnvVals, float keyGate)
+{
+    const float a = w[0][EnvTarget::DCA];
+    float vca = a >= 1.0f ? ampEnvVal
+              : a <= 0.0f ? keyGate
+              : a * ampEnvVal + (1.0f - a) * keyGate;
+    for (int m = 0; m < kNumModEnvs; ++m)
+        if (! juce::exactlyEqual(w[m + 1][EnvTarget::DCA], 0.0f))
+            vca *= (1.0f + w[m + 1][EnvTarget::DCA] * modEnvVals[m]);
+    return std::max(0.0f, vca);
+}
+
 // ── Filter-switch transition (click-free, latency-free discrete filter
 // changes) ──────────────────────────────────────────────────────────────
 // See FilterCfg / the xf* members in SynthVoice.h for the design: a discrete
@@ -1013,7 +1264,7 @@ void SynthVoice::prepareNonlinearAt (FilterBank b, int factor)
     b.preparedOs = factor;
 }
 
-void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p)
+void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cutoffHz, float reso, const BlockParams& p, bool exact)
 {
     // Configure only the active filter model — the inactive ones sit idle, so
     // touching them would just waste cycles on coefficient updates that no
@@ -1023,19 +1274,19 @@ void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cu
     switch (c.algorithm)
     {
         case FilterAlgorithm::SVF:
-            b.svf.setCutoff(cutoffHz);
+            b.svf.setCutoff(cutoffHz, exact);
             b.svf.setResonance(reso);
             b.svf.setType(c.type);
             b.svf.setSlope(c.slope);
             b.svf.setMix(p.filterMix);
-            b.svfR.setCutoff(cutoffHz);
+            b.svfR.setCutoff(cutoffHz, exact);
             b.svfR.setResonance(reso);
             b.svfR.setType(c.type);
             b.svfR.setSlope(c.slope);
             b.svfR.setMix(p.filterMix);
             break;
         case FilterAlgorithm::Ladder:
-            b.ladder.setCutoff(cutoffHz);
+            b.ladder.setCutoff(cutoffHz, exact);
             b.ladder.setResonance(reso);
             b.ladder.setType(c.type);
             b.ladder.setSlope(c.slope);
@@ -1044,7 +1295,7 @@ void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cu
             // for Ladder), so the character comes from the filter
             // saturating, not from a shortcut pre-filter tanh.
             b.ladder.setInputDrive(p.filterDriveGain);
-            b.ladderR.setCutoff(cutoffHz);
+            b.ladderR.setCutoff(cutoffHz, exact);
             b.ladderR.setResonance(reso);
             b.ladderR.setType(c.type);
             b.ladderR.setSlope(c.slope);
@@ -1052,20 +1303,40 @@ void SynthVoice::configureFilterBank (FilterBank b, const FilterCfg& c, float cu
             b.ladderR.setInputDrive(p.filterDriveGain);
             break;
         case FilterAlgorithm::Warp:
-            b.warp.setCutoff(cutoffHz);
+            b.warp.setCutoff(cutoffHz, exact);
             b.warp.setResonance(reso);
             b.warp.setType(c.type);
             b.warp.setSlope(c.slope);
             b.warp.setMix(p.filterMix);
             b.warp.setStyle(c.warpStyle);
             b.warp.setInputDrive(p.filterDriveGain);
-            b.warpR.setCutoff(cutoffHz);
+            b.warpR.setCutoff(cutoffHz, exact);
             b.warpR.setResonance(reso);
             b.warpR.setType(c.type);
             b.warpR.setSlope(c.slope);
             b.warpR.setMix(p.filterMix);
             b.warpR.setStyle(c.warpStyle);
             b.warpR.setInputDrive(p.filterDriveGain);
+            break;
+    }
+}
+
+void SynthVoice::glideCutoff (FilterBank b, const FilterCfg& c, const CutoffGlide& g, int j, bool left, bool right)
+{
+    const float hz = g.hzAt(j);
+    switch (c.algorithm)
+    {
+        case FilterAlgorithm::SVF:
+            if (left)  b.svf.setCutoff(hz);
+            if (right) b.svfR.setCutoff(hz);
+            break;
+        case FilterAlgorithm::Ladder:
+            if (left)  b.ladder.setCutoff(hz);
+            if (right) b.ladderR.setCutoff(hz);
+            break;
+        case FilterAlgorithm::Warp:
+            if (left)  b.warp.setCutoff(hz);
+            if (right) b.warpR.setCutoff(hz);
             break;
     }
 }
@@ -1112,7 +1383,8 @@ void SynthVoice::processDriveStage (FilterBank b, const FilterCfg& c, float* L, 
     }
 }
 
-void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo)
+void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo,
+                                      const CutoffGlide* glide)
 {
     // ── Phase C: per-sample filter (algorithm dispatch) ──
     // Stereo when the source is stereo (freeze): L through left filter, R
@@ -1123,7 +1395,14 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
     // right filter state to the left so a switch into a stereo source
     // (freeze going active) inherits a sensible state instead of starting
     // cold. Phase D (renderBlock) mirrors L into the right channel.
+    // With a glide (CutoffGlide), each base-rate sample, and each osf-sample
+    // group of an oversampled one, first takes its own cutoff.
     const int osf = (c.algorithm != FilterAlgorithm::SVF) ? b.preparedOs : 1;
+    const auto glideAt = [&] (size_t i, bool left, bool right)
+    {
+        if (glide != nullptr && i % static_cast<size_t>(osf) == 0)
+            glideCutoff(b, c, *glide, static_cast<int>(i / static_cast<size_t>(osf)), left, right);
+    };
 
     if (osf > 1)
     {
@@ -1143,15 +1422,15 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
 
         if (c.algorithm == FilterAlgorithm::Ladder)
         {
-            for (size_t i = 0; i < upN; ++i) up0[i] = b.ladder.processSample(up0[i]);
+            for (size_t i = 0; i < upN; ++i) { glideAt(i, true, false); up0[i] = b.ladder.processSample(up0[i]); }
             if (stereo)
-                for (size_t i = 0; i < upN; ++i) up1[i] = b.ladderR.processSample(up1[i]);
+                for (size_t i = 0; i < upN; ++i) { glideAt(i, false, true); up1[i] = b.ladderR.processSample(up1[i]); }
         }
         else // Warp
         {
-            for (size_t i = 0; i < upN; ++i) up0[i] = b.warp.processSample(up0[i]);
+            for (size_t i = 0; i < upN; ++i) { glideAt(i, true, false); up0[i] = b.warp.processSample(up0[i]); }
             if (stereo)
-                for (size_t i = 0; i < upN; ++i) up1[i] = b.warpR.processSample(up1[i]);
+                for (size_t i = 0; i < upN; ++i) { glideAt(i, false, true); up1[i] = b.warpR.processSample(up1[i]); }
         }
 
         os->processSamplesDown(block);
@@ -1172,6 +1451,7 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
             case FilterAlgorithm::SVF:
                 for (int j = 0; j < n; ++j)
                 {
+                    glideAt(static_cast<size_t>(j), true, true);
                     L[j] = b.svf.processSample(L[j]);
                     R[j] = b.svfR.processSample(R[j]);
                 }
@@ -1179,6 +1459,7 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
             case FilterAlgorithm::Ladder:
                 for (int j = 0; j < n; ++j)
                 {
+                    glideAt(static_cast<size_t>(j), true, true);
                     L[j] = b.ladder.processSample(L[j]);
                     R[j] = b.ladderR.processSample(R[j]);
                 }
@@ -1186,6 +1467,7 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
             case FilterAlgorithm::Warp:
                 for (int j = 0; j < n; ++j)
                 {
+                    glideAt(static_cast<size_t>(j), true, true);
                     L[j] = b.warp.processSample(L[j]);
                     R[j] = b.warpR.processSample(R[j]);
                 }
@@ -1198,24 +1480,34 @@ void SynthVoice::processFilterStages (FilterBank b, const FilterCfg& c, float* L
         {
             case FilterAlgorithm::SVF:
                 for (int j = 0; j < n; ++j)
+                {
+                    glideAt(static_cast<size_t>(j), true, false);
                     L[j] = b.svf.processSample(L[j]);
+                }
                 b.svfR = b.svf;
                 break;
             case FilterAlgorithm::Ladder:
                 for (int j = 0; j < n; ++j)
+                {
+                    glideAt(static_cast<size_t>(j), true, false);
                     L[j] = b.ladder.processSample(L[j]);
+                }
                 b.ladderR = b.ladder;
                 break;
             case FilterAlgorithm::Warp:
                 for (int j = 0; j < n; ++j)
+                {
+                    glideAt(static_cast<size_t>(j), true, false);
                     L[j] = b.warp.processSample(L[j]);
+                }
                 b.warpR = b.warp;
                 break;
         }
     }
 }
 
-void SynthVoice::processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain)
+void SynthVoice::processFilterPath (FilterBank b, const FilterCfg& c, float* L, float* R, int n, bool stereo, float driveGain,
+                                    const CutoffGlide* glide)
 {
     // A disabled path is the identity. The transition machinery in
     // renderBlock calls this for both banks whenever a transition is in
@@ -1225,7 +1517,7 @@ void SynthVoice::processFilterPath (FilterBank b, const FilterCfg& c, float* L, 
         return;
 
     processDriveStage(b, c, L, R, n, driveGain);
-    processFilterStages(b, c, L, R, n, stereo);
+    processFilterStages(b, c, L, R, n, stereo, glide);
 }
 
 // Once per transition, in its first sub-block (called from the coefficient
@@ -1531,7 +1823,8 @@ void SynthVoice::completeFilterTransition()
     filterXfShared_ = false;
 }
 
-void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain)
+void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo, float driveGain,
+                                          const CutoffGlide* glide)
 {
     // Same model, same rate, same drive stage (filterXfShared_, decided in
     // beginFilterTransition): running two independent drive stages and two
@@ -1545,6 +1838,12 @@ void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo
     auto xf = xfBank();
     const int osf = (liveFilterCfg_.algorithm != FilterAlgorithm::SVF) ? live.preparedOs : 1;
     const int done = filterXfFadeTotal_ - filterXfLeft_;
+    // Both banks glide alike (CutoffGlide): the same cutoff, per base-rate sample.
+    const auto glideAt = [&] (FilterBank b, const FilterCfg& c, size_t i, bool left, bool right)
+    {
+        if (glide != nullptr && i % static_cast<size_t>(osf) == 0)
+            glideCutoff(b, c, *glide, static_cast<int>(i / static_cast<size_t>(osf)), left, right);
+    };
 
     if (osf > 1)   // Ladder/Warp at 2x/4x: one oversampler, both models inside it
     {
@@ -1564,22 +1863,22 @@ void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo
 
         if (liveFilterCfg_.algorithm == FilterAlgorithm::Ladder)
         {
-            for (size_t i = 0; i < upN; ++i) up0[i]  = live.ladder.processSample(up0[i]);
-            for (size_t i = 0; i < upN; ++i) xUp0[i] = xf.ladder.processSample(xUp0[i]);
+            for (size_t i = 0; i < upN; ++i) { glideAt(live, liveFilterCfg_, i, true, false); up0[i]  = live.ladder.processSample(up0[i]); }
+            for (size_t i = 0; i < upN; ++i) { glideAt(xf,   xfFilterCfg_,   i, true, false); xUp0[i] = xf.ladder.processSample(xUp0[i]); }
             if (stereo)
             {
-                for (size_t i = 0; i < upN; ++i) up1[i]  = live.ladderR.processSample(up1[i]);
-                for (size_t i = 0; i < upN; ++i) xUp1[i] = xf.ladderR.processSample(xUp1[i]);
+                for (size_t i = 0; i < upN; ++i) { glideAt(live, liveFilterCfg_, i, false, true); up1[i]  = live.ladderR.processSample(up1[i]); }
+                for (size_t i = 0; i < upN; ++i) { glideAt(xf,   xfFilterCfg_,   i, false, true); xUp1[i] = xf.ladderR.processSample(xUp1[i]); }
             }
         }
         else // Warp
         {
-            for (size_t i = 0; i < upN; ++i) up0[i]  = live.warp.processSample(up0[i]);
-            for (size_t i = 0; i < upN; ++i) xUp0[i] = xf.warp.processSample(xUp0[i]);
+            for (size_t i = 0; i < upN; ++i) { glideAt(live, liveFilterCfg_, i, true, false); up0[i]  = live.warp.processSample(up0[i]); }
+            for (size_t i = 0; i < upN; ++i) { glideAt(xf,   xfFilterCfg_,   i, true, false); xUp0[i] = xf.warp.processSample(xUp0[i]); }
             if (stereo)
             {
-                for (size_t i = 0; i < upN; ++i) up1[i]  = live.warpR.processSample(up1[i]);
-                for (size_t i = 0; i < upN; ++i) xUp1[i] = xf.warpR.processSample(xUp1[i]);
+                for (size_t i = 0; i < upN; ++i) { glideAt(live, liveFilterCfg_, i, false, true); up1[i]  = live.warpR.processSample(up1[i]); }
+                for (size_t i = 0; i < upN; ++i) { glideAt(xf,   xfFilterCfg_,   i, false, true); xUp1[i] = xf.warpR.processSample(xUp1[i]); }
             }
         }
 
@@ -1617,8 +1916,8 @@ void SynthVoice::processFilterPathShared (float* L, float* R, int n, bool stereo
         std::copy(L, L + n, xL);
         std::copy(R, R + n, xR);
 
-        processFilterStages(live, liveFilterCfg_, L, R, n, stereo);
-        processFilterStages(xf,   xfFilterCfg_,   xL, xR, n, stereo);
+        processFilterStages(live, liveFilterCfg_, L, R, n, stereo, glide);
+        processFilterStages(xf,   xfFilterCfg_,   xL, xR, n, stereo, glide);
 
         if (filterXf_ == FilterXf::Fade)
         {
@@ -1662,6 +1961,11 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             std::memset(outputRight, 0, sizeof(float) * static_cast<size_t>(numSamples));
         return;
     }
+
+    // Notice a routing/amount change against the running ramp goal and arm a
+    // new one before anything below reads envRouteW_/envAmtDelta_ — the
+    // sampler-mode block-rate path just below is the first reader.
+    updateEnvRouteGoals(p);
 
     // Which of this voice's envelopes drive something OUTSIDE it — the delay,
     // the reverb, an LFO rate or depth? The processor reads ALL FIVE off the
@@ -1733,14 +2037,14 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         // Block-rate pitch modulation (computed at block midpoint)
         int mid = numSamples / 2;
         const float lfo1Depth = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
-            computeEffectiveLfoDepth(p, EnvTarget::LFO1Depth, p.lfo1Depth,
-                                     lastAmpEnvLevel, lastModVal_), expr);
+            computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO1Depth, p.lfo1Depth,
+                                           lastAmpEnvLevelSm_, lastModValSm_), expr);
         const float lfo2Depth = applyAftertouchTarget(p, AftertouchTarget::LFO2Depth,
-            computeEffectiveLfoDepth(p, EnvTarget::LFO2Depth, p.lfo2Depth,
-                                     lastAmpEnvLevel, lastModVal_), expr);
+            computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO2Depth, p.lfo2Depth,
+                                           lastAmpEnvLevelSm_, lastModValSm_), expr);
         const float lfo3Depth = applyAftertouchTarget(p, AftertouchTarget::LFO3Depth,
-            computeEffectiveLfoDepth(p, EnvTarget::LFO3Depth, p.lfo3Depth,
-                                     lastAmpEnvLevel, lastModVal_), expr);
+            computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO3Depth, p.lfo3Depth,
+                                           lastAmpEnvLevelSm_, lastModValSm_), expr);
         // ── Pitch modulation bus ──────────────────────────────────────
         // One full-scale (ModCalib::kPitchModSemitones) applied once as an
         // equal-tempered ratio. See SynthVoice::pitchBusSemitones for why the
@@ -1825,6 +2129,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         || (filterXf_ != FilterXf::None && xfFilterCfg_.enabled);
     if (anyFilterPath)
     {
+        // Only the settled cutoff bus reads these, and settled, the routing
+        // weights are exactly p's targets (a ramp ends on the goal
+        // updateEnvRouteGoals took from this block's p); mid-ramp the bus
+        // evaluates the curve itself.
         if (p.ampTarget == EnvTarget::Filter)
             ampCutoffCurve = ModCalib::cutoffDepthCurve(p.ampAmount);
         for (int m = 0; m < kNumModEnvs; ++m)
@@ -1832,6 +2140,81 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
                 modCutoffCurve[m] = ModCalib::cutoffDepthCurve(p.modEnv[m].amount);
         atCutoffCurve = ModCalib::cutoffDepthCurve(p.aftertouchTargetAmt[AftertouchTarget::Cutoff]);
     }
+
+    // The cutoff the filter runs at, from the voice's envelope and routing
+    // state as it stands when it is asked: at each sub-block boundary for the
+    // coefficients, and, while a routing/amount ramp is in flight, once more
+    // after Phase A for where the ramp has taken it by the sub-block's end
+    // (CutoffGlide in SynthVoice.h).
+    const auto modulatedCutoffHz = [&] (int midIdx) -> float
+    {
+        const float lfo1Depth = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
+            computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO1Depth, p.lfo1Depth,
+                                           lastAmpEnvLevelSm_, lastModValSm_), expr);
+        const float lfo2Depth = applyAftertouchTarget(p, AftertouchTarget::LFO2Depth,
+            computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO2Depth, p.lfo2Depth,
+                                           lastAmpEnvLevelSm_, lastModValSm_), expr);
+        const float lfo3Depth = applyAftertouchTarget(p, AftertouchTarget::LFO3Depth,
+            computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO3Depth, p.lfo3Depth,
+                                           lastAmpEnvLevelSm_, lastModValSm_), expr);
+        float lfo1Mid = lfo1Buf[midIdx] * lfo1Depth;
+        float lfo2Mid = lfo2Buf[midIdx] * lfo2Depth;
+        float lfo3Mid = lfo3Buf[midIdx] * lfo3Depth;
+
+        float cutoffMod = p.baseCutoff;
+
+        // Keyboard tracking. At kbd=1 the cutoff follows pitch 1:1 — one
+        // octave of cutoff per octave of note, pivot at middle C (note 60);
+        // kbd=0 leaves the cutoff fixed. Tracks the SOUNDING note (currentNote
+        // plus the global OCT transpose octaveShift_), so the filter follows the
+        // same pitch the oscillator plays.
+        if (p.kbdTrack > 0.0f && currentNote >= 0)
+        {
+            const float soundingNote = static_cast<float>(currentNote + octaveShift_ * 12);
+            cutoffMod *= std::pow(2.0f, (soundingNote - 60.0f) / 12.0f * p.kbdTrack);
+        }
+
+        // ── Cutoff modulation bus ──────────────────────────────────────
+        // Every source contributes a NORMALIZED octave-fraction summed into a
+        // single exponent; the destination owns the one full-scale, applied
+        // once. Full depth == ±ModCalib::kCutoffModOctaves octaves — ten, the
+        // whole 20 Hz–20 kHz span, so a filter envelope can open a filter from
+        // any base. Each source's own DEPTH knob travels the shared curve
+        // (ModCalib::cutoffDepthCurve) on the way in; its SHAPE does not, so
+        // an envelope contour and an LFO waveform stay linear in octaves.
+        //   env  → lastAmpEnvLevel etc. are already amount-scaled (peak == Amt)
+        //   LFO  → lfo*Mid are already depth-scaled (lfoBuf · depth)
+        //   Drift→ p.driftFilterOffset is normalized AND already curved
+        //          (DriftLFO::depthForTarget owns the same law)
+        //   expr → signed axis·amount drive in [-1..+1]. Which axis (V/X/Y/Z)
+        //          is the target's own choice; timbre used to arrive here on
+        //          a private path with no depth control, and no longer does.
+        float cutoffOctaves = 0.0f;
+        // Settled, the weights are exactly 0 or 1 and this is the envelope
+        // routed to the filter times its block-constant curve. Mid-ramp the
+        // weight is a crossfade fraction and the curve follows the ramped
+        // amount (envAmtEff).
+        const bool routeSettled = envRouteRampLeft_ == 0;
+        if (! juce::exactlyEqual(envRouteW_[0][EnvTarget::Filter], 0.0f))
+            cutoffOctaves += envRouteW_[0][EnvTarget::Filter] * lastAmpEnvLevelSm_
+                * (routeSettled ? ampCutoffCurve : ModCalib::cutoffDepthCurve(envAmtEff(p, 0)));
+        for (int m = 0; m < kNumModEnvs; ++m)
+            if (! juce::exactlyEqual(envRouteW_[m + 1][EnvTarget::Filter], 0.0f))
+                cutoffOctaves += envRouteW_[m + 1][EnvTarget::Filter] * lastModValSm_[m]
+                    * (routeSettled ? modCutoffCurve[m] : ModCalib::cutoffDepthCurve(envAmtEff(p, m + 1)));
+        if (p.lfo1Target == LfoTarget::Filter) cutoffOctaves += lfo1Mid * ModCalib::cutoffDepthCurve(lfo1Depth);
+        if (p.lfo2Target == LfoTarget::Filter) cutoffOctaves += lfo2Mid * ModCalib::cutoffDepthCurve(lfo2Depth);
+        if (p.lfo3Target == LfoTarget::Filter) cutoffOctaves += lfo3Mid * ModCalib::cutoffDepthCurve(lfo3Depth);
+        cutoffOctaves += p.driftFilterOffset;
+        cutoffOctaves += aftertouchDrive(p, AftertouchTarget::Cutoff, expr) * atCutoffCurve;
+        // MPE timbre used to add its own ±4 octaves here, unconditionally and
+        // with no depth control — the CC 74 travel WAS the amount. It is now
+        // the Y source of the expression matrix instead, so it reaches the
+        // cutoff the same way every other modulation does: only when the
+        // player routes it there, and only as deep as they ask.
+        cutoffMod *= std::pow(2.0f, cutoffOctaves * ModCalib::kCutoffModOctaves);
+        return juce::jlimit(20.0f, 20000.0f, cutoffMod);
+    };
 
     int pos = 0;
     while (pos < numSamples && active)
@@ -1855,69 +2238,19 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         // ── Sub-block boundary: update filter coefficients ONCE ──
         const bool subFilterPath = liveFilterCfg_.enabled
             || (filterXf_ != FilterXf::None && xfFilterCfg_.enabled);
+        // A routing/amount ramp in flight moves the cutoff across the sub-block
+        // (CutoffGlide), not only at its boundaries.
+        const bool cutoffGlides = subFilterPath && envRouteRampLeft_ > 0;
+        // A sub-block that glided owes an exact landing once it stops: the
+        // glide's last step is one increment short of the true end value, and
+        // the model's own dead-band can otherwise swallow every later push of
+        // that same value (see setCutoff's force parameter).
+        const bool landExact = filterGlideOwed_ && ! cutoffGlides;
+        const int midIdx = pos + subBlockLen / 2;
+        float cutoffMod = 0.0f;
         if (subFilterPath)
         {
-            int midIdx = pos + subBlockLen / 2;
-            const float lfo1Depth = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
-                computeEffectiveLfoDepth(p, EnvTarget::LFO1Depth, p.lfo1Depth,
-                                         lastAmpEnvLevel, lastModVal_), expr);
-            const float lfo2Depth = applyAftertouchTarget(p, AftertouchTarget::LFO2Depth,
-                computeEffectiveLfoDepth(p, EnvTarget::LFO2Depth, p.lfo2Depth,
-                                         lastAmpEnvLevel, lastModVal_), expr);
-            const float lfo3Depth = applyAftertouchTarget(p, AftertouchTarget::LFO3Depth,
-                computeEffectiveLfoDepth(p, EnvTarget::LFO3Depth, p.lfo3Depth,
-                                         lastAmpEnvLevel, lastModVal_), expr);
-            float lfo1Mid = lfo1Buf[midIdx] * lfo1Depth;
-            float lfo2Mid = lfo2Buf[midIdx] * lfo2Depth;
-            float lfo3Mid = lfo3Buf[midIdx] * lfo3Depth;
-
-            float cutoffMod = p.baseCutoff;
-
-            // Keyboard tracking. At kbd=1 the cutoff follows pitch 1:1 — one
-            // octave of cutoff per octave of note, pivot at middle C (note 60);
-            // kbd=0 leaves the cutoff fixed. Tracks the SOUNDING note (currentNote
-            // plus the global OCT transpose octaveShift_), so the filter follows the
-            // same pitch the oscillator plays.
-            if (p.kbdTrack > 0.0f && currentNote >= 0)
-            {
-                const float soundingNote = static_cast<float>(currentNote + octaveShift_ * 12);
-                cutoffMod *= std::pow(2.0f, (soundingNote - 60.0f) / 12.0f * p.kbdTrack);
-            }
-
-            // ── Cutoff modulation bus ──────────────────────────────────────
-            // Every source contributes a NORMALIZED octave-fraction summed into a
-            // single exponent; the destination owns the one full-scale, applied
-            // once. Full depth == ±ModCalib::kCutoffModOctaves octaves — ten, the
-            // whole 20 Hz–20 kHz span, so a filter envelope can open a filter from
-            // any base. Each source's own DEPTH knob travels the shared curve
-            // (ModCalib::cutoffDepthCurve) on the way in; its SHAPE does not, so
-            // an envelope contour and an LFO waveform stay linear in octaves.
-            //   env  → lastAmpEnvLevel etc. are already amount-scaled (peak == Amt)
-            //   LFO  → lfo*Mid are already depth-scaled (lfoBuf · depth)
-            //   Drift→ p.driftFilterOffset is normalized AND already curved
-            //          (DriftLFO::depthForTarget owns the same law)
-            //   expr → signed axis·amount drive in [-1..+1]. Which axis (V/X/Y/Z)
-            //          is the target's own choice; timbre used to arrive here on
-            //          a private path with no depth control, and no longer does.
-            float cutoffOctaves = 0.0f;
-            if (p.ampTarget  == EnvTarget::Filter)
-                cutoffOctaves += lastAmpEnvLevel * ampCutoffCurve;
-            for (int m = 0; m < kNumModEnvs; ++m)
-                if (p.modEnv[m].target == EnvTarget::Filter)
-                    cutoffOctaves += lastModVal_[m] * modCutoffCurve[m];
-            if (p.lfo1Target == LfoTarget::Filter) cutoffOctaves += lfo1Mid * ModCalib::cutoffDepthCurve(lfo1Depth);
-            if (p.lfo2Target == LfoTarget::Filter) cutoffOctaves += lfo2Mid * ModCalib::cutoffDepthCurve(lfo2Depth);
-            if (p.lfo3Target == LfoTarget::Filter) cutoffOctaves += lfo3Mid * ModCalib::cutoffDepthCurve(lfo3Depth);
-            cutoffOctaves += p.driftFilterOffset;
-            cutoffOctaves += aftertouchDrive(p, AftertouchTarget::Cutoff, expr) * atCutoffCurve;
-            // MPE timbre used to add its own ±4 octaves here, unconditionally and
-            // with no depth control — the CC 74 travel WAS the amount. It is now
-            // the Y source of the expression matrix instead, so it reaches the
-            // cutoff the same way every other modulation does: only when the
-            // player routes it there, and only as deep as they ask.
-            cutoffMod *= std::pow(2.0f, cutoffOctaves * ModCalib::kCutoffModOctaves);
-
-            cutoffMod = juce::jlimit(20.0f, 20000.0f, cutoffMod);
+            cutoffMod = modulatedCutoffHz(midIdx);
             const float resonanceMod = applyAftertouchTarget(
                 p, AftertouchTarget::Resonance, p.baseReso, expr);
             lastModulatedCutoff_ = cutoffMod;
@@ -1929,10 +2262,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             // runs the newest target; only the continuous cutoff/reso/mix/
             // drive values track p every sub-block, for both.
             if (liveFilterCfg_.enabled)
-                configureFilterBank(liveBank(), liveFilterCfg_, cutoffMod, resonanceMod, p);
+                configureFilterBank(liveBank(), liveFilterCfg_, cutoffMod, resonanceMod, p, landExact);
             if (filterXf_ != FilterXf::None && xfFilterCfg_.enabled)
             {
-                configureFilterBank(xfBank(), xfFilterCfg_, cutoffMod, resonanceMod, p);
+                configureFilterBank(xfBank(), xfFilterCfg_, cutoffMod, resonanceMod, p, landExact);
                 // Once per transition, in its first sub-block: settle the xf
                 // bank's target configuration on the recent filter input
                 // before the fade makes it audible, instead of starting it
@@ -1945,6 +2278,8 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
                     filterXfPreRollPending_ = false;
                 }
             }
+            if (landExact)
+                filterGlideOwed_ = false;
         }
 
         // ── Phase A (per sample): generate raw osc/noise and cache VCA ──
@@ -1957,28 +2292,58 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         bool goingIdle = false;
         for (int i = pos; i < subBlockEnd; ++i)
         {
-            float ampEnvVal = ampEnv.processSample() * p.ampAmount;
+            // Advance the routing/amount ramp once per sample, before anything
+            // below reads envRouteW_ / envAmtDelta_ (see updateEnvRouteGoals, which
+            // armed it, at the top of renderBlock).
+            advanceEnvRoute();
+            const bool routeSettled = envRouteRampLeft_ == 0;
+            const float ampContour = ampEnv.processSample();
+            float ampEnvVal = ampContour * p.ampAmount;
             // The key's own control voltage, advanced every sample next to the
             // envelopes — unconditionally, so the ramp stays sample-locked no
             // matter which branch of computeDcaGain reads it this block.
             keyGate_.setTargetValue(noteHeld ? 1.0f : 0.0f);
             const float keyGate = keyGate_.getNextValue();
+            float modContour[kNumModEnvs];
             float modEnvVals[kNumModEnvs];
             for (int m = 0; m < kNumModEnvs; ++m)
-                modEnvVals[m] = modEnvs[m].processSample() * p.modEnv[m].amount;
+            {
+                modContour[m] = modEnvs[m].processSample();
+                modEnvVals[m] = modContour[m] * p.modEnv[m].amount;
+            }
+            // De-zippered twins of the two values above, for the destinations this
+            // section ramps (DCA / Filter / NoiseLevel / the three LFO depths).
+            // Settled, these equal the raw values above exactly, so every routed
+            // reader below computes what the unrouted one did; mid-ramp, the SAME
+            // contour is instead scaled by the amount on its way from the one the
+            // voice was using to p's (envAmtEff) — the step this whole section
+            // exists to remove.
+            float ampEnvValSm = ampEnvVal;
+            float modEnvValsSm[kNumModEnvs];
+            for (int m = 0; m < kNumModEnvs; ++m)
+                modEnvValsSm[m] = modEnvVals[m];
+            if (! routeSettled)
+            {
+                ampEnvValSm = ampContour * envAmtEff(p, 0);
+                for (int m = 0; m < kNumModEnvs; ++m)
+                    modEnvValsSm[m] = modContour[m] * envAmtEff(p, m + 1);
+            }
             lastAmpEnvLevel = ampEnvVal;
             for (int m = 0; m < kNumModEnvs; ++m)
                 lastModVal_[m] = modEnvVals[m];
+            lastAmpEnvLevelSm_ = ampEnvValSm;
+            for (int m = 0; m < kNumModEnvs; ++m)
+                lastModValSm_[m] = modEnvValsSm[m];
 
             const float lfo1Depth = applyAftertouchTarget(p, AftertouchTarget::LFO1Depth,
-                computeEffectiveLfoDepth(p, EnvTarget::LFO1Depth, p.lfo1Depth,
-                                         ampEnvVal, modEnvVals), expr);
+                computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO1Depth, p.lfo1Depth,
+                                               ampEnvValSm, modEnvValsSm), expr);
             const float lfo2Depth = applyAftertouchTarget(p, AftertouchTarget::LFO2Depth,
-                computeEffectiveLfoDepth(p, EnvTarget::LFO2Depth, p.lfo2Depth,
-                                         ampEnvVal, modEnvVals), expr);
+                computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO2Depth, p.lfo2Depth,
+                                               ampEnvValSm, modEnvValsSm), expr);
             const float lfo3Depth = applyAftertouchTarget(p, AftertouchTarget::LFO3Depth,
-                computeEffectiveLfoDepth(p, EnvTarget::LFO3Depth, p.lfo3Depth,
-                                         ampEnvVal, modEnvVals), expr);
+                computeEffectiveLfoDepthRouted(envRouteW_, EnvTarget::LFO3Depth, p.lfo3Depth,
+                                               ampEnvValSm, modEnvValsSm), expr);
             float lfo1Val = lfo1Buf[i] * lfo1Depth;
             float lfo2Val = lfo2Buf[i] * lfo2Depth;
             float lfo3Val = lfo3Buf[i] * lfo3Depth;
@@ -2070,9 +2435,11 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
 
             // Mix noise oscillator (goes through drive + filter + VCA with the main signal)
             float noiseLevel = p.noiseLevel;
-            if (p.ampTarget == EnvTarget::NoiseLevel) noiseLevel += ampEnvVal;
+            if (! juce::exactlyEqual(envRouteW_[0][EnvTarget::NoiseLevel], 0.0f))
+                noiseLevel += envRouteW_[0][EnvTarget::NoiseLevel] * ampEnvValSm;
             for (int m = 0; m < kNumModEnvs; ++m)
-                if (p.modEnv[m].target == EnvTarget::NoiseLevel) noiseLevel += modEnvVals[m];
+                if (! juce::exactlyEqual(envRouteW_[m + 1][EnvTarget::NoiseLevel], 0.0f))
+                    noiseLevel += envRouteW_[m + 1][EnvTarget::NoiseLevel] * modEnvValsSm[m];
             if (p.lfo1Target == LfoTarget::NoiseLevel) noiseLevel += lfo1Val;
             if (p.lfo2Target == LfoTarget::NoiseLevel) noiseLevel += lfo2Val;
             if (p.lfo3Target == LfoTarget::NoiseLevel) noiseLevel += lfo3Val;
@@ -2088,7 +2455,7 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             }
 
             // Cache VCA for phase D; raw audio goes to output[i] / outputRBuf untouched.
-            float vca = computeDcaGain(p, ampEnvVal, modEnvVals, keyGate);
+            float vca = computeDcaGainRouted(envRouteW_, ampEnvValSm, modEnvValsSm, keyGate);
             vca = applyAftertouchDcaGain(p, vca, expr);
 
             output[i] = sample;
@@ -2133,9 +2500,14 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
             // into those targets through the same array. Against the voice's OWN
             // targets (filter, pitch, scan, noise) there is nothing to wait for:
             // they are inaudible the moment the level is zero.
-            const bool levelDone = (p.ampTarget == EnvTarget::DCA)
-                                 ? ampEnv.isIdle()
-                                 : ! keyGate_.isSmoothing();
+            // Settled, dcaW is exactly 1.0f when the amp envelope is on the DCA and
+            // exactly 0.0f otherwise, so this is the two-way test above; mid-ramp
+            // it waits for BOTH the envelope and the key, since either arm's share
+            // of the crossfade may still be holding the voice open.
+            const float dcaW = envRouteW_[0][EnvTarget::DCA];
+            const bool levelDone = dcaW >= 1.0f ? ampEnv.isIdle()
+                                 : dcaW <= 0.0f ? ! keyGate_.isSmoothing()
+                                 : (ampEnv.isIdle() && ! keyGate_.isSmoothing());
             bool stillModulating = ampOutsideVoice && ! ampEnv.isIdle();
             for (int m = 0; m < kNumModEnvs && ! stillModulating; ++m)
                 stillModulating = modOutsideVoice[m] && ! modEnvs[m].isIdle();
@@ -2205,10 +2577,25 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
         // first sub-block, before any of this was heard.
         // See FilterCfg / beginFilterTransition / completeFilterTransition in
         // SynthVoice.h for why a discrete switch is never applied in place.
+        // Where a ramp in flight has taken the cutoff bus by the end of this
+        // sub-block (Phase A advanced it): the filter stages glide there from
+        // cutoffMod instead of stepping at the next boundary.
+        CutoffGlide glide;
+        const bool glides = cutoffGlides && driveLen > 0;
+        if (glides)
+        {
+            glide.fromHz = cutoffMod;
+            glide.log2Ratio = std::log2(modulatedCutoffHz(midIdx) / cutoffMod);
+            glide.n = driveLen;
+
+            filterGlideOwed_ = true;
+        }
+        const CutoffGlide* const glideIn = glides ? &glide : nullptr;
+
         const bool xfRun = filterXf_ != FilterXf::None && driveLen > 0;
         if (xfRun && filterXfShared_)
         {
-            processFilterPathShared(output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain);
+            processFilterPathShared(output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain, glideIn);
         }
         else
         {
@@ -2219,10 +2606,10 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
                 std::copy(output + pos, output + pos + driveLen, xfL);
                 std::copy(outputRBuf, outputRBuf + driveLen, xfR);
             }
-            processFilterPath(liveBank(), liveFilterCfg_, output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain);
+            processFilterPath(liveBank(), liveFilterCfg_, output + pos, outputRBuf, driveLen, freezeMode, p.filterDriveGain, glideIn);
             if (xfRun)
             {
-                processFilterPath(xfBank(), xfFilterCfg_, xfL, xfR, driveLen, freezeMode, p.filterDriveGain);
+                processFilterPath(xfBank(), xfFilterCfg_, xfL, xfR, driveLen, freezeMode, p.filterDriveGain, glideIn);
                 if (filterXf_ == FilterXf::Fade)
                 {
                     // Raised cosine, summing to one: both paths filter the same input, so they are
@@ -2271,4 +2658,9 @@ void SynthVoice::renderBlock(float* output, float* outputRight, const BlockParam
 
         pos = subBlockEnd;
     }
+
+    // Where the next routing/amount ramp starts (updateEnvRouteGoals): the
+    // amounts this call's last sample used.
+    for (int e = 0; e < kNumEnvSources; ++e)
+        envAmtLast_[e] = envAmtEff(p, e);
 }
