@@ -21,6 +21,11 @@ void T5ynthFilter::prepare(double sampleRate, int samplesPerBlock)
     prepared = true;
     lastSetCutoff = 20000.0f;
     lastSetReso = 0.0f;
+    // The one-pole coefficient must match lastSetCutoff at THIS rate: setCutoff skips a cutoff
+    // within 0.5 Hz of it, and 20000 Hz is where the cutoff parameter and every upward modulation
+    // clamp. Without this a fresh instance kept coefficient 0 there (at 6 and 18 dB the LP silent,
+    // at 6 dB the HP passing everything), and a re-prepared one the old rate's coefficient.
+    updateOnePoleCoeff(lastSetCutoff);
 
     // Initialize cached mix gains
     const float halfPi = juce::MathConstants<float>::halfPi;
@@ -92,6 +97,7 @@ void T5ynthFilter::reset()
 {
     filter1.reset();
     filter2.reset();
+    onePoleState = 0.0f;  // filter1/filter2 don't cover the 6dB/18dB one-pole stage
 }
 
 void T5ynthFilter::setMix(float mix)
