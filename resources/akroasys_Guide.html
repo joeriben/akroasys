@@ -734,15 +734,17 @@ all, and you hear it immediately.
 <p>
 The <strong>SNAP / CACHE</strong> row sits below the Dimension Explorer. Its SNAP
 half serves both oscillators and is described under
-<a href="#perform">Playing and Performing</a>; the cache belongs to this
-oscillator alone, because what it stores is rendered diffusion output.
+<a href="#perform">Playing and Performing</a>. The cache half now serves both
+oscillators too, but stores something different in each: here, on the T5
+Oscillator, it stores rendered diffusion output. The
+<a href="#lro">Language-Resonant Oscillator</a> has a cache of its own instead.
 </p>
 <table>
   <tr><th>Control</th><th>What it stores</th><th>How to use it</th></tr>
   <tr>
     <td><strong>CACHE OFF / 2 / 4 / 8 / 16</strong></td>
     <td>A round-robin list of generated audio results for the current generation setup. Once filled, Generate plays through the cached results instead of running inference again.</td>
-    <td>Choose a cache size, generate until it fills, then use Generate as a fast audition button. Cache capacity and already generated cache audio are saved in <code>.t5p</code> presets and restored when the preset is loaded. A preset saved with an older, deeper cache (32 or 64) still loads; its cache is kept at 16.</td>
+    <td>Choose a cache size, generate until it fills, then use Generate as a fast audition button. A deeper cache also costs Duration: the budget is 192 slot-seconds, so 16 entries need a Duration of 12 s or less, 8 need 24 s, 4 need 48 s, 2 need 96 s; a depth the current Duration cannot afford sits dimmed, and choosing it settles for the deepest depth Duration allows. Cache capacity and already generated cache audio are saved in <code>.t5p</code> presets and restored when the preset is loaded. A preset saved with an older, deeper cache (32 or 64) still loads; its cache is kept at 16.</td>
   </tr>
   <tr>
     <td><strong>A/S</strong> (offline take)</td>
@@ -1411,9 +1413,11 @@ Switching replaces the whole Generation column: Impulse A/B, the A/B slider, the
 Semantic Axes and the Dimension Explorer are gone, and in their place sit a
 single prompt field, the authoring trace described below, and a Re-Prompt
 card of its own. The shared <strong>Generate</strong> button and the SNAP
-slots below it stay in exactly the same place and now drive the LRO instead;
-Cache and Resynth, both meaningful only for the neural generator, are shown
-dimmed rather than removed.
+slots below it stay in exactly the same place and now drive the LRO instead.
+CACHE switches to the LRO's own cache: a slot stores the authored orchestra,
+prompt, reading and knob settings rather than audio, and replaying one
+installs it again exactly as a SNAP recall does, with no authoring call. Resynth, meaningful only for
+the neural generator, is shown dimmed rather than removed.
 </p>
 <p>
 Type a description into the prompt field at the top of the panel — its
@@ -1910,7 +1914,7 @@ the tabs above this area belong to the envelopes.
 
 <h3>Aftertouch (AT)</h3>
 <p>
-The <strong>AT</strong> panel routes held-phase expression to sixteen independent
+The <strong>AT</strong> panel routes held-phase expression to fifteen independent
 modulation targets simultaneously. Each target has its own signed depth bar &mdash; there is no single
 global Amount or shared dropdown &mdash; and, at the right-hand end of each bar, its own
 <strong>Expression</strong> switch saying <em>which</em> gesture drives it.
@@ -1926,12 +1930,18 @@ Click the small box beside a bar to step through the axes a player has:
   <tr><td><strong>X</strong></td><td>Lateral</td><td>Sideways lean or slide &mdash; per-note pitch bend, measured as a musical interval rather than as wheel travel, so the same depth means the same gesture on different controllers. Bipolar: left is negative, right positive.</td></tr>
   <tr><td><strong>Y</strong></td><td>Slide / timbre</td><td>CC74. Measured as <em>travel from where the note began</em>, not as an absolute position, so it fits both schemes the MPE specification allows and needs no per-device setting. Bipolar around the point the finger landed.</td></tr>
   <tr><td><strong>Z</strong></td><td>Pressure</td><td>How hard the note is being held: channel pressure, poly key pressure, Mod Wheel (CC1) or Breath (CC2), resolved as the maximum of whichever apply.</td></tr>
-  <tr><td><strong>&Oslash;</strong></td><td>&mdash;</td><td>Nothing drives this target. The quiet state, and the only grey one, so a glance down the column shows what is wired.</td></tr>
+  <tr><td><strong>&Oslash;</strong></td><td>&mdash;</td><td>Nothing drives this target. The quiet state, and the only grey one, so a glance down the column shows what is actually doing something.</td></tr>
 </table>
 <p>
-&Oslash; is the default on most rows. Three rows start wired, because they are what
+&Oslash; is the default on most rows. Four rows start wired, because they are what
 pressure and slide are <em>for</em>: <strong>DCA</strong> on&nbsp;Z, <strong>Cutoff</strong> and
-<strong>Scan</strong> on&nbsp;Y. X, Y and per-note Z need an MPE controller; V and channel-wide
+<strong>Scan</strong> on&nbsp;Y, and <strong>Pitch</strong> on&nbsp;X. On DCA, Cutoff and Scan
+the box still reads &Oslash; until you raise the bar or click the switch &mdash; a wired axis
+sitting at zero depth drives nothing, so it is shown as nothing; that first click reveals
+the axis instead of stepping past it. Pitch is the exception: X bends the note through the
+per-note bend range even at zero depth, so its box always shows its axis, and raising the amount
+only adds pitch-bus modulation on top of that bend. Move the Pitch row to another axis and
+the lateral bend switches off. X, Y and per-note Z need an MPE controller; V and channel-wide
 Z work on any keyboard. What a full X or Y gesture is worth on your particular
 instrument is set once in <strong>Settings &rarr; MPE</strong>, not per preset.
 </p>
@@ -1961,6 +1971,7 @@ not one per envelope.
   <tr><td><strong>DCA</strong></td><td>Pressure scales voice amplitude — volume swell under touch.</td></tr>
   <tr><td><strong>Pitch</strong></td><td>Pressure shifts pitch in semitones.</td></tr>
   <tr><td><strong>Noise</strong></td><td>Pressure raises or lowers the noise generator level.</td></tr>
+  <tr><td><strong>Cache</strong></td><td>Pressure steps through the cache positions instead of modulating the sound — forward for a positive bar, back for a negative one — landing on whichever take is cached there. With several notes held, each note follows its own position.</td></tr>
 </table>
 
 <div class="note">
@@ -2277,7 +2288,7 @@ and the current preset's name, and carries the controls that belong to no panel:
   <tr><td><strong>Save</strong></td><td>Opens the Library in save mode (also <strong>Ctrl/Cmd+S</strong>).</td></tr>
   <tr><td><strong>Library</strong></td><td>The preset browser: load, import, tag-filter, rename, duplicate, delete, and <em>Update Library</em>.</td></tr>
   <tr><td><strong>Export</strong></td><td><em>Save Session Log</em> is greyed out until a log exists, and <em>Play Session Log</em> while a replay is already running. Three items: <strong>Export WAV…</strong> writes the current sound to a file (the item always reads that; only the file-chooser's own title says <em>Export Wavetable</em> in Wavetable mode); <strong>Save Session Log…</strong> and <strong>Play Session Log…</strong> are the two ends of the <a href="#sessionlog">session log</a>.</td></tr>
-  <tr><td><strong>Settings</strong></td><td>The three-tab panel described in <a href="#setup">Setup</a>. It carries an accent dot when an update is available.</td></tr>
+  <tr><td><strong>Settings</strong></td><td>The four-tab panel described in <a href="#setup">Setup</a>. It carries an accent dot when an update is available.</td></tr>
   <tr><td><strong>Manual</strong></td><td>This document.</td></tr>
   <tr><td><strong>Panic</strong></td><td>All notes off, immediately.</td></tr>
   <tr><td><strong>Kbd</strong></td><td>Computer-keyboard note input on or off (also <strong>Ctrl/Cmd+K</strong>).</td></tr>
@@ -2289,9 +2300,12 @@ and the current preset's name, and carries the controls that belong to no panel:
 The four <strong>SNAP</strong> slots are how akróasys is meant to be played
 live. They are bound to the number keys <strong>1 / 2 / 3 / 4</strong>, so with
 a state stored in each you have a four-button instrument: hit a number key and
-the whole oscillator changes. Recall is instantaneous, with no inference and no
-authoring call, so
-a switch lands cleanly inside a running sequence or a held phrase.
+the whole oscillator changes. Recall fades the voice sum out and back in around
+the switch (5 ms each way, so the change itself lands in near-silence rather than
+a click) — delay and reverb tails sit after that fade and keep ringing across it.
+There is no inference and no authoring call, so a switch lands cleanly inside a
+running sequence or a held phrase. Holding a number key down does not repeat the
+recall — only the keystroke that presses it does.
 </p>
 <table>
   <tr><th>Action</th><th>How</th></tr>
@@ -2339,7 +2353,7 @@ one-shot voices switched under a running Step Sequencer pattern.
   <tr><td><strong>MIDI CC64</strong></td><td>Sustain pedal. Notes released while the pedal is down keep sounding until CC64 returns below 64.</td></tr>
   <tr><td><strong>CC66 / CC67</strong></td><td>Sostenuto and Soft Pedal. Sostenuto captures currently held manual notes; Soft Pedal gently lowers level and brightness.</td></tr>
   <tr><td><strong>MIDI aftertouch</strong></td><td>Both channel pressure and poly pressure are supported. Route them with the <strong>AT</strong> row in the Synth panel.</td></tr>
-  <tr><td><strong>CC120 / CC123 / CC121</strong></td><td>All Sound Off / All Notes Off / Reset Controllers.</td></tr>
+  <tr><td><strong>CC120 / CC123 / CC121</strong></td><td><strong>CC120 All Sound Off</strong> cuts every voice within a few milliseconds, like the Panic button. <strong>CC123 All Notes Off</strong> is a key-up for every note — a pedal still holding one keeps it sounding, and no performance controller is reset. <strong>CC121 Reset Controllers</strong> centres bend, zeros pressure, resets modulation and expression, and lifts the pedals, but leaves channel volume (CC7) alone.</td></tr>
 </table>
 <p>
 Most controls can also be put under a hardware knob: right-click one and choose

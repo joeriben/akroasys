@@ -4,7 +4,7 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
-## Unreleased — 3.1.0
+## 3.1.0 — shipped as v3.1.0-beta.0, v3.1.0-beta.1
 
 ### The instrument
 
@@ -73,6 +73,122 @@ unbroken.
   64-deep caches used to hold — presets that deep ran to hundreds of megabytes —
   and the remaining depths gained the room to be readable at any window size. A
   preset saved at 32 or 64 still loads, with its cache kept at 16.
+- **A Snap recall no longer crackles.** The voice sum fades out over 5 ms, the
+  recall is written into that gap, and the sound fades back in over 5 ms. A new
+  sample then arrives through the Regen XFade crossfade, as on a regeneration;
+  an LRO slot's orchestra arrives through the engine's crossfaded swap. Delay
+  and reverb tails ring on across the fade. The cost is a dip in the dry sound
+  of roughly 13–17 ms on every recall, and the recall lands about one host
+  period later than before. An offline render gets no fade. The digit keys 1–4
+  recall on key-down only, so auto-repeat no longer recalls a slot again and
+  again, and the synth panel lays itself out once per recall instead of once per
+  changed choice box.
+- **A setting that changes under a sounding note ramps instead of stepping.**
+  A Snap recall, a preset, automation or a MIDI CC used to step these at a block
+  or sub-block boundary, and the step clicked. Cutoff, key tracking, resonance,
+  mix and drive, an envelope's target and amount, and master volume now reach a
+  playing voice over 1 ms. A change of filter model, slope, type or on/off
+  crossfades from the old filter to the new one, which first runs over the last
+  10 ms of the voice's input so that it does not start from silence. The output
+  gain moves along a smooth curve, and every gain ramp starts from the level
+  last heard, also after bypass, after idle and after the host re-prepares the
+  plugin.
+- **Changing WT Frames no longer drops out.** The re-slice held the audio for
+  its whole computation: 19–35 ms of silence on a recall that changed the frame
+  count. It now computes beside the audio and runs once per change, whether the
+  change comes from the box, automation, a MIDI CC, a Snap recall or a preset,
+  and whether the editor is open or not. Opening the editor no longer re-slices,
+  and a MIDI CC mapped to WT Frames can no longer lock the audio and the editor
+  against each other.
+- **The SVF's 6 and 18 dB slopes work at the top of the cutoff range.** With the
+  cutoff at 20 kHz — the knob's default, and where key tracking clamps — they
+  ran on an unset coefficient until the cutoff first moved on that voice: silent
+  as a low-pass, the full band as a high-pass.
+- **The reverb no longer runs away on a short block.** When a host called with
+  fewer samples than it had prepared for, the reverb read its own previous
+  output back in as input, and the algorithmic reverb grew without bound within
+  about a second.
+- **All Sound Off, All Notes Off and Reset All Controllers do what the MIDI
+  spec asks.** A DAW sends them on transport stop and on locate, so this is heard
+  in ordinary use, not only from a panic button.
+  - All Sound Off (CC 120) cuts every voice within a few milliseconds. It used
+    to release over the patch's own release time, up to 10 s.
+  - All Notes Off (CC 123) is a key-up for every note. It resets no controller,
+    and the pedals keep what they hold: with the sustain pedal down, the notes
+    ring until it comes up.
+  - Reset All Controllers (CC 121) leaves channel volume alone; with CC 7 at 40
+    the instrument used to jump +10 dB. It no longer retunes or silences a note
+    that is still sounding, or detaches it from its MPE channel.
+
+  The panic button still cuts everything.
+- **A panic leaves no arpeggiator or sequencer note behind.** Switching the
+  arpeggiator on while a sequencer note sounded could leave that note droning
+  until the next panic. After a panic, the sequencer's, the arpeggiator's and a
+  drone's notes no longer answer the mod wheel or pressure through their
+  release, and a sliding step no longer carries on a note the panic has ended.
+  A sequencer step no longer cuts a key held on the same pitch.
+- **Per-note MPE expression stays with the finger that plays it.** A controller
+  that rotates its member channels hands a new key a channel on which a released
+  note may still be sounding. That key's pressure, bend and slide used to drive
+  the old note as well: it swelled back up, brightened again, or its bend
+  jumped. Poly pressure now ends with the key: a note pressed hard, or pressure
+  that arrived just after its key-up, no longer holds that note's pressure up
+  for the rest of the session. A note held by a pedal, taken over by the
+  arpeggiator or continued by a sequencer slide no longer answers someone else's
+  finger. Still open: releasing a key on the pitch a drone holds can leave the
+  drone at that key's last pressure.
+- **Every row of the Expression column picks its own source.** Each target now
+  has a source beside its depth: velocity, per-note bend (X), MPE Y (CC 74) or
+  pressure. Y used to be wired to the cutoff alone, at ±4 octaves around an
+  assumed centre, so on a controller that rests Y at the bottom (measured on an
+  Osmose) every MPE note sat about four octaves dark. Y is now read as the travel
+  from where the note began, so the same movement means the same thing whether
+  a controller rests Y at the bottom or in the middle. A fresh patch routes level
+  to pressure and cutoff and scan to Y, all at depth zero, and the pitch row
+  routes X to the per-note bend; moving that row to another source switches the
+  bend off. A preset written before sources existed plays as it did, because all
+  of its depths meant pressure. LRO instruments that read the timbre control
+  now see its rest at 0 rather than at the middle, so they can sound different
+  at the same settings. An aftertouch bar's first drag no longer starts in the
+  negative direction.
+- **An MPE tab shows what the controller sends.** A controller announces its
+  zone and bend range once, at power-on or when its MPE mode is chosen, and a
+  plugin opened later never hears it. The new tab beside Settings shows which
+  channels carry notes, whether a zone and a bend range were transmitted, how far
+  the lateral lean reaches, CC 74's span and which kinds of pressure arrive. It
+  sets the per-note and the master bend range by hand, and what a full lateral
+  lean is worth as a modulation source. All three belong to the machine, not to
+  the preset. Without a transmitted range, the per-note bend range is now the
+  MPE spec's 48 semitones instead of 24, so such a controller bends over the
+  whole interval it means instead of half of it.
+- **Aftertouch travels the cache, one position per note.** The Cache row steps
+  through the cache positions the way Re-Prompt steps, and with several notes
+  held each follows its own position instead of all changing sample together.
+  The LRO has a cache of its own: a slot holds an authored orchestra with its
+  prompt, reading and knobs, so sixteen of them take a few kilobytes. The cache
+  depth follows the Duration — 16 positions up to 12 s, 8 up to 24 s, 4 up to
+  48 s, 2 up to 96 s — and a depth the Duration cannot afford is dimmed. While a
+  control is dragged, the positions rebuild once the hand has rested for 250 ms,
+  and never later than 2 s. A preset stores a cache only when it holds entries,
+  and reopening akróasys no longer brings back the last sitting's cache. With
+  several notes on different positions, the waveform and the Cache row's
+  highlight show no single one.
+- **The Expression column and the effect lamps show only what is active.** A
+  row reads OFF while its depth is zero and it still stands where it shipped;
+  a preset written before expression sources used to light fifteen rows. Delay
+  and reverb at Mix 0 read OFF, a modulated Mix counts as in play, and the
+  cell's fill still shows the switch a click toggles.
+- **On the computer keyboard, a key struck again plays again, and no note starts
+  by itself.** A key released and struck again within 20 ms made no second note.
+  On macOS the system can report a key as held that nobody presses (measured:
+  the key for C); that note used to sound and hang whenever another key was
+  played, and go dead after a panic. A note now starts only on a keystroke.
+- **Smaller fixes.** Letting the sostenuto pedal up no longer silences a note
+  the sustain pedal still holds. In step recording on macOS, a modifier change
+  while Space is held no longer adds a rest, and the Space rest no longer goes
+  dead after its key-up went to another window; a Command tap while Space is
+  held still adds one. The known-tags cloud in the preset drawer uses the room
+  the drawer has instead of two rows.
 
 ### Under the hood
 
@@ -89,6 +205,14 @@ unbroken.
 - The Windows backend smoke-test in CI no longer reads a still-locked log file
   as a backend that failed to start — the failure that broke the v3.0.0-beta.2
   tag run on a commit that had passed on `main` four minutes earlier.
+- **Under CLAP, the audio thread and the editor no longer race.** The CLAP
+  wrapper calls the audio callback without JUCE's callback lock, which
+  everything that hands samples and wavetables to the audio thread relied on.
+  The audio callback now takes the lock itself, and the sampler's audio path no
+  longer takes a mutex to read a snapshot.
+- **A note-on no longer allocates memory on the audio thread.** A switched-off
+  debug log still built its message, eleven allocations per note. A new test
+  counts allocations through the real audio callback, and it reads zero.
 
 ## 3.0.0 — shipped as v3.0.0-beta.0 … v3.0.0-beta.2
 
