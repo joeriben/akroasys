@@ -1,5 +1,5 @@
-// aqrec — exact capture from one CoreAudio device.
-// tools/verify_lro_in_standalone.py builds and drives it.
+// aqrec — exact capture from one CoreAudio device, and a timing probe to check it
+// with. tools/verify_lro_in_standalone.py builds and drives it.
 //
 //   aqrec --list                    one line per device:
 //                                   UID <tab> input ch <tab> output ch <tab> name
@@ -8,6 +8,8 @@
 //                                   time of the take's first sample on the
 //                                   mach_absolute_time clock in nanoseconds (the
 //                                   clock Python's time.monotonic_ns() reads on macOS)
+//   aqrec --bursts UID COUNT        play COUNT bursts of 440 Hz at 0.3 full scale,
+//                                   0.5 s on in every 1.000 s, sample-exact
 //
 // Why not ffmpeg: its avfoundation capture of BlackHole 2ch at 48 kHz drops frames
 // on the maintainer Mac (ffmpeg 9.0.2, measured 2026-10-13 and again 2026-10-14):
@@ -259,10 +261,68 @@ static int record(const char *uid, double seconds, const char *path) {
     return 0;
 }
 
+// ---- --bursts --------------------------------------------------------------------
+
+static long play_pos, play_total;
+static volatile int play_stopping;
+
+static void bursts_cb(void *ud, AudioQueueRef q, AudioQueueBufferRef b) {
+    if (play_stopping) return;
+    SInt16 *s = b->mAudioData;
+    UInt32 frames = b->mAudioDataBytesCapacity / BYTES_PER_FRAME;
+    for (UInt32 i = 0; i < frames; i++, play_pos++) {
+        long p = play_pos % RATE;              // 0.5 s x 440 Hz = 220 whole cycles,
+        double v = 0.0;                        // so every burst starts and ends at phase 0
+        if (play_pos < play_total && p < RATE / 2) v = 0.3 * sin(2.0 * M_PI * 440.0 * p / RATE);
+        s[2 * i] = s[2 * i + 1] = (SInt16)lrint(v * 32767.0);
+    }
+    b->mAudioDataByteSize = frames * BYTES_PER_FRAME;
+    AudioQueueEnqueueBuffer(q, b, 0, NULL);
+}
+
+static int bursts(const char *uid, int count) {
+    if (count <= 0) { fprintf(stderr, "COUNT must be positive\n"); return 2; }
+    play_total = (long)count * RATE;
+    AudioStreamBasicDescription f = pcm_format();
+    AudioQueueRef q;
+    OSStatus s = AudioQueueNewOutput(&f, bursts_cb, NULL, NULL, NULL, 0, &q);
+    if (s) { fprintf(stderr, "AudioQueueNewOutput %d\n", (int)s); return 1; }
+    if (use_device(q, uid)) return 1;
+    for (int i = 0; i < 4; i++) {
+        AudioQueueBufferRef b;
+        if ((s = AudioQueueAllocateBuffer(q, BUFFER_FRAMES * BYTES_PER_FRAME, &b))) {
+            fprintf(stderr, "AudioQueueAllocateBuffer %d\n", (int)s);
+            return 1;
+        }
+        bursts_cb(NULL, q, b);
+    }
+    if ((s = AudioQueueStart(q, NULL))) { fprintf(stderr, "AudioQueueStart %d\n", (int)s); return 1; }
+    long last = -1, still_ms = 0;
+    while (play_pos < play_total) {
+        long now = play_pos;
+        still_ms = now == last ? still_ms + 1 : 0;
+        last = now;
+        if (still_ms > STALL_MS) { fprintf(stderr, "%s stopped taking audio\n", uid); return 1; }
+        usleep(1000);
+    }
+    play_stopping = 1;
+    AudioQueueStop(q, false);                  // plays out what is already queued
+    for (int waited_ms = 0; waited_ms < 3000; waited_ms++) {
+        UInt32 running = 1, size = sizeof running;
+        if (AudioQueueGetProperty(q, kAudioQueueProperty_IsRunning, &running, &size) || !running)
+            break;
+        usleep(1000);
+    }
+    AudioQueueDispose(q, true);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--list")) return list_devices();
+    if (argc == 4 && !strcmp(argv[1], "--bursts")) return bursts(argv[2], atoi(argv[3]));
     if (argc == 4 && argv[1][0] != '-') return record(argv[1], atof(argv[2]), argv[3]);
     fprintf(stderr, "usage: aqrec --list\n"
-                    "       aqrec UID SECONDS OUT.wav\n");
+                    "       aqrec UID SECONDS OUT.wav\n"
+                    "       aqrec --bursts UID COUNT\n");
     return 2;
 }

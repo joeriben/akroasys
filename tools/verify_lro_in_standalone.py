@@ -18,9 +18,10 @@ What it does, in the app, not beside it:
      this script owns, both through the same stored settings;
   4. launches the built app under sandbox-exec with every Homebrew Csound path
      denied — and refuses to interpret the result unless the denial actually bit;
-  5. records the device with nothing played, as a control, then records one note
-     and requires audible sound AT THE PITCH ASKED FOR, and names the WAV, because
-     the last word on a sound is BJ's ear, not a number.
+  5. proves the recorder holds time — tone bursts exactly 1 s apart must come back
+     1 s apart, ±2 ms — then records the device with nothing played, as a control,
+     then records one note and requires audible sound AT THE PITCH ASKED FOR, and
+     names the WAV, because the last word on a sound is BJ's ear, not a number.
 
 --prove-it-can-fail is the run that makes the others mean something: it denies the
 bundle's own Contents/libs as well, and then requires the app to make NO sound.
@@ -54,6 +55,12 @@ REAL_SETTINGS = Path.home() / "Library/Application Support/akróasys.settings"
 LAUNCHED = []                 # apps this run started, and is responsible for
 RECORDERS = []                # recorder processes likewise — stopped on any exit
 RECORDER_SRC = REPO / "tools/aqrec.c"
+# The burst train `aqrec --bursts` plays (tools/aqrec.c): 440 Hz at 0.3 full scale,
+# on for BURST_ON of every BURST_PERIOD, sample-exact.
+BURST_PERIOD = 1.0
+BURST_ON = 0.5
+BURSTS = 4
+TIMING_TOLERANCE = 0.002      # ±2 ms on every spacing and every burst length
 LEAD = 0.5                    # recorded before note-on; past analyse()'s 0.2 s skip
 TAIL = 0.5                    # recorded after note-off
 ONSET_SKIP = 0.2              # analyse() ignores the first 0.2 s of a take
@@ -224,9 +231,9 @@ def build_recorder(scratch):
 
 def coreaudio_uid(recorder, name):
     """The CoreAudio UID of the device named in the app's settings, looked up by
-    that same name, so the recorder listens to the device the app plays to. A
-    name that does not resolve fails here rather than recording some other
-    input."""
+    that same name, so the recorder listens to the device the app plays to and
+    the timing check plays into it. A name that does not resolve fails here
+    rather than recording some other input."""
     try:
         listing = subprocess.run([str(recorder), "--list"], capture_output=True,
                                  text=True, timeout=15).stdout
@@ -283,6 +290,64 @@ def record(recorder, uid, seconds, path):
     """Record the loopback device to a WAV, synchronously."""
     proc, _ = start_recording(recorder, uid, seconds, path)
     return finish_recording(proc, path)
+
+
+def capture_holds_time(recorder, uid, scratch):
+    """The recording chain has to hold time before any take through it is
+    believed. BURSTS tone bursts, BURST_PERIOD apart and BURST_ON long, are
+    played into the loopback device and recorded by the same recorder that
+    records the note; every spacing and every length has to come back within
+    TIMING_TOLERANCE. A recorder that drops frames (ffmpeg's returned 0.87-0.90
+    s for 1.000 s here) fails this instead of handing on spliced takes.
+
+    It cannot tell apart WHAT broke the bursts, so its failure names every
+    candidate: the recorder; the player stalling, which shortens a burst
+    (measured: a 0.3 s stop of the player left every spacing at 1.000 s and
+    burst 2 at 0.280 s); or another sound in BlackHole, which nothing has ruled
+    out yet at this point — the silent control comes after."""
+    import numpy as np
+    path = scratch / "capture_check.wav"
+    rec, _ = start_recording(recorder, uid, BURSTS * BURST_PERIOD + 1.0, path)
+    try:
+        play = subprocess.run([str(recorder), "--bursts", uid, str(BURSTS)],
+                              capture_output=True, text=True,
+                              timeout=BURSTS * BURST_PERIOD + 30)
+    except subprocess.TimeoutExpired:
+        rec.kill()
+        fail(f"the timing bursts did not finish playing into {OUT_DEVICE}")
+    if play.returncode:
+        rec.kill()
+        fail(f"could not play the timing bursts into {OUT_DEVICE}: "
+             f"{play.stderr.strip()}")
+    finish_recording(rec, path)
+    mono, rate = mono_samples(path)
+    # 0.02 against 0.3 full scale: at each zero crossing inside a burst the
+    # signal stays under it for a sample or two, which the 10 ms merge below
+    # bridges; the half second of silence between bursts it does not.
+    loud = np.flatnonzero(np.abs(np.asarray(mono)) > 0.02)
+    if not loud.size:
+        fail(f"the timing bursts did not arrive in the recording of {OUT_DEVICE}")
+    breaks = np.flatnonzero(np.diff(loud) > 0.01 * rate)
+    starts = np.concatenate(([loud[0]], loud[breaks + 1]))
+    ends = np.concatenate((loud[breaks], [loud[-1]]))
+    suspects = (f"the recorder lost or spliced audio, the burst player stalled, "
+                f"or something else is playing into {OUT_DEVICE}. See {path}")
+    if len(starts) != BURSTS:
+        fail(f"the recording of {BURSTS} timing bursts holds {len(starts)} — "
+             f"{suspects}")
+    spacing = np.diff(starts) / rate
+    lengths = (ends - starts + 1) / rate
+    worst = max(np.abs(spacing - BURST_PERIOD).max(),
+                np.abs(lengths - BURST_ON).max())
+    measured = (f"{BURST_PERIOD:.3f} s apart came back "
+                f"{', '.join(f'{x:.4f}' for x in spacing)} s apart, "
+                f"{BURST_ON:.3f} s long came back "
+                f"{', '.join(f'{x:.4f}' for x in lengths)} s long")
+    if worst > TIMING_TOLERANCE:
+        fail(f"the capture chain does not hold time: bursts {measured} (worst "
+             f"{worst * 1e3:.1f} ms, allowed {TIMING_TOLERANCE * 1e3:.0f} ms) — "
+             f"{suspects}")
+    ok(f"capture holds time: bursts {measured} (worst {worst * 1e3:.2f} ms)")
 
 
 def mono_samples(wav_path):
@@ -462,14 +527,17 @@ def main():
              "OPCODEDIR was not overridden")
     ok("the app is up and Csound reports the bundled Opcodes64")
 
+    # With the app up, so the device runs as it will for the take.
+    capture_holds_time(recorder, uid, scratch)
+
     # The control comes first, as its own recording: with the app up and no note
     # sent, the loopback device must be silent. BlackHole is system-wide, so
-    # without this a passing browser tab would read as a synth. (It became a
-    # separate take because ffmpeg, which recorded here until 2026-10-14,
-    # appeared to open the device up to a second late — it also dropped 10-20 %
-    # of the frames, which shifts a note in a take the same way. It stays
-    # separate so the control and the note are judged on recordings of their
-    # own.)
+    # without this a passing browser tab would read as a synth. It also proves
+    # the timing bursts above have stopped. (It became a separate take because
+    # ffmpeg, which recorded here until 2026-10-14, appeared to open the device
+    # up to a second late — it also dropped 10-20 % of the frames, which shifts
+    # a note in a take the same way. It stays separate so the control and the
+    # note are judged on recordings of their own.)
     control = record(recorder, uid, 1.5, scratch / "lro_control.wav")
     ctl_peak, _, _, _ = analyse(control)
     if ctl_peak >= SILENCE_FLOOR:
