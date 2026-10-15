@@ -25,13 +25,16 @@ What it does, in the app, not beside it:
 --prove-it-can-fail is the run that makes the others mean something: it denies the
 bundle's own Contents/libs as well, and then requires the app to make NO sound.
 
-Needs: BlackHole 2ch, ffmpeg, python-rtmidi, numpy (all in the maintainer Mac's
-.venv — run it with .venv/bin/python).
+Needs: BlackHole 2ch, clang (to build the recorder, tools/aqrec.c), python-rtmidi,
+numpy (the last two are in the maintainer Mac's .venv — run it with
+.venv/bin/python).
 """
 import argparse
+import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import struct
 import subprocess
@@ -49,6 +52,11 @@ NOTE = 57                     # A3, 220 Hz — the default pitch of LRO measurem
 SILENCE_FLOOR = 1e-3
 REAL_SETTINGS = Path.home() / "Library/Application Support/akróasys.settings"
 LAUNCHED = []                 # apps this run started, and is responsible for
+RECORDERS = []                # recorder processes likewise — stopped on any exit
+RECORDER_SRC = REPO / "tools/aqrec.c"
+LEAD = 0.5                    # recorded before note-on; past analyse()'s 0.2 s skip
+TAIL = 0.5                    # recorded after note-off
+ONSET_SKIP = 0.2              # analyse() ignores the first 0.2 s of a take
 
 # Same list as tools/verify_csound_bundle.py: every way a Homebrew Csound could be
 # reached. The Cellar path is the one that matters — the library's baked-in opcode
@@ -191,30 +199,90 @@ def denial_bit(profile):
     return r.returncode == 0
 
 
-def avfoundation_index(name):
-    """ffmpeg's avfoundation input wants the device's INDEX in `-i :<n>`; a name
-    that does not resolve leaves it recording the default input, which is the
-    built-in microphone — a silent recording that says nothing about the synth."""
-    listing = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-f", "avfoundation", "-list_devices", "true",
-         "-i", ""], capture_output=True, text=True).stderr
-    audio = listing.split("audio devices:")[-1]
-    for line in audio.splitlines():
-        m = re.search(r"\[(\d+)\] (.+)$", line)
-        if m and m.group(2).strip() == name:
-            return m.group(1)
-    fail(f"'{name}' is not an avfoundation audio device — install BlackHole 2ch, "
-         "or name the loopback device this machine has")
+def build_recorder(scratch):
+    """tools/aqrec.c, compiled into the scratch directory under a name taken
+    from the source's content, so a changed source — or another checkout's —
+    never runs an old binary.
+
+    Not ffmpeg, which this tool recorded with until 2026-10-14: its avfoundation
+    capture of BlackHole 2ch drops frames on the maintainer Mac. Measured with
+    this tool's own ffmpeg call, tone bursts played exactly 1.000 s apart came
+    back 0.87-0.90 s apart with the pitch intact, and `-t 8` wrote 7.1 s. Every
+    take it analysed was full of splices."""
+    digest = hashlib.sha256(RECORDER_SRC.read_bytes()).hexdigest()[:12]
+    binary = scratch / f"aqrec-{digest}"
+    if binary.exists():
+        return binary
+    r = subprocess.run(
+        ["clang", "-O2", "-o", str(binary), str(RECORDER_SRC),
+         "-framework", "AudioToolbox", "-framework", "CoreAudio",
+         "-framework", "CoreFoundation"], capture_output=True, text=True)
+    if r.returncode:
+        fail(f"could not build {RECORDER_SRC}:\n{r.stderr}")
+    return binary
 
 
-def record(device_index, seconds, path):
-    """Record the loopback device to a WAV, synchronously."""
-    subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-f", "avfoundation", "-i", f":{device_index}",
-         "-t", str(seconds), "-ac", "2", "-ar", "48000", str(path)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=seconds + 30)
+def coreaudio_uid(recorder, name):
+    """The CoreAudio UID of the device named in the app's settings, looked up by
+    that same name, so the recorder listens to the device the app plays to. A
+    name that does not resolve fails here rather than recording some other
+    input."""
+    try:
+        listing = subprocess.run([str(recorder), "--list"], capture_output=True,
+                                 text=True, timeout=15).stdout
+    except subprocess.TimeoutExpired:
+        fail("CoreAudio did not list its devices within 15 s")
+    for line in listing.splitlines():
+        uid, inputs, outputs, device = line.split("\t", 3)
+        if device == name and int(inputs) > 0 and int(outputs) > 0:
+            return uid
+    fail(f"'{name}' is not a CoreAudio device with inputs and outputs — install "
+         "BlackHole 2ch, or name the loopback device this machine has")
+
+
+def start_recording(recorder, uid, seconds, path):
+    """Start recording the loopback device. Returns once the recorder's first
+    buffer is in, with the capture time of the take's first sample on
+    time.monotonic_ns()'s clock — the recorder reads the same mach clock — so
+    the caller can say where in the take anything it sends lands.
+    Bounded: a CoreAudio call that never returns must end in FAIL, not in a run
+    that hangs with the app still up."""
+    proc = subprocess.Popen([str(recorder), uid, f"{seconds:.3f}", str(path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    RECORDERS.append(proc)
+    ready, _, _ = select.select([proc.stdout], [], [], 15)
+    if not ready:
+        proc.kill()
+        fail(f"the recorder did not start on {OUT_DEVICE} within 15 s")
+    said = proc.stdout.readline().split()
+    if len(said) != 2 or said[0] != "recording":
+        _, err = proc.communicate(timeout=30)
+        fail(f"the recorder did not start on {OUT_DEVICE}: {err.strip()}")
+    if not int(said[1]):
+        proc.kill()
+        fail(f"the recorder could not say when its take of {OUT_DEVICE} began")
+    return proc, int(said[1])
+
+
+def finish_recording(proc, path):
+    try:
+        _, err = proc.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        fail(f"the recorder did not finish {path}")
+    if proc.returncode == 3:      # an overload, or the recorder fell behind
+        fail(f"{path} cannot be trusted, it may hold silence in place of audio: "
+             f"{err.strip()}")
+    if proc.returncode:
+        fail(f"the recorder failed on {path}: {err.strip()}")
     return path
+
+
+def record(recorder, uid, seconds, path):
+    """Record the loopback device to a WAV, synchronously."""
+    proc, _ = start_recording(recorder, uid, seconds, path)
+    return finish_recording(proc, path)
 
 
 def mono_samples(wav_path):
@@ -234,7 +302,7 @@ def analyse(wav_path, window_s=1.0):
     alone would accept hum, a click or the tail of something else — for this to
     be the synth answering, the sound has to BE the note that was asked for."""
     mono, rate = mono_samples(wav_path)
-    skip = int(0.2 * rate)                   # the device's own start-up click
+    skip = int(ONSET_SKIP * rate)            # the device's own start-up click
     seg = mono[skip:]
     if not seg:
         fail(f"nothing was recorded into {wav_path}")
@@ -266,11 +334,12 @@ def partial_trajectory(mono, start, rate, window_s=1.0):
     55 Hz accept band is ±6.6 Hz wide, so it keeps more than one bin). With a
     fixed 1 s window, a 0.5 s note had its energy in the high-gain region of
     only ONE window and the held-pitch rule below could not be satisfied at
-    all — whether it failed then depended on the device-open delay, which the
-    script cannot observe.
+    all — whether it failed then depended on where the note fell against the
+    window grid.
 
     Times are window starts, relative to the 0.2 s device-skip mark of the
-    recording — NOT note time; the device-open delay in front is variable.
+    recording — NOT note time: note-on is sent about LEAD into the take (main()
+    prints exactly where) and sounds after the app's MIDI-to-output latency.
     Windows whose level never reaches 1e-4 are omitted (before the onset,
     after the tail); the caller marks the resulting time gaps in its printout."""
     import numpy as np
@@ -318,8 +387,9 @@ def main():
         import rtmidi
     except ImportError:
         fail("python-rtmidi is needed to send the note (pip install python-rtmidi)")
-    if not shutil.which("ffmpeg"):
-        fail("ffmpeg is needed to record BlackHole")
+    if not shutil.which("clang"):
+        fail("clang is needed to build the recorder, tools/aqrec.c "
+             "(xcode-select --install)")
     APP = Path(args.app).resolve()
     if not APP.is_dir():
         fail(f"no built Standalone at {APP}")
@@ -335,6 +405,7 @@ def main():
 
     scratch = Path(os.environ.get("TMPDIR", "/tmp")) / "lro_standalone_check"
     scratch.mkdir(parents=True, exist_ok=True)
+    recorder = build_recorder(scratch)
     profile = sandbox_profile(scratch, deny_bundled=args.prove_it_can_fail)
     if not denial_bit(profile):
         fail("the sandbox does not deny Homebrew's Csound — this test would prove "
@@ -357,8 +428,8 @@ def main():
     midi.open_virtual_port(MIDI_PORT)
     ok(f"virtual MIDI port '{MIDI_PORT}' open")
 
-    device_index = avfoundation_index(OUT_DEVICE)
-    ok(f"'{OUT_DEVICE}' is avfoundation audio device {device_index}")
+    uid = coreaudio_uid(recorder, OUT_DEVICE)
+    ok(f"'{OUT_DEVICE}' is CoreAudio device {uid}")
 
     # T5YNTH_ALLOW_NO_MODELS keeps the setup wizard out of the way: this test is
     # about the oscillator, and the neural engines are not part of it.
@@ -393,11 +464,13 @@ def main():
 
     # The control comes first, as its own recording: with the app up and no note
     # sent, the loopback device must be silent. BlackHole is system-wide, so
-    # without this a passing browser tab would read as a synth. It is a separate
-    # take rather than a lead-in inside the note's recording because ffmpeg opens
-    # the device with a variable delay of up to a second — long enough to push the
-    # note into the window that was supposed to prove nothing was playing.
-    control = record(device_index, 1.5, scratch / "lro_control.wav")
+    # without this a passing browser tab would read as a synth. (It became a
+    # separate take because ffmpeg, which recorded here until 2026-10-14,
+    # appeared to open the device up to a second late — it also dropped 10-20 %
+    # of the frames, which shifts a note in a take the same way. It stays
+    # separate so the control and the note are judged on recordings of their
+    # own.)
+    control = record(recorder, uid, 1.5, scratch / "lro_control.wav")
     ctl_peak, _, _, _ = analyse(control)
     if ctl_peak >= SILENCE_FLOOR:
         fail(f"{OUT_DEVICE} is not silent with the app up and no note played "
@@ -407,23 +480,33 @@ def main():
        f"{ctl_peak:.2e})")
 
     wav = scratch / "lro_note.wav"
-    # The recording must OUTLIVE the note: the device-open delay (up to ~1 s)
-    # plus the 1 s pre-note sleep sit at the front, so with -t = args.seconds
-    # the file used to end about a second BEFORE note-off and a body that
-    # settles on the pitch late was judged on its creaky attack alone.
-    rec = subprocess.Popen(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-f", "avfoundation", "-i", f":{device_index}",
-         "-t", str(args.seconds + 1.5), "-ac", "2", "-ar", "48000", str(wav)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    # The recording must OUTLIVE the note, or a body that settles on the pitch
+    # late is judged on its creaky attack alone. It runs LEAD + the note + TAIL
+    # from the take's first sample, and note-on is timed from that sample on
+    # the recorder's own clock — not from when the recorder said so, which is
+    # a buffer or more later. Where note-on and note-off actually land is
+    # measured on the same clock rather than assumed: the note has to start
+    # past analyse()'s skip and stop at least TAIL / 2 before the take ends,
+    # or the run fails. (It used to pad 1 s before the note and 1.5 s in all,
+    # for a device-open delay seen through ffmpeg, whose capture also dropped
+    # 10-20 % of the frames.)
+    take = LEAD + args.seconds + TAIL
+    rec, take_start = start_recording(recorder, uid, take, wav)
     note = args.note
     note_hz = 440.0 * 2.0 ** ((note - 69) / 12.0)
-    time.sleep(1.0)                     # let the device open before the note
+    time.sleep(max(0.0, LEAD - (time.monotonic_ns() - take_start) / 1e9))
+    on_at = (time.monotonic_ns() - take_start) / 1e9   # just before: a lower bound
     midi.send_message([0x90, note, 100])
     time.sleep(args.seconds)
     midi.send_message([0x80, note, 0])
-    rec.wait(timeout=30)
-    ok(f"recorded {args.seconds:.1f} s note (MIDI {note}, {note_hz:.1f} Hz)")
+    off_at = (time.monotonic_ns() - take_start) / 1e9  # just after: an upper bound
+    finish_recording(rec, wav)
+    if on_at <= ONSET_SKIP or off_at > take - TAIL / 2:
+        fail(f"the note was sent from {on_at:.2f} s to {off_at:.2f} s into the "
+             f"{take:.2f} s take — it has to start after {ONSET_SKIP:.1f} s and end "
+             f"by {take - TAIL / 2:.2f} s, or the analysis does not see all of it")
+    ok(f"recorded {args.seconds:.1f} s note (MIDI {note}, {note_hz:.1f} Hz), sent "
+       f"from {on_at:.2f} s to {off_at:.2f} s into the {take:.2f} s take")
 
     window_s = min(1.0, max(0.25, args.seconds))   # see partial_trajectory
     peak, rms, trajectory, length = analyse(wav, window_s)
@@ -490,6 +573,9 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     finally:
+        for proc in RECORDERS:
+            if proc.poll() is None:
+                proc.kill()
         for proc in LAUNCHED:
             proc.terminate()
             try:
