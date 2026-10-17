@@ -1348,6 +1348,11 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
             mainGenerateBtn.setEnabled(!busy);
     };
 
+    // The pair dice presses GENERATE through the same route as the button, and
+    // dims while that route would refuse it.
+    promptPanel.onManualGenerate = [this] { triggerMainGeneration(); };
+    promptPanel.isManualGenerateEnabled = [this] { return mainGenerateBtn.isEnabled(); };
+
     // A fresh bake makes the current audio a new, unsaved sound — detach it from
     // whatever preset was last loaded/saved so Save's "Replace" warning (and its
     // pre-filled name) stops pointing at an unrelated old file (prompts/tags/seed

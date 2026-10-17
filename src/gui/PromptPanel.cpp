@@ -343,6 +343,45 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
     translateToggle.onClick = [this] { translatePromptsInPlace(); };
     addAndMakeVisible(translateToggle);
 
+    // The pair dice: writes a tested A/B pair into both impulses, then presses
+    // GENERATE - the same manual route as the button, so the Semantic Axes apply and
+    // the Regenerate cadence drops to Manual exactly as it does there. Where that
+    // press could not render THIS pair it writes nothing, because the fields would
+    // otherwise name a pair the sound does not belong to, and the preset would save
+    // it as the human impulse. That gate is pairRollBlock(), and the dice is dimmed
+    // for as long as it holds (syncPairDiceAvailability), so a refused roll is never
+    // a surprise. A render that fails in the backend afterwards leaves the pair in
+    // the fields with the error in the status line, as a typed impulse would.
+    // The typing semantics then run here, synchronously and even when the text is
+    // unchanged (setText posts nothing then): record the pair as the human impulse,
+    // drop any staged Re-Prompt rewrite and the drift snapshot. And, as on a preset
+    // load, the Re-Prompt loop's session memory is reset: its next step re-captures
+    // the pair (with its ", c3") as the originals, and setting the stance Off
+    // restores nothing older than the pair.
+    pairDice.onRoll = [this](const PromptPairs::Pair& pair)
+    {
+        // Refused exactly when the dice looked dimmed at the click, or is blocked
+        // now - and then it dims at once, so no refusal is ever invisible and a
+        // dimmed dice never writes, whichever way the 10 Hz poll lagged. Silent:
+        // the tooltip names the reason, and onStatusChanged(.., false) would read
+        // to MainPanel as "a generation ended" and re-enable GENERATE.
+        const bool lookedBlocked = shownPairRollBlock_ != PairRollBlock::None;
+        syncPairDiceAvailability();
+        if (lookedBlocked || shownPairRollBlock_ != PairRollBlock::None)
+            return false;
+        promptAEditor.setText(pair.a.text, juce::dontSendNotification);
+        promptBEditor.setText(pair.b.text, juce::dontSendNotification);
+        promptAEditor.onTextChange();
+        promptBEditor.onTextChange();
+        loopEngaged_ = false;
+        loopOriginalsValid_ = false;
+        if (onManualGenerate) onManualGenerate();
+        else                  triggerGeneration();
+        syncPairDiceAvailability();   // dim now, not on the next tick
+        return true;
+    };
+    addAndMakeVisible(pairDice);
+
     {
         static constexpr const char* labels[kNumSeedModeBtns] = { "none", "last", "auto" };
         // Icon + tooltip per seed mode: none → Ban (fixed base seed),
@@ -963,6 +1002,50 @@ void PromptPanel::timerCallback()
         && processorRef.isInferenceReady()
         && !processorRef.isInferenceCacheFull())
         triggerGeneration();
+
+    // Last, after everything above that can start a generation this tick.
+    syncPairDiceAvailability();
+}
+
+PromptPanel::PairRollBlock PromptPanel::pairRollBlock() const
+{
+    if (processorRef.isReplayActive())        return PairRollBlock::Replay;
+    if (loopStepInFlight_)                    return PairRollBlock::RepromptStep;
+    if (generating)                           return PairRollBlock::Generating;
+    if (translatingPrompts_)                  return PairRollBlock::Translating;
+    // MainPanel's own gate, which returns before the cadence drop and before
+    // triggerGeneration: GENERATE is held off during a model preload too.
+    if (isManualGenerateEnabled && !isManualGenerateEnabled())
+                                              return PairRollBlock::GenerateOff;
+    // A press on a full cache replays a stored take instead of rendering.
+    if (processorRef.isInferenceCacheFull())  return PairRollBlock::CacheFull;
+    if (!processorRef.isInferenceReady())     return PairRollBlock::Backend;
+    return PairRollBlock::None;
+}
+
+juce::String PromptPanel::pairRollBlockText(PairRollBlock block)
+{
+    switch (block)
+    {
+        case PairRollBlock::Replay:       return juce::String::fromUTF8("replay running \xe2\x80\x94 stop it to roll a pair");
+        case PairRollBlock::RepromptStep: return juce::String::fromUTF8("Re-Prompt is listening \xe2\x80\x94 roll again in a moment");
+        case PairRollBlock::Generating:   return "generating";
+        case PairRollBlock::Translating:  return "translating the impulses";
+        case PairRollBlock::GenerateOff:  return "GENERATE is busy";
+        case PairRollBlock::CacheFull:    return juce::String::fromUTF8("cache full \xe2\x80\x94 set CACHE off to roll a new pair");
+        case PairRollBlock::Backend:      return "Backend not connected";
+        case PairRollBlock::None:         break;
+    }
+    return {};
+}
+
+void PromptPanel::syncPairDiceAvailability()
+{
+    const auto block = pairRollBlock();
+    if (block == shownPairRollBlock_)
+        return;
+    shownPairRollBlock_ = block;
+    pairDice.setUnavailableReason(pairRollBlockText(block));
 }
 
 void PromptPanel::paint(juce::Graphics& g)
@@ -1127,6 +1210,7 @@ void PromptPanel::resized()
     injModeKombi2.setVisible(easy);
     injModeKombi3.setVisible(easy);
     translateToggle.setVisible(easy);
+    pairDice.setVisible(easy);
     alphaSlider.setVisible(easy);
     repromptModuleBox.setVisible(easy);
     repromptStanceBar.setVisible(easy);
@@ -1358,15 +1442,26 @@ void PromptPanel::resized()
         {
             auto modeRow = block.removeFromTop(modeBarH);
 
-            // Union-Jack translate toggle: reserve the same right region (so the mode
-            // switchbox keeps its width), then CENTRE the flag within it — midway
-            // between the switchbox and the prompt-box right edge above — rather than
-            // flush-right, so it has equal breathing room on both sides.
-            const int flagRegionW = juce::jmax(1, modeRow.getWidth() / 7 + juce::jmax(2, gap));
-            auto flagRegion = modeRow.removeFromRight(flagRegionW);
+            // The pair dice and the Union-Jack translate toggle — the two tools that
+            // act on both impulses at once — share the region right of the mode
+            // switchbox, CENTRED as one group midway between the switchbox and the
+            // prompt-box right edge above. The dice is as tall as the flag and the
+            // two sit close, so on wider panels the region keeps its old width
+            // (W/7 + gap) and the switchbox keeps its own; on the narrowest ones it
+            // grows by the few pixels the pair needs, taken from the six buttons.
             const int flagH = juce::jmax(8, juce::roundToInt(modeRow.getHeight() * 0.80f));
-            const int flagW = juce::jmin(flagRegionW, juce::roundToInt(flagH * 1.6f));
-            translateToggle.setBounds(flagRegion.withSizeKeepingCentre(flagW, flagH));
+            const int flagW = juce::roundToInt(flagH * 1.6f);
+            const int diceSide = flagH;
+            const int toolGap = juce::jmax(2, gap / 2);
+            const int toolsW = diceSide + toolGap + flagW;
+            const int flagRegionW = juce::jmin(modeRow.getWidth() / 2,
+                juce::jmax(modeRow.getWidth() / 7 + juce::jmax(2, gap), toolsW + toolGap));
+            auto flagRegion = modeRow.removeFromRight(flagRegionW);
+            auto tools = flagRegion.withSizeKeepingCentre(juce::jmin(toolsW, flagRegionW),
+                                                          flagRegion.getHeight());
+            pairDice.setBounds(tools.removeFromLeft(diceSide).withSizeKeepingCentre(diceSide, diceSide));
+            tools.removeFromLeft(toolGap);
+            translateToggle.setBounds(tools.withSizeKeepingCentre(juce::jmin(flagW, tools.getWidth()), flagH));
 
             // Six connected radio buttons fill the remaining width; the last
             // claims the integer-division remainder so the row ends flush.

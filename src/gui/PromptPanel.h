@@ -14,6 +14,7 @@
 //  wtMode — so the LCO shows the machine's READING here, not the wave)
 #include "RepromptStanceBar.h"    // Re-Prompt stance "symbol slider"
 #include "LcoTraceView.h"         // the LCO authoring trace (replaces the HEARD AS box)
+#include "PromptPairDice.h"       // the dice that rolls a tested A/B pair into the impulses
 #include "T5ynthLookAndFeel.h"    // base LnF for the model-switch text override
 
 class T5ynthProcessor;
@@ -345,6 +346,14 @@ public:
      *  (fireReplayGeneration — the tape restores the patch it snapshotted). */
     std::function<void()> onNewGenerationStarted;
 
+    /** Presses GENERATE (MainPanel::triggerMainGeneration, wired by MainPanel): the
+     *  neural side's manual route, which applies the Semantic Axes and drops the
+     *  Regenerate cadence to Manual before it renders. The pair dice uses it. */
+    std::function<void()> onManualGenerate;
+    /** Whether that press would be taken: false while MainPanel holds GENERATE
+     *  disabled (a generation, a model preload), where it returns before anything. */
+    std::function<bool()> isManualGenerateEnabled;
+
     /** Callback to read AxesPanel values with per-slot drift offsets (wired by MainPanel). */
     std::function<std::map<juce::String, float>(float, float, float)> getAxisValuesCallback;
 
@@ -498,6 +507,18 @@ private:
     // Prompts — colour-coded editors (purple A / yellow B) replace the old text labels
     juce::TextEditor promptAEditor, promptBEditor;
     UnionJackButton translateToggle;  // session-only: translate prompts → English before conditioning
+    PromptPairDice pairDice;          // rolls a tested A/B pair into both impulses and generates it
+
+    /** Why a roll of the pair dice could not render its pair right now, in the
+     *  order of triggerGeneration's own early-outs; None = it would. The dice's
+     *  click gate and its dimming both read this one answer. */
+    enum class PairRollBlock { None, Replay, RepromptStep, Generating, Translating, GenerateOff, CacheFull, Backend };
+    PairRollBlock pairRollBlock() const;
+    static juce::String pairRollBlockText(PairRollBlock block);
+    /** Dims the dice while a roll would be refused (polled from timerCallback,
+     *  acts only on a change). */
+    void syncPairDiceAvailability();
+    PairRollBlock shownPairRollBlock_ = PairRollBlock::None;
 
     // Embedding controls.  alphaLnF is declared BEFORE alphaSlider so the slider
     // (a later member) is destroyed first — the LnF must outlive its only user.
