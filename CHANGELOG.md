@@ -4,6 +4,31 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
+## 3.1.1 — shipped as v3.1.1-beta.0
+
+### The instrument
+
+- **A dice on the T5 Oscillator rolls a tested pair of impulses.** It sits next
+  to the translate flag, writes one of 32 A/B pairs into both fields and
+  generates it, as a press of Generate would: the A/B slider, the engine,
+  Resynth and the Semantic Axes act on the pair, and Regenerate drops to
+  manual. Every pair was rendered at nine positions between A and B and on two
+  seeds, on Stable Audio 3 Medium in the `SA3mus` slot with Linear injection,
+  and every prompt ends in `, c3`. Right-click opens a menu of crossings — each
+  prompt is tagged by how the sound unfolds, what vibrates and what makes it —
+  and narrows the draw to one of them; only crossings with at least two pairs
+  are listed, and the same pair never comes twice in a row. While a roll could
+  not render its pair (a generation, a translation or a Re-Prompt step under
+  way, the backend not connected, or a full Inference Cache, where Generate
+  would play a stored variant) the dice is dimmed, its tooltip says why, and a
+  click writes nothing.
+
+### Under the hood
+
+- The standalone LRO check records BlackHole through CoreAudio's AudioQueue
+  instead of ffmpeg, whose capture dropped about one frame in ten, and before a
+  take it proves the recorder holds time by recording bursts of known spacing.
+
 ## 3.1.0 — shipped as v3.1.0-beta.0, v3.1.0-beta.1
 
 ### The instrument

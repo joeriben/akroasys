@@ -24,7 +24,7 @@ authors:
 repository-code: "https://github.com/joeriben/akroasys"
 url: "https://github.com/joeriben/akroasys"
 license: GPL-3.0-or-later
-version: "3.1.0"
+version: "3.1.1"
 # date-released: 2026-08-01   # <- setzen, wenn v3.1.0 getaggt wird
 keywords:
   - synthesizer

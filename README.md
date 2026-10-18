@@ -30,7 +30,7 @@ Links:
 - Preset collection: [`joeriben/T5ynth-Presets`](https://github.com/joeriben/T5ynth-Presets)
 - Technical description of the Language-Resonant Oscillator: [`docs/LRO_TECHNICAL_DISCLOSURE.md`](docs/LRO_TECHNICAL_DISCLOSURE.md)
 - Developer documentation index: [`docs/README.md`](docs/README.md) · release history: [`CHANGELOG.md`](CHANGELOG.md)
-- Latest release: [`v3.1.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.0-beta.0) — the clarinet is a real bore, envelope curves became a continuous travel, and Shift is fine adjustment on every control. [`v3.0.0-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v3.0.0-beta.1) was the first under the new name and the first with the Language-Resonant Oscillator; [`v2.5.3-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v2.5.3-beta.1) is the last one published as **T5ynth**.
+- Latest release: [`v3.1.1-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.1-beta.0) — a dice on the T5 Oscillator rolls one of 32 tested A/B impulse pairs. [`v3.1.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.0-beta.0) made the clarinet a real bore, envelope curves a continuous travel, and Shift fine adjustment on every control. [`v3.0.0-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v3.0.0-beta.1) was the first under the new name and the first with the Language-Resonant Oscillator; [`v2.5.3-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v2.5.3-beta.1) is the last one published as **T5ynth**.
 
 Current tagged GitHub Releases publish:
 
@@ -219,6 +219,16 @@ Women and Youth (BMBFSFJ).
 akróasys is dedicated to my dear colleague at the DFKI, musician and AI
 researcher Dr. Stephan Baumann, without whom AI4ArtsEd would not have come
 into being.
+
+## What Is New in 3.1.1
+
+- **A dice that rolls a tested pair of impulses.** Next to the translate flag on
+  the T5 Oscillator, it writes one of 32 A/B pairs into both fields and
+  generates it. Every pair was rendered at nine positions between A and B on
+  Stable Audio 3 Medium, on two seeds, and passed at each. Right-click it to
+  roll only one kind of crossing, such as struck against sustained or metal
+  against air column. While a roll could not render its pair, the dice is
+  dimmed and its tooltip says why.
 
 ## What Is New in 3.1.0
 
@@ -494,7 +504,7 @@ If you use akróasys in academic work, cite it from
 sidebar and which tools read directly:
 
 ```text
-Jörissen, B. (2026). akróasys (Version 3.1.0) [Computer software].
+Jörissen, B. (2026). akróasys (Version 3.1.1) [Computer software].
 UNESCO Chair in Digital Culture and Arts in Education (UCDCAE),
 Friedrich-Alexander-Universität Erlangen-Nürnberg.
 https://github.com/joeriben/akroasys
