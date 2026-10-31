@@ -8,16 +8,17 @@ unbroken.
 
 ### The instrument
 
-- **The dice rolls 60 tested pairs instead of 32, and its menu sorts them by
-  contrast as well as by crossing.** The 28 new pairs cover what the first set
+- **The dice rolls 53 tested pairs instead of 32, and its menu sorts them by
+  contrast as well as by crossing.** The 21 new pairs cover what the first set
   left out: synthesizer waveforms against foreign sources, one source with one
-  attribute changed (`warm saw wave` / `cold saw wave`), one source in opposed
+  attribute changed (`bright cello` / `dark cello`), one source in opposed
   moods (`a baby giggling` / `a baby crying`), words that name no sound source
-  (`sweet honey` / `bitter smoke`), drum grooves at a shared tempo
+  (`pure joy` / `pure dread`), grooves at a shared tempo
   (`, 120bpm` on both sides) and nature field recordings. Pitch is no longer
   always C: grooves carry a tempo, and nature scenes and the wordless pairs
-  leave the pitch to the model. Time gains the value *groove*, Source gains
-  *synthesizer*, and a crossing may now take the same value on both sides
+  leave the pitch to the model. Source gains *synthesizer*; Time gains
+  *groove*, which no crossing holds twice yet, so it has no menu entry of its
+  own. A crossing may now take the same value on both sides
   (*nature × nature*). A new Contrast section in the right-click menu offers
   *two sources*, *one attribute changed*, *opposed moods* and *no sound
   source*. Every new pair passed the same test as the first 32: nine positions
