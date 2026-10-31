@@ -656,24 +656,44 @@ every seed.
 <h4>Rolling a tested pair</h4>
 <p>
 The dice next to the flag writes a pair of impulses into both fields at once
-and generates it. It draws from 32 pairs, each rendered at nine positions
+and generates it. It draws from 60 pairs, each rendered at nine positions
 between A and B and on two seeds, with Stable Audio 3 Medium in the
 <code>SA3mus</code> slot and the <em>Linear</em> injection mode; on another
-engine the same words land somewhere else. Every prompt ends in
-<code>, c3</code>, which puts the generated pitch on C. The dice does not draw
-the same pair twice in a row.
+engine the same words land somewhere else. Pitch and tempo are written into
+the prompts. Most end in <code>, c3</code>, which puts the generated pitch on
+C. The grooves carry a tempo such as <code>, 120bpm</code>, the same on both
+sides. The nature recordings and the pairs without a sound source name no
+pitch and leave it to the model. The dice does not draw the same pair twice
+in a row.
 </p>
 <p>
-Right-click the dice (Ctrl-click on a Mac) to choose which crossing it rolls.
-Each prompt is tagged on three axes: <strong>Time</strong> (struck / plucked,
-sustained, event texture, steady noise), <strong>Material</strong> &mdash; what
-is vibrating (metal, wood, glass, string, air column, voice, electric) &mdash;
-and <strong>Source</strong> (instrument, voice, nature, machine). A crossing such
-as <em>struck / plucked × sustained</em> rolls only the pairs whose A and B take
-those two values; the number after each entry is how many pairs it holds, and
-only crossings with at least two pairs are listed. While
-a crossing is chosen the pips are periwinkle. The choice is not saved: it
-resets when akróasys restarts or, in a DAW, when the plugin window closes.
+Right-click the dice (Ctrl-click on a Mac) to choose which crossing or
+contrast it rolls. Each prompt is tagged on three axes: <strong>Time</strong>
+(struck / plucked, sustained, event texture, steady noise, groove),
+<strong>Material</strong> &mdash; what is vibrating (metal, wood, glass, string,
+air column, voice, electric) &mdash; and <strong>Source</strong> (instrument,
+voice, nature, machine, synthesizer). A crossing such as <em>struck / plucked
+× sustained</em> rolls only the pairs whose A and B take those two values; a
+crossing such as <em>nature × nature</em> rolls the pairs where both sides take
+the same one.
+</p>
+<p>
+The <strong>Contrast</strong> section sorts the pairs by how A and B stand to
+each other: <em>two sources</em> sets two different sounding things against
+each other; <em>one attribute changed</em> keeps the source and changes one
+property (<code>warm saw wave</code> against <code>cold saw wave</code>);
+<em>opposed moods</em> keeps the source and turns its mood around
+(<code>a baby giggling</code> against <code>a baby crying</code>); <em>no sound
+source</em> pairs words that name nothing that sounds
+(<code>sweet honey</code> against <code>bitter smoke</code>), so the model
+receives a quality and no object. These last pairs carry no tags and appear
+only under Contrast.
+</p>
+<p>
+The number after each entry is how many pairs it holds, and only entries with
+at least two pairs are listed. While a crossing or contrast is chosen the pips
+are periwinkle. The choice is not saved: it resets when akróasys restarts or,
+in a DAW, when the plugin window closes.
 </p>
 <p>
 A roll is a press of <strong>Generate</strong> with a new pair in the fields.
@@ -690,7 +710,7 @@ backend is not connected), and once the Inference Cache is full, because
 Generate would then play a stored variant instead of the new pair; set the
 cache to <strong>OFF</strong> (which empties it) to roll again. A click on a
 dimmed dice writes nothing. Its right-click menu still opens, so the next
-crossing can be chosen while it waits.
+crossing or contrast can be chosen while it waits.
 </p>
 
 <h3>Generation Controls</h3>
