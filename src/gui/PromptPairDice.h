@@ -250,7 +250,7 @@ private:
     {
         const auto n = (int) PromptPairs::bank().pairs.size();
         juce::String tip = "Roll one of " + juce::String(n)
-            + " tested A/B pairs into both impulses and generate it";
+            + " tested A/B pairs into both impulses";
         if (filter_.isNarrowed())
             tip << " (" << sectionOf(filter_).label.toLowerCase()
                 << ": " << filterLabel(filter_) << ")";

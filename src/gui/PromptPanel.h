@@ -346,14 +346,6 @@ public:
      *  (fireReplayGeneration — the tape restores the patch it snapshotted). */
     std::function<void()> onNewGenerationStarted;
 
-    /** Presses GENERATE (MainPanel::triggerMainGeneration, wired by MainPanel): the
-     *  neural side's manual route, which applies the Semantic Axes and drops the
-     *  Regenerate cadence to Manual before it renders. The pair dice uses it. */
-    std::function<void()> onManualGenerate;
-    /** Whether that press would be taken: false while MainPanel holds GENERATE
-     *  disabled (a generation, a model preload), where it returns before anything. */
-    std::function<bool()> isManualGenerateEnabled;
-
     /** Callback to read AxesPanel values with per-slot drift offsets (wired by MainPanel). */
     std::function<std::map<juce::String, float>(float, float, float)> getAxisValuesCallback;
 
@@ -507,12 +499,12 @@ private:
     // Prompts — colour-coded editors (purple A / yellow B) replace the old text labels
     juce::TextEditor promptAEditor, promptBEditor;
     UnionJackButton translateToggle;  // session-only: translate prompts → English before conditioning
-    PromptPairDice pairDice;          // rolls a tested A/B pair into both impulses and generates it
+    PromptPairDice pairDice;          // rolls a tested A/B pair into both impulses
 
-    /** Why a roll of the pair dice could not render its pair right now, in the
-     *  order of triggerGeneration's own early-outs; None = it would. The dice's
-     *  click gate and its dimming both read this one answer. */
-    enum class PairRollBlock { None, Replay, RepromptStep, Generating, Translating, GenerateOff, CacheFull, Backend };
+    /** Why a roll of the pair dice may not write its pair right now: something in
+     *  flight would write over it or record the old sound under it. None = it may.
+     *  The dice's click gate and its dimming both read this one answer. */
+    enum class PairRollBlock { None, RepromptStep, Generating, Translating };
     PairRollBlock pairRollBlock() const;
     static juce::String pairRollBlockText(PairRollBlock block);
     /** Dims the dice while a roll would be refused (polled from timerCallback,

@@ -343,21 +343,22 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
     translateToggle.onClick = [this] { translatePromptsInPlace(); };
     addAndMakeVisible(translateToggle);
 
-    // The pair dice: writes a tested A/B pair into both impulses, then presses
-    // GENERATE - the same manual route as the button, so the Semantic Axes apply and
-    // the Regenerate cadence drops to Manual exactly as it does there. Where that
-    // press could not render THIS pair it writes nothing, because the fields would
-    // otherwise name a pair the sound does not belong to, and the preset would save
-    // it as the human impulse. That gate is pairRollBlock(), and the dice is dimmed
-    // for as long as it holds (syncPairDiceAvailability), so a refused roll is never
-    // a surprise. A render that fails in the backend afterwards leaves the pair in
-    // the fields with the error in the status line, as a typed impulse would.
+    // The pair dice: writes a tested A/B pair into both impulses and nothing else.
+    // Like a typed impulse it does not generate: GENERATE, Return or a running
+    // Regenerate renders it, with the cadence left where the player set it.
+    // It writes nothing while something in flight would put other text over the
+    // pair or record the old sound under it - a generation (whose completion stores
+    // the fields as the prompts of the sample it made), a translation (which writes
+    // the old impulses back in English) or a Re-Prompt step (which stages a rewrite
+    // of the old pair). That gate is pairRollBlock(), and the dice is dimmed for as
+    // long as it holds (syncPairDiceAvailability), so a refused roll is never a
+    // surprise.
     // The typing semantics then run here, synchronously and even when the text is
     // unchanged (setText posts nothing then): record the pair as the human impulse,
     // drop any staged Re-Prompt rewrite and the drift snapshot. And, as on a preset
     // load, the Re-Prompt loop's session memory is reset: its next step re-captures
     // the pair (with its ", c3") as the originals, and setting the stance Off
-    // restores nothing older than the pair.
+    // restores nothing older than the pair - nor renders it.
     pairDice.onRoll = [this](const PromptPairs::Pair& pair)
     {
         // Refused exactly when the dice looked dimmed at the click, or is blocked
@@ -375,9 +376,11 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
         promptBEditor.onTextChange();
         loopEngaged_ = false;
         loopOriginalsValid_ = false;
-        if (onManualGenerate) onManualGenerate();
-        else                  triggerGeneration();
-        syncPairDiceAvailability();   // dim now, not on the next tick
+        // The clean re-render a stance-Off restore may still owe belongs to the
+        // restored originals. With the pair written over them it is void; left
+        // armed, the timer would render the pair unasked once the pipe frees.
+        pendingOriginalReRender_ = false;
+        forceCleanRenderOnce_ = false;
         return true;
     };
     addAndMakeVisible(pairDice);
@@ -1009,17 +1012,9 @@ void PromptPanel::timerCallback()
 
 PromptPanel::PairRollBlock PromptPanel::pairRollBlock() const
 {
-    if (processorRef.isReplayActive())        return PairRollBlock::Replay;
     if (loopStepInFlight_)                    return PairRollBlock::RepromptStep;
     if (generating)                           return PairRollBlock::Generating;
     if (translatingPrompts_)                  return PairRollBlock::Translating;
-    // MainPanel's own gate, which returns before the cadence drop and before
-    // triggerGeneration: GENERATE is held off during a model preload too.
-    if (isManualGenerateEnabled && !isManualGenerateEnabled())
-                                              return PairRollBlock::GenerateOff;
-    // A press on a full cache replays a stored take instead of rendering.
-    if (processorRef.isInferenceCacheFull())  return PairRollBlock::CacheFull;
-    if (!processorRef.isInferenceReady())     return PairRollBlock::Backend;
     return PairRollBlock::None;
 }
 
@@ -1027,13 +1022,9 @@ juce::String PromptPanel::pairRollBlockText(PairRollBlock block)
 {
     switch (block)
     {
-        case PairRollBlock::Replay:       return juce::String::fromUTF8("replay running \xe2\x80\x94 stop it to roll a pair");
         case PairRollBlock::RepromptStep: return juce::String::fromUTF8("Re-Prompt is listening \xe2\x80\x94 roll again in a moment");
         case PairRollBlock::Generating:   return "generating";
         case PairRollBlock::Translating:  return "translating the impulses";
-        case PairRollBlock::GenerateOff:  return "GENERATE is busy";
-        case PairRollBlock::CacheFull:    return juce::String::fromUTF8("cache full \xe2\x80\x94 set CACHE off to roll a new pair");
-        case PairRollBlock::Backend:      return "Backend not connected";
         case PairRollBlock::None:         break;
     }
     return {};
