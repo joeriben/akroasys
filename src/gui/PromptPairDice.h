@@ -11,8 +11,10 @@
 // built standalone across the mixing range (nine A/B positions, two seeds) and
 // passed; the dice only ever draws from that list. Each prompt carries one tag
 // per axis (time / material / source, "" = no value fits), and a CROSSING is the
-// set of pairs whose A and B take two different values on one axis — that is
-// what the dice's right-click menu narrows the draw to.
+// set of pairs whose A and B take two given values on one axis - two different
+// ones, or the same one on both sides. Each pair also carries a CONTRAST, how A
+// and B stand to each other, which no tag of a single prompt can say. The dice's
+// right-click menu narrows the draw to one crossing or one contrast.
 namespace PromptPairs
 {
 struct Prompt
@@ -21,7 +23,11 @@ struct Prompt
     juce::StringArray tags;   // one per axis, in Bank::axes order; "" = untagged
 };
 
-struct Pair { Prompt a, b; };
+struct Pair
+{
+    Prompt a, b;
+    juce::String contrast;    // a value key of Bank::contrast; "" = none given
+};
 
 struct Axis
 {
@@ -32,17 +38,43 @@ struct Axis
 struct Bank
 {
     std::vector<Axis> axes;
+    Axis contrast;            // a property of the pair, read like an axis
     std::vector<Pair> pairs;
 };
 
-/** axis < 0: no constraint. Otherwise v1/v2 are two value keys of that axis,
- *  v1 before v2 in the axis's own value order. */
-struct Crossing
+/** What the dice draws from. Unconstrained while axis < 0 and contrast is empty.
+ *  A crossing: v1/v2 are value keys of `axis`, v1 not after v2 in the axis's own
+ *  value order (v1 == v2 when both prompts take that value). A contrast: one value
+ *  key of Bank::contrast, with axis left at -1. */
+struct Filter
 {
     int axis = -1;
     juce::String v1, v2;
-    bool operator== (const Crossing& o) const { return axis == o.axis && v1 == o.v1 && v2 == o.v2; }
+    juce::String contrast;
+    bool isNarrowed() const { return axis >= 0 || contrast.isNotEmpty(); }
+    bool operator== (const Filter& o) const
+    {
+        return axis == o.axis && v1 == o.v1 && v2 == o.v2 && contrast == o.contrast;
+    }
 };
+
+inline Axis parseAxis(const juce::var& a)
+{
+    Axis axis;
+    axis.key = a["key"].toString();
+    axis.label = a["label"].toString();
+    if (auto* values = a["values"].getArray())
+        for (const auto& v : *values)
+        {
+            // An empty key is skipped: "" is how an untagged prompt and the
+            // unconstrained Filter read, so as a value it would match everything.
+            const auto key = v["key"].toString();
+            if (key.isEmpty()) continue;
+            axis.valueKeys.add(key);
+            axis.valueLabels.add(v["label"].toString());
+        }
+    return axis;
+}
 
 inline Bank parseBank()
 {
@@ -51,18 +83,8 @@ inline Bank parseBank()
                                                                BinaryData::t5_prompt_pairs_jsonSize));
     if (auto* axes = root["axes"].getArray())
         for (const auto& a : *axes)
-        {
-            Axis axis;
-            axis.key = a["key"].toString();
-            axis.label = a["label"].toString();
-            if (auto* values = a["values"].getArray())
-                for (const auto& v : *values)
-                {
-                    axis.valueKeys.add(v["key"].toString());
-                    axis.valueLabels.add(v["label"].toString());
-                }
-            bank.axes.push_back(std::move(axis));
-        }
+            bank.axes.push_back(parseAxis(a));
+    bank.contrast = parseAxis(root["contrast"]);
 
     auto readPrompt = [&bank](const juce::var& p)
     {
@@ -81,7 +103,10 @@ inline Bank parseBank()
     if (auto* pairs = root["pairs"].getArray())
         for (const auto& p : *pairs)
         {
-            Pair pair { readPrompt(p["a"]), readPrompt(p["b"]) };
+            // Same rule as a tag: a contrast the bank does not list reads as none.
+            const auto contrast = p["contrast"].toString();
+            Pair pair { readPrompt(p["a"]), readPrompt(p["b"]),
+                        bank.contrast.valueKeys.contains(contrast) ? contrast : juce::String() };
             if (pair.a.text.isNotEmpty() && pair.b.text.isNotEmpty())
                 bank.pairs.push_back(std::move(pair));
         }
@@ -95,29 +120,31 @@ inline const Bank& bank()
     return b;
 }
 
-/** The crossing this pair makes on `axis`, or an unconstrained Crossing when
- *  either side is untagged there or both take the same value. */
-inline Crossing crossingOf(const Bank& b, const Pair& p, int axis)
+/** The crossing this pair makes on `axis`, or an unconstrained Filter when
+ *  either side is untagged there. */
+inline Filter crossingOf(const Bank& b, const Pair& p, int axis)
 {
     const auto& ta = p.a.tags[axis];
     const auto& tb = p.b.tags[axis];
-    if (ta.isEmpty() || tb.isEmpty() || ta == tb)
+    if (ta.isEmpty() || tb.isEmpty())
         return {};
     const auto& order = b.axes[(size_t) axis].valueKeys;
-    return order.indexOf(ta) < order.indexOf(tb) ? Crossing { axis, ta, tb }
-                                                 : Crossing { axis, tb, ta };
+    return order.indexOf(ta) <= order.indexOf(tb) ? Filter { axis, ta, tb, {} }
+                                                  : Filter { axis, tb, ta, {} };
 }
 
-inline bool matches(const Bank& b, const Pair& p, const Crossing& c)
+inline bool matches(const Bank& b, const Pair& p, const Filter& f)
 {
-    return c.axis < 0 || crossingOf(b, p, c.axis) == c;
+    if (f.contrast.isNotEmpty())
+        return p.contrast == f.contrast;
+    return f.axis < 0 || crossingOf(b, p, f.axis) == f;
 }
 } // namespace PromptPairs
 
 /** The dice next to the impulse fields. Left click draws a tested pair (within
- *  the chosen crossing, never the pair it drew last - which is why the menu only
- *  offers crossings of two pairs or more) and hands it to onRoll;
- *  right-click (ctrl-click on macOS) opens the crossing menu. Paints only on
+ *  the chosen crossing or contrast, never the pair it drew last - which is why
+ *  the menu only offers entries of two pairs or more) and hands it to onRoll;
+ *  right-click (ctrl-click on macOS) opens the menu. Paints only on
  *  hover/press/roll — no timer. */
 class PromptPairDice : public juce::Button
 {
@@ -166,7 +193,7 @@ public:
         const auto inner = r.reduced(side * 0.22f);
         const float cell = inner.getWidth() / 2.0f;
         const float pip = juce::jmax(1.6f, side * 0.15f);
-        g.setColour(crossing_.axis >= 0 ? kOscCol.brighter(0.25f) : ink);
+        g.setColour(filter_.isNarrowed() ? kOscCol.brighter(0.25f) : ink);
         for (int i = 0; i < face_; ++i)
         {
             const float cx = inner.getX() + cell * (float) kPips[face_][i][0];
@@ -187,9 +214,9 @@ private:
         const auto& b = PromptPairs::bank();
         std::vector<int> candidates;
         for (int i = 0; i < (int) b.pairs.size(); ++i)
-            if (PromptPairs::matches(b, b.pairs[(size_t) i], crossing_) && (i != lastPair_))
+            if (PromptPairs::matches(b, b.pairs[(size_t) i], filter_) && (i != lastPair_))
                 candidates.push_back(i);
-        if (candidates.empty()) return;   // the menu offers no crossing under two pairs
+        if (candidates.empty()) return;   // the menu offers no entry under two pairs
 
         auto& rng = juce::Random::getSystemRandom();
         const int pick = candidates[(size_t) rng.nextInt((int) candidates.size())];
@@ -203,12 +230,20 @@ private:
         repaint();
     }
 
-    juce::String crossingLabel(const PromptPairs::Crossing& c) const
+    static const PromptPairs::Axis& sectionOf(const PromptPairs::Filter& f)
     {
-        const auto& axis = PromptPairs::bank().axes[(size_t) c.axis];
-        return axis.valueLabels[axis.valueKeys.indexOf(c.v1)]
+        const auto& b = PromptPairs::bank();
+        return f.contrast.isNotEmpty() ? b.contrast : b.axes[(size_t) f.axis];
+    }
+
+    static juce::String filterLabel(const PromptPairs::Filter& f)
+    {
+        const auto& axis = sectionOf(f);
+        if (f.contrast.isNotEmpty())
+            return axis.valueLabels[axis.valueKeys.indexOf(f.contrast)];
+        return axis.valueLabels[axis.valueKeys.indexOf(f.v1)]
              + juce::String::fromUTF8(" \xc3\x97 ")
-             + axis.valueLabels[axis.valueKeys.indexOf(c.v2)];
+             + axis.valueLabels[axis.valueKeys.indexOf(f.v2)];
     }
 
     void refreshTooltip()
@@ -216,10 +251,10 @@ private:
         const auto n = (int) PromptPairs::bank().pairs.size();
         juce::String tip = "Roll one of " + juce::String(n)
             + " tested A/B pairs into both impulses and generate it";
-        if (crossing_.axis >= 0)
-            tip << " (" << PromptPairs::bank().axes[(size_t) crossing_.axis].label.toLowerCase()
-                << ": " << crossingLabel(crossing_) << ")";
-        tip << ". Right-click to choose which crossing it rolls.";
+        if (filter_.isNarrowed())
+            tip << " (" << sectionOf(filter_).label.toLowerCase()
+                << ": " << filterLabel(filter_) << ")";
+        tip << ". Right-click to choose which crossing or contrast it rolls.";
         if (unavailableReason_.isNotEmpty())
             tip << " Unavailable now: " << unavailableReason_ << ".";
         setTooltip(tip);
@@ -229,29 +264,43 @@ private:
     {
         const auto& b = PromptPairs::bank();
         juce::PopupMenu m;
-        std::vector<PromptPairs::Crossing> ids { PromptPairs::Crossing {} };   // id 1 = any
+        std::vector<PromptPairs::Filter> ids { PromptPairs::Filter {} };   // id 1 = any
         m.addItem(1, "Any tested pair (" + juce::String((int) b.pairs.size()) + ")",
-                  true, crossing_.axis < 0);
+                  true, ! filter_.isNarrowed());
+
+        // An entry that holds a single pair is left out everywhere: rolling it
+        // would draw the same pair every time, which is no roll at all.
+        auto addIfRollable = [&](const PromptPairs::Filter& f)
+        {
+            int count = 0;
+            for (const auto& p : b.pairs)
+                if (PromptPairs::matches(b, p, f)) ++count;
+            if (count < kMinPairsPerEntry) return;
+            ids.push_back(f);
+            m.addItem((int) ids.size(), filterLabel(f) + "  (" + juce::String(count) + ")",
+                      true, filter_ == f);
+        };
 
         for (int ax = 0; ax < (int) b.axes.size(); ++ax)
         {
-            // Every crossing on this axis that holds at least two pairs, in the
-            // axis's value order. A single-pair crossing is left out: rolling it
-            // would draw the same pair every time, which is no roll at all.
+            // Every crossing on this axis, in the axis's value order; j starts at
+            // i so that a value crossed with itself (nature x nature) is offered too.
             const auto& order = b.axes[(size_t) ax].valueKeys;
             m.addSectionHeader(b.axes[(size_t) ax].label);
             for (int i = 0; i < order.size(); ++i)
-                for (int j = i + 1; j < order.size(); ++j)
-                {
-                    const PromptPairs::Crossing c { ax, order[i], order[j] };
-                    int count = 0;
-                    for (const auto& p : b.pairs)
-                        if (PromptPairs::matches(b, p, c)) ++count;
-                    if (count < kMinPairsPerCrossing) continue;
-                    ids.push_back(c);
-                    m.addItem((int) ids.size(), crossingLabel(c) + "  (" + juce::String(count) + ")",
-                              true, crossing_ == c);
-                }
+                for (int j = i; j < order.size(); ++j)
+                    addIfRollable({ ax, order[i], order[j], {} });
+        }
+
+        if (! b.contrast.valueKeys.isEmpty())
+        {
+            m.addSectionHeader(b.contrast.label);
+            for (const auto& key : b.contrast.valueKeys)
+            {
+                PromptPairs::Filter f;
+                f.contrast = key;
+                addIfRollable(f);
+            }
         }
 
         juce::Component::SafePointer<PromptPairDice> safe(this);
@@ -259,14 +308,14 @@ private:
                         [safe, ids](int id)
                         {
                             if (safe == nullptr || id <= 0 || id > (int) ids.size()) return;
-                            safe->crossing_ = ids[(size_t) id - 1];
+                            safe->filter_ = ids[(size_t) id - 1];
                             safe->refreshTooltip();
                             safe->repaint();
                         });
     }
 
-    static constexpr int kMinPairsPerCrossing = 2;
-    PromptPairs::Crossing crossing_;   // session-only, like the panel's other view state
+    static constexpr int kMinPairsPerEntry = 2;
+    PromptPairs::Filter filter_;   // session-only, like the panel's other view state
     juce::String unavailableReason_;
     int lastPair_ = -1;
     int face_ = 5;
