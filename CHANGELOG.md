@@ -24,6 +24,13 @@ unbroken.
   source*. Every new pair passed the same test as the first 32: nine positions
   between A and B on two seeds, Stable Audio 3 Medium in the `SA3mus` slot,
   Linear injection, in the built standalone.
+- **The dice no longer generates.** A roll writes the pair into both impulse
+  fields as typing would: Generate or Return renders it, a running Regenerate
+  takes it up at its cadence, and the cadence no longer drops to manual. The
+  dice now dims only while a generation, a translation or a Re-Prompt step is
+  under way, since each of them writes over the fields or stores them with the
+  sound it made; a full Inference Cache or an unconnected backend no longer
+  stops it.
 
 ## 3.1.1 — shipped as v3.1.1-beta.0
 
