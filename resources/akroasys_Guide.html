@@ -655,8 +655,8 @@ every seed.
 </div>
 <h4>Rolling a tested pair</h4>
 <p>
-The dice next to the flag writes a pair of impulses into both fields at once
-and generates it. It draws from 53 pairs, each rendered at nine positions
+The dice next to the flag writes a pair of impulses into both fields at once.
+It draws from 53 pairs, each rendered at nine positions
 between A and B and on two seeds, with Stable Audio 3 Medium in the
 <code>SA3mus</code> slot and the <em>Linear</em> injection mode; on another
 engine the same words land somewhere else. Pitch and tempo are written into
@@ -696,19 +696,16 @@ are periwinkle. The choice is not saved: it resets when akróasys restarts or,
 in a DAW, when the plugin window closes.
 </p>
 <p>
-A roll is a press of <strong>Generate</strong> with a new pair in the fields.
-It changes the two impulses and nothing else: the A/B slider, the engine,
-Resynth and the Semantic Axes act on the pair as on any Generate, and
-Regenerate drops to manual as it does there. A running Re-Prompt starts its
-chain again from the rolled pair.
+A roll does what typing the two impulses would do, and nothing else. It does
+not generate: <strong>Generate</strong> or Return renders the pair, and a
+running Regenerate picks it up as it picks up a typed impulse, at the cadence
+you set. A running Re-Prompt starts its chain again from the rolled pair.
 </p>
 <p>
-The dice dims whenever a roll cannot render its pair, and its tooltip says
-why. That is the case whenever <strong>Generate</strong> itself would not take
-a press (during a generation, a translation or a Re-Prompt step, and while the
-backend is not connected), and once the Inference Cache is full, because
-Generate would then play a stored variant instead of the new pair; set the
-cache to <strong>OFF</strong> (which empties it) to roll again. A click on a
+The dice dims while a generation, a translation or a Re-Prompt step is under
+way, and its tooltip says which. Each of them ends by writing over the impulse
+fields or by storing them as the prompts of the sound it made, so a pair rolled
+in between would be lost or would name a sound it did not make. A click on a
 dimmed dice writes nothing. Its right-click menu still opens, so the next
 crossing or contrast can be chosen while it waits.
 </p>
