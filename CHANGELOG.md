@@ -4,6 +4,26 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
+## Unreleased — 3.1.2
+
+### The instrument
+
+- **The dice rolls 60 tested pairs instead of 32, and its menu sorts them by
+  contrast as well as by crossing.** The 28 new pairs cover what the first set
+  left out: synthesizer waveforms against foreign sources, one source with one
+  attribute changed (`warm saw wave` / `cold saw wave`), one source in opposed
+  moods (`a baby giggling` / `a baby crying`), words that name no sound source
+  (`sweet honey` / `bitter smoke`), drum grooves at a shared tempo
+  (`, 120bpm` on both sides) and nature field recordings. Pitch is no longer
+  always C: grooves carry a tempo, and nature scenes and the wordless pairs
+  leave the pitch to the model. Time gains the value *groove*, Source gains
+  *synthesizer*, and a crossing may now take the same value on both sides
+  (*nature × nature*). A new Contrast section in the right-click menu offers
+  *two sources*, *one attribute changed*, *opposed moods* and *no sound
+  source*. Every new pair passed the same test as the first 32: nine positions
+  between A and B on two seeds, Stable Audio 3 Medium in the `SA3mus` slot,
+  Linear injection, in the built standalone.
+
 ## 3.1.1 — shipped as v3.1.1-beta.0
 
 ### The instrument
