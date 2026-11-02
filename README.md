@@ -30,7 +30,7 @@ Links:
 - Preset collection: [`joeriben/T5ynth-Presets`](https://github.com/joeriben/T5ynth-Presets)
 - Technical description of the Language-Resonant Oscillator: [`docs/LRO_TECHNICAL_DISCLOSURE.md`](docs/LRO_TECHNICAL_DISCLOSURE.md)
 - Developer documentation index: [`docs/README.md`](docs/README.md) · release history: [`CHANGELOG.md`](CHANGELOG.md)
-- Latest release: [`v3.1.1-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.1-beta.0) — a dice on the T5 Oscillator rolls one of 32 tested A/B impulse pairs. [`v3.1.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.0-beta.0) made the clarinet a real bore, envelope curves a continuous travel, and Shift fine adjustment on every control. [`v3.0.0-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v3.0.0-beta.1) was the first under the new name and the first with the Language-Resonant Oscillator; [`v2.5.3-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v2.5.3-beta.1) is the last one published as **T5ynth**.
+- Latest release: [`v3.1.2-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.2-beta.0) — the dice on the T5 Oscillator composes a new A/B impulse pair from ten categories on every roll, and writes it without generating. [`v3.1.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.0-beta.0) made the clarinet a real bore, envelope curves a continuous travel, and Shift fine adjustment on every control. [`v3.0.0-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v3.0.0-beta.1) was the first under the new name and the first with the Language-Resonant Oscillator; [`v2.5.3-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v2.5.3-beta.1) is the last one published as **T5ynth**.
 
 Current tagged GitHub Releases publish:
 
@@ -219,6 +219,18 @@ Women and Youth (BMBFSFJ).
 akróasys is dedicated to my dear colleague at the DFKI, musician and AI
 researcher Dr. Stephan Baumann, without whom AI4ArtsEd would not have come
 into being.
+
+## What Is New in 3.1.2
+
+- **The dice composes a new pair on every roll.** Instead of drawing from a
+  fixed list of tested pairs, it draws each side from word pools and decides
+  which lands on A. Right-click it to choose one of ten categories — waveform ×
+  sound, voices, no sound source, one attribute changed, instrument ×
+  instrument, instrument × nature, instrument × machine, instrument × voice,
+  nature scene and groove — or leave it on *Any category*. The pairs are no
+  longer tested.
+- **The dice no longer generates.** A roll writes the pair into both impulse
+  fields as typing would; Generate, Return or a running Regenerate renders it.
 
 ## What Is New in 3.1.1
 
@@ -504,7 +516,7 @@ If you use akróasys in academic work, cite it from
 sidebar and which tools read directly:
 
 ```text
-Jörissen, B. (2026). akróasys (Version 3.1.1) [Computer software].
+Jörissen, B. (2026). akróasys (Version 3.1.2) [Computer software].
 UNESCO Chair in Digital Culture and Arts in Education (UCDCAE),
 Friedrich-Alexander-Universität Erlangen-Nürnberg.
 https://github.com/joeriben/akroasys

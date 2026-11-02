@@ -4,7 +4,7 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
-## Unreleased — 3.1.2
+## 3.1.2 — shipped as v3.1.2-beta.0
 
 ### The instrument
 
