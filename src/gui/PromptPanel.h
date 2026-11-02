@@ -14,7 +14,7 @@
 //  wtMode — so the LCO shows the machine's READING here, not the wave)
 #include "RepromptStanceBar.h"    // Re-Prompt stance "symbol slider"
 #include "LcoTraceView.h"         // the LCO authoring trace (replaces the HEARD AS box)
-#include "PromptPairDice.h"       // the dice that rolls a tested A/B pair into the impulses
+#include "PromptPairDice.h"       // the dice that rolls an A/B pair into the impulses
 #include "T5ynthLookAndFeel.h"    // base LnF for the model-switch text override
 
 class T5ynthProcessor;
@@ -499,7 +499,7 @@ private:
     // Prompts — colour-coded editors (purple A / yellow B) replace the old text labels
     juce::TextEditor promptAEditor, promptBEditor;
     UnionJackButton translateToggle;  // session-only: translate prompts → English before conditioning
-    PromptPairDice pairDice;          // rolls a tested A/B pair into both impulses
+    PromptPairDice pairDice;          // rolls an A/B pair into both impulses
 
     /** Why a roll of the pair dice may not write its pair right now: something in
      *  flight would write over it or record the old sound under it. None = it may.

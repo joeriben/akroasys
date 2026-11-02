@@ -343,7 +343,7 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
     translateToggle.onClick = [this] { translatePromptsInPlace(); };
     addAndMakeVisible(translateToggle);
 
-    // The pair dice: writes a tested A/B pair into both impulses and nothing else.
+    // The pair dice: writes a rolled A/B pair into both impulses and nothing else.
     // Like a typed impulse it does not generate: GENERATE, Return or a running
     // Regenerate renders it, with the cadence left where the player set it.
     // It writes nothing while something in flight would put other text over the
@@ -357,8 +357,8 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
     // unchanged (setText posts nothing then): record the pair as the human impulse,
     // drop any staged Re-Prompt rewrite and the drift snapshot. And, as on a preset
     // load, the Re-Prompt loop's session memory is reset: its next step re-captures
-    // the pair (with its ", c3") as the originals, and setting the stance Off
-    // restores nothing older than the pair - nor renders it.
+    // the pair (with whatever pitch or tempo it names) as the originals, and
+    // setting the stance Off restores nothing older than the pair - nor renders it.
     pairDice.onRoll = [this](const PromptPairs::Pair& pair)
     {
         // Refused exactly when the dice looked dimmed at the click, or is blocked
@@ -370,8 +370,8 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
         syncPairDiceAvailability();
         if (lookedBlocked || shownPairRollBlock_ != PairRollBlock::None)
             return false;
-        promptAEditor.setText(pair.a.text, juce::dontSendNotification);
-        promptBEditor.setText(pair.b.text, juce::dontSendNotification);
+        promptAEditor.setText(pair.a, juce::dontSendNotification);
+        promptBEditor.setText(pair.b, juce::dontSendNotification);
         promptAEditor.onTextChange();
         promptBEditor.onTextChange();
         loopEngaged_ = false;

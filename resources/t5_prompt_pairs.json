@@ -1,192 +1,209 @@
 {
-  "about": "Tested A/B impulse pairs for the T5 Oscillator dice. Every pair was rendered in the built standalone on Stable Audio 3 Medium (tonal slot), linear injection, at nine A/B positions from -1 to +1 and on two seeds, and passed: complete render, every note sounding, no clipping, no collapse, and the slider changing the sound. Pitch and tempo are part of the prompt text: ', c3' puts the generated pitch on C, ', 140bpm' sets a tempo, and prompts that name no pitch leave it to the model. Tags describe each prompt on three axes: time = how the sound unfolds, material = what is vibrating, source = what makes it. A missing tag means no value on that axis fits. The contrast describes the pair: how A and B stand to each other.",
-  "axes": [
-    { "key": "time", "label": "Time",
-      "values": [ { "key": "struck",    "label": "struck / plucked" },
-                  { "key": "sustained", "label": "sustained" },
-                  { "key": "texture",   "label": "event texture" },
-                  { "key": "noise",     "label": "steady noise" },
-                  { "key": "groove",    "label": "groove" } ] },
-    { "key": "material", "label": "Material",
-      "values": [ { "key": "metal",    "label": "metal" },
-                  { "key": "wood",     "label": "wood" },
-                  { "key": "glass",    "label": "glass" },
-                  { "key": "string",   "label": "string" },
-                  { "key": "air",      "label": "air column" },
-                  { "key": "voice",    "label": "voice" },
-                  { "key": "electric", "label": "electric" } ] },
-    { "key": "source", "label": "Source",
-      "values": [ { "key": "instrument", "label": "instrument" },
-                  { "key": "voice",      "label": "voice" },
-                  { "key": "nature",     "label": "nature" },
-                  { "key": "machine",    "label": "machine" },
-                  { "key": "synth",      "label": "synthesizer" } ] }
+  "about": "Word pools for the T5 Oscillator dice. A roll takes a category, draws one entry for each side from that side's pools and writes the two as Impulse A and B, which side gets which decided by the same roll. A side with several pools picks one of them first, each equally likely, then an entry. A pool's suffix is appended to every entry drawn from it: ', c3' puts the generated pitch on C, ', high fidelity field recording' frames a nature scene, and no suffix leaves pitch to the model. 'one attribute changed' instead draws one source and one pair of contrasting words and puts a word in front of the source on each side. 'groove' appends one tempo, drawn per roll, to both sides. Nothing here is tested as a pair: the combinations are new on every roll.",
+  "pools": [
+    {
+      "key": "waveform",
+      "suffix": ", c3",
+      "entries": [
+        "steady saw wave", "steady square wave", "steady sine wave", "triangle wave",
+        "detuned supersaw", "square wave with slow pulse width modulation",
+        "resonant filter sweep on a saw wave", "slow resonant filter sweep", "analog saw wave",
+        "thin pulse wave", "sub bass sine wave", "hard sync saw lead", "white noise sweep",
+        "FM synth bell", "ring modulated sine wave"
+      ]
+    },
+    {
+      "key": "event",
+      "suffix": ", c3",
+      "entries": [
+        "glass breaking", "a door slamming", "paper tearing", "a match being struck",
+        "a balloon popping", "a coin spinning on a table", "a cork popping",
+        "marbles rolling on a wooden floor", "a zipper being pulled", "ice cubes in a glass",
+        "footsteps on gravel", "a creaking door", "creaking wooden ship",
+        "wet finger on a wine glass"
+      ]
+    },
+    {
+      "key": "machine",
+      "suffix": ", c3",
+      "entries": [
+        "helicopter rotor", "jet engine", "steam whistle", "whistling kettle", "sonar ping",
+        "spring reverb tank", "dial-up modem", "old typewriter clacking", "sirens",
+        "a chainsaw idling", "a distant train whistle", "a washing machine spinning",
+        "a dentist's drill", "an old film projector", "a ship's horn",
+        "a fluorescent lamp humming", "a server room humming"
+      ]
+    },
+    {
+      "key": "nature",
+      "suffix": ", c3",
+      "entries": [
+        "rain on a tin roof", "dripping water in a cave", "crackling fire",
+        "wind howling through a pipe", "whale calls", "ice cracking", "distant thunder",
+        "swarm of bees", "cicadas chirping at night", "a parrot talking",
+        "hail on a greenhouse roof", "a flock of starlings chattering", "wolves howling",
+        "frogs croaking", "rustling leaves", "a cat purring", "a bubbling hot spring",
+        "waves breaking on rocks", "a crow cawing", "a lion roaring"
+      ]
+    },
+    {
+      "key": "struck",
+      "suffix": ", c3",
+      "entries": [
+        "tibetan singing bowl", "gamelan gong", "steel tongue drum", "vibraphone", "marimba",
+        "prepared piano", "musical box", "harpsichord", "celesta", "hang drum", "tubular bells",
+        "koto", "balafon", "harp", "mbira", "nylon string guitar", "Rhodes electric piano",
+        "glockenspiel", "sitar", "hammered dulcimer", "cathedral bells ringing", "kalimba",
+        "steel pan", "xylophone", "banjo", "cimbalom"
+      ]
+    },
+    {
+      "key": "sustained",
+      "suffix": ", c3",
+      "entries": [
+        "didgeridoo drone", "glass harmonica", "bowed double bass", "pipe organ", "bass clarinet",
+        "bowed cymbal", "shakuhachi", "tuba", "theremin", "erhu", "cello sul ponticello",
+        "melodica", "bagpipe drone", "accordion", "alto flute", "musical saw", "oboe",
+        "Hammond organ", "contrabassoon", "electric guitar feedback", "brass section",
+        "ondes martenot", "harmonium", "cello", "flute", "violin", "viola da gamba",
+        "French horn", "soprano saxophone", "trombone", "sarangi", "duduk", "bandoneon"
+      ]
+    },
+    {
+      "key": "sung",
+      "suffix": ", c3",
+      "entries": [
+        "throat singing", "choir humming", "monks chanting", "vocoder voice", "ghostly voices",
+        "an opera singer holding a high note", "a children's choir", "a yodeler",
+        "a Bulgarian folk choir", "a cantor singing"
+      ]
+    },
+    {
+      "key": "voice_light",
+      "suffix": "",
+      "entries": [
+        "laughing hysterically", "a baby giggling", "a crowd cheering", "a sigh of relief",
+        "someone says hi", "children talking and laughing", "a radio news announcer",
+        "someone whispering a secret", "a person humming happily", "a storyteller by a campfire",
+        "a person whispering tenderly"
+      ]
+    },
+    {
+      "key": "voice_dark",
+      "suffix": "",
+      "entries": [
+        "sobbing in tears", "a baby crying", "a crowd booing", "a scream of terror",
+        "a person shouting in anger", "a long groan of pain", "a wail of grief",
+        "a growl of rage", "panicked breathing", "a crowd in panic"
+      ]
+    },
+    {
+      "key": "choir_light",
+      "suffix": ", c3",
+      "entries": [
+        "joyful gospel choir", "heavenly choirs", "a children's choir singing a lullaby",
+        "a cheerful barbershop quartet"
+      ]
+    },
+    {
+      "key": "choir_dark",
+      "suffix": ", c3",
+      "entries": [
+        "mournful funeral choir", "demons singing in hell", "a requiem choir",
+        "a chant of doom", "ghostly voices"
+      ]
+    },
+    {
+      "key": "sourceless",
+      "suffix": "",
+      "entries": [
+        "creamy cream", "dreamy dream", "golden gold", "shadowy shadow", "frenzy frost",
+        "pure beauty", "pure evil", "pure joy", "pure dread", "deep calm", "sheer panic",
+        "liquid light", "frozen time", "tender hope", "cold despair", "soft dawn",
+        "black midnight", "icy ice", "fiery fire", "weightless drift", "crushing weight",
+        "silky silk", "rusty rust", "echoes", "velvet void", "endless longing"
+      ]
+    },
+    {
+      "key": "animals",
+      "suffix": ", high fidelity field recording",
+      "entries": [
+        "dawn chorus of blackbirds and wrens, Turdus merula, Troglodytes troglodytes",
+        "frogs croaking in a pond at night",
+        "a flock of geese passing overhead",
+        "a rookery of hundreds of rooks, Corvus frugilegus",
+        "a seabird colony on a cliff, Uria aalge, Rissa tridactyla",
+        "cicadas in a pine forest, Cicada orni",
+        "a murmuration of starlings at dusk, Sturnus vulgaris",
+        "crickets in a summer meadow at dusk",
+        "a colony of sea lions, Zalophus californianus",
+        "a pack of wolves howling, Canis lupus",
+        "a swamp full of bullfrogs, Lithobates catesbeianus",
+        "howler monkeys at dawn, Alouatta",
+        "a beehive in summer, Apis mellifera"
+      ]
+    },
+    {
+      "key": "water_weather",
+      "suffix": ", high fidelity field recording",
+      "entries": [
+        "a mountain stream running over stones", "heavy rain on leaves",
+        "wind in tall pine trees", "surf rolling onto a pebble beach", "a waterfall",
+        "a glacier river roaring", "dry reeds rustling in the wind", "a bubbling hot spring",
+        "a thunderstorm over the plains", "hail on a lake",
+        "a blizzard howling across the tundra", "waves lapping in a sea cave",
+        "drizzle on a forest floor", "a geyser erupting"
+      ]
+    },
+    {
+      "key": "attribute_source",
+      "suffix": ", c3",
+      "entries": [
+        "saw wave", "square wave", "synth drone", "synth bass", "cello", "flute", "trumpet",
+        "double bass", "clarinet", "electric guitar", "piano", "harp", "organ", "string pad",
+        "choir", "bell"
+      ]
+    },
+    {
+      "key": "groove",
+      "suffix": "",
+      "entries": [
+        "afrobeat drum groove", "a cumbia band", "a krautrock band", "techno drumtrack",
+        "house drumtrack", "breakbeat drumtrack", "boom bap drumtrack", "a samba group",
+        "a reggae band", "a bossa nova drum groove", "a tabla groove", "a funk band",
+        "a highlife band", "a polka band", "a jazz trio", "a drum and bass beat",
+        "a dembow beat", "tribal percussion ensemble"
+      ]
+    }
   ],
-  "contrast":
-  { "key": "contrast", "label": "Contrast",
-    "values": [ { "key": "two_sources",   "label": "two sources" },
-                { "key": "one_attribute", "label": "one attribute changed" },
-                { "key": "opposed_moods", "label": "opposed moods" },
-                { "key": "no_source",     "label": "no sound source" } ] },
-  "pairs": [
-    { "a": { "text": "tibetan singing bowl, c3",        "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "didgeridoo drone, c3",            "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "glass harmonica, c3",             "time": "sustained", "material": "glass",    "source": "instrument" },
-      "b": { "text": "bowed double bass, c3",           "time": "sustained", "material": "string",   "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "gamelan gong, c3",                "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "pipe organ, c3",                  "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "steel tongue drum, c3",           "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "bass clarinet, c3",               "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "vibraphone, c3",                  "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "throat singing, c3",              "time": "sustained", "material": "voice",    "source": "voice" },
-      "contrast": "two_sources" },
-    { "a": { "text": "marimba, c3",                     "time": "struck",    "material": "wood",     "source": "instrument" },
-      "b": { "text": "bowed cymbal, c3",                "time": "sustained", "material": "metal",    "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "prepared piano, c3",              "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "shakuhachi, c3",                  "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "musical box, c3",                 "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "tuba, c3",                        "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "harpsichord, c3",                 "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "theremin, c3",                    "time": "sustained", "material": "electric", "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "celesta, c3",                     "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "erhu, c3",                        "time": "sustained", "material": "string",   "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "hang drum, c3",                   "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "choir humming, c3",               "time": "sustained", "material": "voice",    "source": "voice" },
-      "contrast": "two_sources" },
-    { "a": { "text": "tubular bells, c3",               "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "cello sul ponticello, c3",        "time": "sustained", "material": "string",   "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "koto, c3",                        "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "melodica, c3",                    "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "balafon, c3",                     "time": "struck",    "material": "wood",     "source": "instrument" },
-      "b": { "text": "bagpipe drone, c3",               "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "harp, c3",                        "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "rain on a tin roof, c3",          "time": "texture",   "material": "metal",    "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "accordion, c3",                   "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "steam whistle, c3",               "time": "sustained", "material": "air",      "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "mbira, c3",                       "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "dripping water in a cave, c3",    "time": "texture",   "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "nylon string guitar, c3",         "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "crackling fire, c3",              "time": "texture",   "material": "wood",     "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "alto flute, c3",                  "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "wind howling through a pipe, c3", "time": "noise",     "material": "air",      "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "Rhodes electric piano, c3",       "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "sonar ping, c3",                  "time": "struck",    "material": "electric", "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "musical saw, c3",                 "time": "sustained", "material": "metal",    "source": "instrument" },
-      "b": { "text": "whale calls, c3",                 "time": "sustained", "material": "voice",    "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "oboe, c3",                        "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "creaking wooden ship, c3",        "time": "texture",   "material": "wood" },
-      "contrast": "two_sources" },
-    { "a": { "text": "glockenspiel, c3",                "time": "struck",    "material": "metal",    "source": "instrument" },
-      "b": { "text": "ice cracking, c3",                "time": "texture",   "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "Hammond organ, c3",               "time": "sustained", "material": "electric", "source": "instrument" },
-      "b": { "text": "helicopter rotor, c3",            "time": "noise",     "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "contrabassoon, c3",               "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "distant thunder, c3",             "time": "texture",   "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "sitar, c3",                       "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "electric guitar feedback, c3",    "time": "sustained", "material": "string",   "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "brass section, c3",               "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "jet engine, c3",                  "time": "noise",     "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "monks chanting, c3",              "time": "sustained", "material": "voice",    "source": "voice" },
-      "b": { "text": "dial-up modem, c3",               "time": "texture",   "material": "electric", "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "ondes martenot, c3",              "time": "sustained", "material": "electric", "source": "instrument" },
-      "b": { "text": "wet finger on a wine glass, c3",  "time": "sustained", "material": "glass" },
-      "contrast": "two_sources" },
-    { "a": { "text": "harmonium, c3",                   "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "swarm of bees, c3",               "time": "noise",     "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "hammered dulcimer, c3",           "time": "struck",    "material": "string",   "source": "instrument" },
-      "b": { "text": "spring reverb tank, c3",          "time": "struck",    "material": "metal",    "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "vocoder voice, c3",               "time": "sustained", "material": "electric", "source": "voice" },
-      "b": { "text": "cello, c3",                       "time": "sustained", "material": "string",   "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "steady sine wave, c3",            "time": "sustained", "material": "electric", "source": "synth" },
-      "b": { "text": "cicadas chirping at night, c3",   "time": "texture",   "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "detuned supersaw, c3",            "time": "sustained", "material": "electric", "source": "synth" },
-      "b": { "text": "cathedral bells ringing, c3",     "time": "struck",    "material": "metal",    "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "square wave with slow pulse width modulation, c3", "time": "sustained", "material": "electric", "source": "synth" },
-      "b": { "text": "old typewriter clacking, c3",     "time": "texture",   "material": "metal",    "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "resonant filter sweep on a saw wave, c3", "time": "sustained", "material": "electric", "source": "synth" },
-      "b": { "text": "whistling kettle, c3",            "time": "sustained", "material": "air",      "source": "machine" },
-      "contrast": "two_sources" },
-    { "a": { "text": "a baby giggling, c3",             "time": "texture",   "material": "voice",    "source": "voice" },
-      "b": { "text": "a baby crying, c3",               "time": "sustained", "material": "voice",    "source": "voice" },
-      "contrast": "opposed_moods" },
-    { "a": { "text": "a crowd cheering, c3",            "time": "texture",   "material": "voice",    "source": "voice" },
-      "b": { "text": "a crowd booing, c3",              "time": "texture",   "material": "voice",    "source": "voice" },
-      "contrast": "opposed_moods" },
-    { "a": { "text": "a person whispering tenderly, c3", "time": "noise",     "material": "voice",    "source": "voice" },
-      "b": { "text": "a person shouting in anger, c3",  "time": "texture",   "material": "voice",    "source": "voice" },
-      "contrast": "opposed_moods" },
-    { "a": { "text": "a sigh of relief, c3",            "time": "noise",     "material": "voice",    "source": "voice" },
-      "b": { "text": "a scream of terror, c3",          "time": "sustained", "material": "voice",    "source": "voice" },
-      "contrast": "opposed_moods" },
-    { "a": { "text": "joyful gospel choir, c3",         "time": "sustained", "material": "voice",    "source": "voice" },
-      "b": { "text": "mournful funeral choir, c3",      "time": "sustained", "material": "voice",    "source": "voice" },
-      "contrast": "opposed_moods" },
-    { "a": { "text": "a radio news announcer, c3",      "time": "texture",   "material": "voice",    "source": "voice" },
-      "b": { "text": "a parrot talking, c3",            "time": "texture",   "material": "voice",    "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "bright cello, c3",                "time": "sustained", "material": "string",   "source": "instrument" },
-      "b": { "text": "dark cello, c3",                  "time": "sustained", "material": "string",   "source": "instrument" },
-      "contrast": "one_attribute" },
-    { "a": { "text": "breathy flute, c3",               "time": "sustained", "material": "air",      "source": "instrument" },
-      "b": { "text": "shrill flute, c3",                "time": "sustained", "material": "air",      "source": "instrument" },
-      "contrast": "one_attribute" },
-    { "a": { "text": "golden gold" },
-      "b": { "text": "shadowy shadow" },
-      "contrast": "no_source" },
-    { "a": { "text": "pure joy" },
-      "b": { "text": "pure dread" },
-      "contrast": "no_source" },
-    { "a": { "text": "deep calm" },
-      "b": { "text": "sheer panic" },
-      "contrast": "no_source" },
-    { "a": { "text": "marimba, c3, 120bpm",             "time": "struck",    "material": "wood",     "source": "instrument" },
-      "b": { "text": "afrobeat drum groove, 120bpm",    "time": "groove",    "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "a cumbia band, 100bpm",           "time": "groove",    "source": "instrument" },
-      "b": { "text": "a krautrock band, 100bpm",        "time": "groove",    "source": "instrument" },
-      "contrast": "two_sources" },
-    { "a": { "text": "dawn chorus of blackbirds and wrens, Turdus merula, Troglodytes troglodytes, high fidelity field recording", "time": "texture",   "material": "voice",    "source": "nature" },
-      "b": { "text": "a mountain stream running over stones, high fidelity field recording", "time": "noise",     "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "frogs croaking in a pond at night, high fidelity field recording", "time": "texture",   "material": "voice",    "source": "nature" },
-      "b": { "text": "heavy rain on leaves, high fidelity field recording", "time": "noise",     "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "wind in tall pine trees, high fidelity field recording", "time": "noise",     "material": "air",      "source": "nature" },
-      "b": { "text": "surf rolling onto a pebble beach, high fidelity field recording", "time": "noise",     "source": "nature" },
-      "contrast": "two_sources" },
-    { "a": { "text": "a waterfall, high fidelity field recording", "time": "noise",     "source": "nature" },
-      "b": { "text": "a flock of geese passing overhead, high fidelity field recording", "time": "texture",   "material": "voice",    "source": "nature" },
-      "contrast": "two_sources" }
+  "categories": [
+    { "key": "waveform_sound", "label": "waveform × sound",
+      "a": ["waveform"], "b": ["event", "machine", "nature"] },
+    { "key": "voices", "label": "voices",
+      "a": ["voice_light", "choir_light"], "b": ["voice_dark", "choir_dark"] },
+    { "key": "no_source", "label": "no sound source",
+      "a": ["sourceless"], "b": ["sourceless", "struck", "sustained"] },
+    { "key": "one_attribute", "label": "one attribute changed",
+      "source": ["attribute_source"],
+      "words": [
+        ["steady", "floating"], ["bright", "dark"], ["breathy", "shrill"], ["resonant", "deep"],
+        ["smooth", "wobbling"], ["muted", "blaring"], ["gentle", "scratchy"], ["mellow", "reedy"],
+        ["dry", "shimmering"], ["soft", "hard"], ["electronic", "natural"], ["distant", "close"],
+        ["fragile", "heavy"], ["glassy", "dusty"], ["frozen", "melting"], ["tight", "loose"],
+        ["calm", "nervous"]
+      ] },
+    { "key": "instrument_instrument", "label": "instrument × instrument",
+      "a": ["struck"], "b": ["sustained"] },
+    { "key": "instrument_nature", "label": "instrument × nature",
+      "a": ["struck", "sustained"], "b": ["nature"] },
+    { "key": "instrument_machine", "label": "instrument × machine",
+      "a": ["struck", "sustained"], "b": ["machine"] },
+    { "key": "instrument_voice", "label": "instrument × voice",
+      "a": ["struck", "sustained"], "b": ["sung"] },
+    { "key": "nature_scene", "label": "nature scene",
+      "a": ["animals"], "b": ["water_weather"] },
+    { "key": "groove", "label": "groove",
+      "a": ["waveform", "struck", "sustained"], "b": ["groove"],
+      "tempo": [90, 100, 110, 120, 128, 140] }
   ]
 }
