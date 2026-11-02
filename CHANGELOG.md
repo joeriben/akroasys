@@ -8,22 +8,18 @@ unbroken.
 
 ### The instrument
 
-- **The dice rolls 53 tested pairs instead of 32, and its menu sorts them by
-  contrast as well as by crossing.** The 21 new pairs cover what the first set
-  left out: synthesizer waveforms against foreign sources, one source with one
-  attribute changed (`bright cello` / `dark cello`), one source in opposed
-  moods (`a baby giggling` / `a baby crying`), words that name no sound source
-  (`pure joy` / `pure dread`), grooves at a shared tempo
-  (`, 120bpm` on both sides) and nature field recordings. Pitch is no longer
-  always C: grooves carry a tempo, and nature scenes and the wordless pairs
-  leave the pitch to the model. Source gains *synthesizer*; Time gains
-  *groove*, which no crossing holds twice yet, so it has no menu entry of its
-  own. A crossing may now take the same value on both sides
-  (*nature × nature*). A new Contrast section in the right-click menu offers
-  *two sources*, *one attribute changed*, *opposed moods* and *no sound
-  source*. Every new pair passed the same test as the first 32: nine positions
-  between A and B on two seeds, Stable Audio 3 Medium in the `SA3mus` slot,
-  Linear injection, in the built standalone.
+- **The dice composes a new pair on every roll instead of drawing from a fixed
+  list.** Its right-click menu offers ten categories, each setting two kinds
+  of sound against each other: *waveform × sound*, *voices* (a light vocal
+  sound against a dark one), *no sound source*, *one attribute changed* (one
+  source, two contrasting words), *instrument × instrument* (struck against
+  sustained), *instrument × nature*, *instrument × machine*, *instrument ×
+  voice*, *nature scene* and *groove* (one tempo on both sides). A roll draws
+  each side from its category's word pools and decides which lands on A;
+  *Any category* picks the category too. The 32 tested pairs became words in
+  those pools, and the pairs are no longer tested. Pitch is no longer always
+  C: speech, cries and laughter, words without a source and nature scenes
+  leave it to the model, and grooves carry a tempo.
 - **The dice no longer generates.** A roll writes the pair into both impulse
   fields as typing would: Generate or Return renders it, a running Regenerate
   takes it up at its cadence, and the cadence no longer drops to manual. The
