@@ -653,47 +653,54 @@ every seed.
   To pin one character regardless of where the slider sits, type the same text
   in both fields &mdash; <code>0.5·A + 0.5·A = A</code> at every position.
 </div>
-<h4>Rolling a tested pair</h4>
+<h4>Rolling a pair</h4>
 <p>
 The dice next to the flag writes a pair of impulses into both fields at once.
-It draws from 53 pairs, each rendered at nine positions
-between A and B and on two seeds, with Stable Audio 3 Medium in the
-<code>SA3mus</code> slot and the <em>Linear</em> injection mode; on another
-engine the same words land somewhere else. Pitch and tempo are written into
-the prompts. Most end in <code>, c3</code>, which puts the generated pitch on
-C. The grooves carry a tempo such as <code>, 120bpm</code>, the same on both
-sides. The nature recordings and the pairs without a sound source name no
-pitch and leave it to the model. The dice does not draw the same pair twice
+It does not pick from a fixed list: each roll takes a category and draws a
+fresh entry for each side from that category's word pools, so a combination
+rarely comes back, and which entry lands on A and which on B is part of the
+roll. The pairs are not tested; where the slider takes a combination is yours
+to hear.
+</p>
+<p>
+Right-click the dice (Ctrl-click on a Mac) to choose the category. Each one
+sets two kinds of sound against each other:
+</p>
+<ul>
+  <li><strong>waveform × sound</strong> &mdash; a synthesizer waveform against
+  an event, a machine or a sound from nature.</li>
+  <li><strong>voices</strong> &mdash; a light vocal sound (laughter, cheering,
+  a joyful choir, speech) against a dark one (sobbing, a scream, a mournful
+  choir).</li>
+  <li><strong>no sound source</strong> &mdash; a word that names nothing that
+  sounds (<code>golden gold</code>, <code>pure dread</code>) against another
+  such word or an instrument, so the model receives a quality rather than an
+  object.</li>
+  <li><strong>one attribute changed</strong> &mdash; one source on both sides,
+  with two contrasting words in front (<code>steady saw wave</code> against
+  <code>floating saw wave</code>).</li>
+  <li><strong>instrument × instrument</strong> &mdash; a struck or plucked
+  instrument against a sustained one.</li>
+  <li><strong>instrument × nature</strong>, <strong>instrument ×
+  machine</strong>, <strong>instrument × voice</strong> &mdash; an instrument
+  against a sound from nature, a machine or a singing voice.</li>
+  <li><strong>nature scene</strong> &mdash; animals against water or weather,
+  both as field recordings.</li>
+  <li><strong>groove</strong> &mdash; a waveform or an instrument against a
+  drum groove or a band, at one tempo on both sides.</li>
+</ul>
+<p>
+<em>Any category</em> picks the category anew for every roll. While a category
+is chosen the pips are periwinkle. The choice is not saved: it resets when
+akróasys restarts or, in a DAW, when the plugin window closes.
+</p>
+<p>
+Pitch and tempo are written into the prompts. Most prompts end in
+<code>, c3</code>, which puts the generated pitch on C. Speech,
+laughter and cries, the words without a source and the nature scenes name no
+pitch and leave it to the model. A groove adds a tempo such as
+<code>, 120bpm</code> to both sides. The dice never writes the same pair twice
 in a row.
-</p>
-<p>
-Right-click the dice (Ctrl-click on a Mac) to choose which crossing or
-contrast it rolls. Each prompt is tagged on three axes: <strong>Time</strong>
-(struck / plucked, sustained, event texture, steady noise, groove),
-<strong>Material</strong> &mdash; what is vibrating (metal, wood, glass, string,
-air column, voice, electric) &mdash; and <strong>Source</strong> (instrument,
-voice, nature, machine, synthesizer). A crossing such as <em>struck / plucked
-× sustained</em> rolls only the pairs whose A and B take those two values; a
-crossing such as <em>nature × nature</em> rolls the pairs where both sides take
-the same one.
-</p>
-<p>
-The <strong>Contrast</strong> section sorts the pairs by how A and B stand to
-each other: <em>two sources</em> sets two different sounding things against
-each other; <em>one attribute changed</em> keeps the source and changes one
-property (<code>bright cello</code> against <code>dark cello</code>);
-<em>opposed moods</em> keeps the source and turns its mood around
-(<code>a baby giggling</code> against <code>a baby crying</code>); <em>no sound
-source</em> pairs words that name nothing that sounds
-(<code>pure joy</code> against <code>pure dread</code>), so the model
-receives a quality and no object. These last pairs carry no tags and appear
-only under Contrast.
-</p>
-<p>
-The number after each entry is how many pairs it holds, and only entries with
-at least two pairs are listed. While a crossing or contrast is chosen the pips
-are periwinkle. The choice is not saved: it resets when akróasys restarts or,
-in a DAW, when the plugin window closes.
 </p>
 <p>
 A roll does what typing the two impulses would do, and nothing else. It does
@@ -707,7 +714,7 @@ way, and its tooltip says which. Each of them ends by writing over the impulse
 fields or by storing them as the prompts of the sound it made, so a pair rolled
 in between would be lost or would name a sound it did not make. A click on a
 dimmed dice writes nothing. Its right-click menu still opens, so the next
-crossing or contrast can be chosen while it waits.
+category can be chosen while it waits.
 </p>
 
 <h3>Generation Controls</h3>
