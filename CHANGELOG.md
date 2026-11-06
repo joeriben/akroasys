@@ -4,6 +4,17 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
+## Unreleased
+
+### MIDI
+
+- **With a Launch Control XL selected as the MIDI output, an MPE controller no
+  longer loses every fifteenth note.** Choosing an XL output made the synth
+  ignore all notes on channel 16, which is the XL's encoder channel but also
+  one of the channels an MPE controller rotates through. An Expressive E Osmose
+  lands there on every fifteenth key, so that key made no sound. Only the XL's
+  own echo of its mode switch is ignored now.
+
 ## 3.1.2 — shipped as v3.1.2-beta.0
 
 ### The instrument
