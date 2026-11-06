@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include <atomic>
 
 // ── Novation Launch Control XL 3 (Mk3) — LED protocol + Page 1 CC bindings ──
 //
@@ -117,9 +118,41 @@ struct LaunchControlXLLeds
     // honored once the device is in DAW mode — programmer's reference p.8-12; a
     // Custom Mode's LEDs cannot be recoloured by the host. Sent as Note On ch16,
     // note 0x0C, velocity 127 (enable) / 0 (disable): bytes 9F 0C 7F / 9F 0C 00.
+    static constexpr juce::uint8 kDawModeStatus     = 0x9F;
+    static constexpr juce::uint8 kDawModeNote       = 0x0C;
+    static constexpr juce::uint8 kDawModeOnVelocity = 0x7F;
+
     static juce::MidiMessage dawMode(bool enable)
     {
-        return juce::MidiMessage(0x9F, 0x0C, enable ? 0x7F : 0x00);
+        return juce::MidiMessage(kDawModeStatus, kDawModeNote, enable ? kDawModeOnVelocity : 0x00);
+    }
+
+    // Counted by whoever sends a switch, BEFORE it goes out, and for the whole
+    // process: the XL is one device, so its echo reaches every instance that
+    // listens to it, whichever one sent the switch. See DawModeEchoFilter.
+    inline static std::atomic<juce::uint32> dawModeEnablesSent  { 0 };
+    inline static std::atomic<juce::uint32> dawModeDisablesSent { 0 };
+
+    static void countDawModeSwitch(bool enable) noexcept
+    {
+        (enable ? dawModeEnablesSent : dawModeDisablesSent).fetch_add(1, std::memory_order_release);
+    }
+
+    // Measured on an LCXL3: its "DAW In" port answers a switch, its "MIDI In" port
+    // does not. A port that stays silent owes no echo, so nothing is ever held back
+    // for it. A port nobody measured counts as answering: an echo let through hangs
+    // a voice.
+    static bool portEchoesDawMode(const juce::String& portName)
+    {
+        return ! portName.containsIgnoreCase("MIDI In");
+    }
+
+    static bool isDawModeSwitch(const juce::uint8* bytes, int size, bool enable) noexcept
+    {
+        return size == 3
+            && bytes[0] == kDawModeStatus
+            && bytes[1] == kDawModeNote
+            && bytes[2] == (enable ? kDawModeOnVelocity : 0x00);
     }
 
     // ── Feature controls (programmer's reference p.16-17) ───────────────────────
@@ -262,4 +295,112 @@ struct LaunchControlXLLeds
             return juce::String(canonical);
         return loadedParamId;
     }
+};
+
+// Takes the XL's echo of a DAW-mode switch out of a block's MIDI, before anything
+// reads it.
+//
+// The device repeats dawMode() back on its DAW Out port: measured on an LCXL3,
+// 9F 0C 7F about 10 ms after the enable and 9F 0C 00 after the disable, and
+// nothing at all on its MIDI port. Taken for keys, the enable holds a voice on
+// note 12 (the cause of the intermittent startup pulsating sound) and the disable
+// lifts whatever is really held there. But the same bytes
+// ARE a key: note 12 on channel 16, and an MPE controller plays on channel 16. An
+// Osmose rotates its notes strictly over channels 2-16, so a filter on the channel
+// lost every fifteenth note.
+//
+// A MidiBuffer does not name its source, so the one thing that tells the echo from
+// the key is that a switch was just sent. Each switch on a port that echoes
+// (portEchoesDawMode) therefore excuses ONE message of its own kind, within
+// kWindowSeconds of audio; the first one to arrive is taken and the bytes are a key
+// again. A real key that beats its echo there swaps roles with it, which comes to
+// the same thing. The window is a hundred times the measured delay because an echo
+// let through hangs a voice.
+//
+// A switch sent by another program is not seen here, and its echo plays as a key.
+class DawModeEchoFilter
+{
+public:
+    static constexpr double kWindowSeconds = 1.0;
+    static constexpr int    kScratchBytes  = 65536;   // about 7000 messages in one block
+
+    // `scratch` is the buffer process() will be handed.
+    void prepare(double sampleRate, juce::MidiBuffer& scratch)
+    {
+        windowSamples_ = juce::roundToInt(sampleRate * kWindowSeconds);
+        scratch.ensureSize(kScratchBytes);
+    }
+
+    // Audio thread, first thing in every block, bypassed ones too: the window is
+    // counted in audio time, so an output restored before audio runs is still
+    // covered when the first block arrives with the echo in it.
+    void process(juce::MidiBuffer& midi, juce::MidiBuffer& scratch, int numSamples)
+    {
+        enables_.collect(LaunchControlXLLeds::dawModeEnablesSent.load(std::memory_order_acquire),
+                         windowSamples_);
+        disables_.collect(LaunchControlXLLeds::dawModeDisablesSent.load(std::memory_order_acquire),
+                          windowSamples_);
+
+        if (enables_.owed == 0 && disables_.owed == 0)
+            return;
+
+        scratch.clear();
+        bool removed = false;
+        for (const auto metadata : midi)
+        {
+            if (enables_.owed > 0
+                && LaunchControlXLLeds::isDawModeSwitch(metadata.data, metadata.numBytes, true))
+            {
+                --enables_.owed;
+                removed = true;
+            }
+            else if (disables_.owed > 0
+                     && LaunchControlXLLeds::isDawModeSwitch(metadata.data, metadata.numBytes, false))
+            {
+                --disables_.owed;
+                removed = true;
+            }
+            else
+            {
+                scratch.addEvent(metadata.data, metadata.numBytes, metadata.samplePosition);
+            }
+        }
+
+        if (removed)
+        {
+            midi.clear();
+            midi.addEvents(scratch, 0, -1, 0);
+        }
+
+        enables_.age(numSamples);
+        disables_.age(numSamples);
+    }
+
+private:
+    struct Echoes
+    {
+        juce::uint32 seen;      // a new instance owes nothing for switches before it
+        int owed = 0;
+        int samplesLeft = 0;
+
+        void collect(juce::uint32 sent, int windowSamples) noexcept
+        {
+            if (sent == seen)
+                return;
+            owed += static_cast<int>(sent - seen);
+            seen = sent;
+            samplesLeft = windowSamples;
+        }
+
+        void age(int numSamples) noexcept
+        {
+            samplesLeft -= numSamples;
+            if (samplesLeft <= 0)
+                owed = 0;
+        }
+    };
+
+    int    windowSamples_ = 0;
+    Echoes enables_  { LaunchControlXLLeds::dawModeEnablesSent.load(std::memory_order_relaxed) };
+    Echoes disables_ { LaunchControlXLLeds::dawModeDisablesSent.load(std::memory_order_relaxed) };
 };

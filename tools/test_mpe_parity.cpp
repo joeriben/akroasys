@@ -18,11 +18,12 @@
 //
 //   * The Launch Control XL DAW-mode exemptions (parity doc capability 19).
 //     dawModeActive_ is only set when a real XL output device is opened
-//     (PluginProcessor.cpp:9567); nothing in an offline harness can set it. The
+//     (PluginProcessor.cpp:9567); nothing in this harness can set it. The CC
 //     guard itself is a literal `dawModeActive_ && channel == 16` condition
 //     carried across unchanged, so it is preserved by construction, not by
 //     test. What IS tested here is the other half: with DAW mode inactive,
-//     channel 16 behaves as an ordinary MPE channel.
+//     channel 16 behaves as an ordinary MPE channel. Notes with DAW mode ON are
+//     tools/test_xl_mpe_channel16.cpp, which opens a real XL-named output.
 //
 //   * Capability 26 -- expression applied at the event's SAMPLE POSITION rather
 //     than at block start. Voice state cannot show it: only a note-on resets

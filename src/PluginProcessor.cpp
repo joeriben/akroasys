@@ -2680,6 +2680,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout T5ynthProcessor::createParam
 
 void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    dawModeEchoFilter_.prepare(sampleRate, arpFilteredMidi_);
+
     if (eventLogWriter_)
         eventLogWriter_->setSampleRate(sampleRate);
 
@@ -3752,6 +3754,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // on a publisher, which is why publishers keep the expensive work outside
     // the lock and only move already-prepared data inside it.
     const juce::ScopedLock callbackLock (getCallbackLock());
+
+    // Here and nowhere else: from this line on, every note in this buffer is a key.
+    dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
 
     juce::ScopedNoDenormals noDenormals;
 
@@ -5041,13 +5046,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         {
             auto msg = metadata.getMessage();
             const int ch = msg.getChannel();
-            // XL DAW-mode ch16 encoder channel is never musical — on note-OFF
-            // either, or a ch16 note-off evicts a real held key of that number.
-            const bool ch16Encoder = dawModeActive_.load(std::memory_order_relaxed) && ch == 16;
             if (msg.isNoteOn())
             {
-                if (ch16Encoder)
-                    continue;
                 // With the arp ON the note events are filtered out of the
                 // stream and never reach the walk, so this is the only place
                 // the key ledger can be kept -- noteOff cannot do it either,
@@ -5069,8 +5069,6 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             }
             else if (msg.isNoteOff())
             {
-                if (ch16Encoder)
-                    continue;
                 arpeggiator.noteOff(msg.getNoteNumber(), ch);
                 // The finger leaving is the ONLY thing that ends this note's
                 // pressure reading while the arp is on. The arp drops a lifted
@@ -5150,10 +5148,6 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             {
                 const auto msg = metadata.getMessage();
                 const int ch = msg.getChannel();
-                // XL DAW-mode ch16 is the encoder channel, on note-OFF too: without
-                // this guard a ch16 note-off evicts a real held key of that number.
-                if (dawModeActive_.load(std::memory_order_relaxed) && ch == 16)
-                    continue;
                 // No key ledger here. This loop runs over the WHOLE buffer
                 // before a sample of it is walked, and the ledger decides what
                 // an aftertouch message may write -- so keeping it here answers
@@ -5643,14 +5637,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     // that this synth declines on channel 1 is exactly the case the
                     // read-out has to be able to show.
                     observeMpeMessage (msg, channel);
-                    if (msg.isNoteOn()
-                        // XL DAW-mode ch16 is the encoder/fader channel and never sends
-                        // musical Note Ons. Without this guard the DAW-mode-enable message
-                        // we send (0x9F 0x0C 0x7F) can loop back via the OS MIDI stack and
-                        // trigger a stuck voice on note 12 — the root cause of the
-                        // intermittent startup pulsating sound.
-                        && ! (dawModeActive_.load(std::memory_order_relaxed)
-                              && channel == 16))
+                    if (msg.isNoteOn())
                     {
                         const int note = msg.getNoteNumber();
                         const float velocity = msg.getFloatVelocity();
@@ -6733,6 +6720,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 void T5ynthProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     noteHostBlock (juce::Time::getHighResolutionTicks(), buffer.getNumSamples());
+    dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
     seedOutputStageGains();
     settleSnapFadeWhileSilent();
     AudioProcessor::processBlockBypassed(buffer, midiMessages);
@@ -12797,6 +12785,7 @@ void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId)
         const auto outName = midiOutputDevice_->getName();
         isXL = outName.containsIgnoreCase("LCXL")
             || outName.containsIgnoreCase("Launch Control XL");
+        midiOutputEchoes_ = LaunchControlXLLeds::portEchoesDawMode(outName);
     }
 
     // Selecting (or restoring) a Launch Control XL output is self-sufficient: auto-apply the
@@ -12821,6 +12810,8 @@ void T5ynthProcessor::closeMidiOutputDevice()
             // Restore the device to standalone/custom mode before we stop driving it.
             // Sent directly (not via sendMidiOutputMessage) because we already hold the
             // lock — the SpinLock is non-recursive.
+            if (midiOutputEchoes_)
+                LaunchControlXLLeds::countDawModeSwitch(false);
             try { midiOutputDevice_->sendMessageNow(LaunchControlXLLeds::dawMode(false)); } catch (...) {}
         }
         dawModeActive_.store(false, std::memory_order_release);
@@ -12872,11 +12863,13 @@ void T5ynthProcessor::applyXLDefaultBindings()
         const juce::SpinLock::ScopedLockType lock(midiOutputLock_);
         if (midiOutputDevice_ != nullptr)
         {
-            // Set the flag BEFORE sending so the ch16 Note-On guard in processBlock
-            // is already true if the OS MIDI stack loops back 0x9F 0x0C 0x7F.
-            // (Setting after the send leaves a window where the loopback arrives
-            // while dawModeActive_ is still false, causing a stuck voice.)
+            // Counted BEFORE sending so the echo filter in processBlock already
+            // expects it if the OS MIDI stack loops back 0x9F 0x0C 0x7F. (Counting
+            // after the send leaves a moment where the loopback arrives unexpected,
+            // causing a stuck voice.)
             dawModeActive_.store(true, std::memory_order_release);
+            if (midiOutputEchoes_)
+                LaunchControlXLLeds::countDawModeSwitch(true);
             try { midiOutputDevice_->sendMessageNow(LaunchControlXLLeds::dawMode(true)); } catch (...) {}
         }
     }

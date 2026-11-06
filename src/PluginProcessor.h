@@ -26,6 +26,7 @@
 #include "eventlog/EventLog.h"
 #include "eventlog/EventLogReader.h"
 #include "eventlog/EventLogWriterThread.h"
+#include "midi/LaunchControlXLLeds.h"
 
 class T5ynthProcessor : public juce::AudioProcessor,
                         private juce::AsyncUpdater,
@@ -2354,6 +2355,8 @@ private:
     std::unique_ptr<juce::MidiOutput> midiOutputDevice_;
     juce::String                      midiOutputDeviceId_;
     std::atomic<bool>                 dawModeActive_ { false };  // XL in DAW mode (LEDs + ch16 controls + buttons); audio thread reads it to gate button actions
+    bool                              midiOutputEchoes_ = false; // under midiOutputLock_
+    DawModeEchoFilter                 dawModeEchoFilter_;        // audio thread, except prepare
     juce::SpinLock                    midiOutputLock_;
 
     // One-shot timer for the deferred XL LED burst (see applyXLDefaultBindings).
