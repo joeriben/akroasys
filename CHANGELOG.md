@@ -6,6 +6,34 @@ unbroken.
 
 ## Unreleased
 
+### Sample engine
+
+- **Loop and ping-pong seams are found and faded the way sample editors do
+  it.** The old search compared single samples, undid its own result in a
+  second step, and ping-pong had no crossfade at all, so a turnaround was a
+  bare reversal of the waveform, audible on nearly every preset. Now a seam
+  candidate is a zero crossing of the same direction on both sides, scored
+  over a window for value, slope and curvature, and the two regions the fade
+  mixes are checked for coherence. The fade law follows that coherence: a
+  linear blend where the sides match, equal-power where they do not. Loop
+  mode fades the material before the loop start into the loop's tail; Ping-
+  Pong fades the forward continuation into the reversed playback at both
+  turnarounds, over the Crossfade time. Auto placement after a generation
+  first compares the spectra of the regions a loop would join and only then
+  aligns samples. Loop Optimize Off takes the markers literally (a ping-pong
+  turnaround within ±2 ms of them), Low searches ±10 ms, High ±50 ms. A loop
+  that starts at the very beginning of its sample, with nothing before it to
+  fade in, fades the material after its end into its head instead. A held
+  note that regenerates keeps playing its old sample exactly as it was under
+  the Regen XFade, on its own playhead with its own loop points, while the
+  new sample fades in; it used to be read through the new sample's loop
+  points and clicked at every regenerate whose loop landed elsewhere. A
+  transposed note that ends (OneShot) now plays out its last window instead of
+  being cut one window early. The
+  methods are the published ones (Polyphone and LoopAuditioneer's
+  documentation, the music-dsp crossfade derivation, an expired Sony loop
+  patent); the code is this project's own.
+
 ### MIDI
 
 - **With a Launch Control XL selected as the MIDI output, an MPE controller no

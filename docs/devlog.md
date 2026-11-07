@@ -1,5 +1,136 @@
 # T5ynth Development Log
 
+## 2026-11-07 — the sampler's loop and ping-pong seams: the editor cascade, measured
+
+BJ: „Engine Sample: die Endpunkterkennung ist wirklich schlecht. Es gibt kaum ein Preset bei dem
+nicht ein deutlicher Klick etc. zu hören ist." Analysis in `docs/plans/SAMPLER_LOOP_FINDING_ANALYSIS.md`;
+then „Ok, dann programmiere das neu, freilich nur mit legal verwendbaren Algos".
+
+**What was wrong.** Ping-pong (18 of the bank's 23 sampler presets) had no crossfade at all: a
+turnaround was a bare time reversal, placed by comparing two samples. A reversal keeps the value
+continuous but flips every odd derivative, so on anything that is not time-symmetric the waveform
+shape flips — on an organ tone that is a thump at every bounce. Loop mode faded, then a second
+step moved the end and undid the fade; equal-power gains on coherent material swelled by 3 dB.
+
+**What it is now** (`src/dsp/LoopFinder.{h,cpp}`, own code from the published methods, nothing
+taken from Polyphone or LoopAuditioneer, both GPL): candidate seams are same-direction zero
+crossings; a candidate is scored over a window (value, slope, curvature at log-spaced offsets to
+±256 samples) and by the correlation of the two regions the fade mixes; the fade law follows that
+correlation (linear at r = 1, equal-power at r = 0, music-dsp 2010). Loop mode bakes the
+material before the start into the tail (Polyphone's form; a loop starting at the buffer's
+beginning fades the material after its end into the head instead and plays a pristine first
+pass). Ping-pong scores a turnaround by mirror correlation x[c+τ] against x[c−τ], plus a
+level-match term, and at run time fades the forward continuation into the reversed playback over
+the Crossfade time, anchored on the reflection the playhead actually made. A held note that
+regenerates no longer reads its outgoing buffer through the new buffer's loop points: the
+outgoing side keeps its own playhead, direction, loop points, fades, mode and last reflection
+(`SamplePlayer::MorphTail`) and plays on exactly as it did under the cos ramp, while the voice's
+own head carries on into the new buffer, so a regenerate whose new audio got its own seam (the
+optimizer finds one per generation) no longer wraps the old buffer at a seam it never had.
+`tools/audition_sampler_follow.cpp` checks this with an asymmetric five-partial tone, Loop
+regenerates 300 and 3000 samples before the new seam and ping-pong regenerates 2/15/50 ms after
+and 10 ms before a reflection, and subtracts a never-regenerated reference from the output: the
+incoming side alone must remain, smooth, and it does, to the sample; an ablation that reads the
+outgoing side through the new buffer's loop points fails the Loop cases. The two sides also end
+independently: an outgoing OneShot that crosses its marker stays silent, also when a further
+publication lands before the ramp is halfway (a dead fade-from is not the dominant side), and an
+incoming OneShot whose end lies just ahead of the playhead leaves the outgoing side playing on
+under the ramp instead of cutting the voice; an ended head stays ended whichever buffer is
+published under it. A publication that lands inside a running crossfade keeps the louder of the
+two sounding sides at exactly the level it has and fades the new sample in from zero (it used to
+promote a side to full level in one sample, +16 dB in the measured case); the kept side then
+recovers, over the first 10 ms of the new ramp (a quarter of a shorter one), to the level the
+whole voice had at the publication, so a stream of publications faster than the crossfade (a
+dragged loop point republishes every few milliseconds) holds the note within 2 % of its level
+instead of draining it, while a side that is quiet because the note itself is fading stays on
+its fade (a first version without the recovery lost 17 dB under a 17 ms stream, one that
+recovered over the whole ramp still lost 3.5 dB at intervals near half the crossfade, one that
+recovered to full level brought a dying note back up by 16 dB; at crossfades of 10–20 ms the
+law itself sits 0.5 dB under nominal mid-stream, the cos decay during the recovery). The guard's
+stream cases measure the level as the sum of the two sides' powers, each rendered alone, at 8,
+40 and 60 % of a 200 ms crossfade and 40 % of 20 and 10 ms ones, and bound every publication's
+step with the dropped side phased to a zero crossing and the kept side to a peak, so a stand-up
+of the kept side shows in full, and pin the recovery's duration and target. Under a dead head
+(an incoming OneShot that has ended) a publication only adopts the new sample: the kept
+fade-out keeps its running ramp and ends on schedule (restarting it, as the first version did,
+kept old material sounding for as long as a stream of publications lasted). Eight deliberately
+wrong variants of these rules fail the guard. On the stretch path a voice that has ended now plays out the window the
+time stretcher still holds instead of stopping one window early (every transposed OneShot used
+to end with that cut; the guard's +7-semitone case measures the final step). The cubic read no longer
+needs guard samples written into the buffer: a tap beyond a loop boundary reads where the
+playhead goes next (the other end in Loop, the mirror image in ping-pong), and on the first pass
+only in the direction the playhead moves, so the attack before the loop and a reversed start
+beyond it play as recorded. Auto placement after a generation compares log-band spectra
+of the regions first (LoopMaker/loopweave), then aligns samples. Optimizer Off = markers literal
+(ping-pong within ±2 ms, a turnaround being clean only at a point of local symmetry), Low ±10 ms,
+High ±50 ms. The search is bounded for long broadband takes: a window with more than 1024 zero
+crossings is thinned to 1024 before pairing, so a 120 s noise take places its loop in about a
+second and 58 MB where the unbounded pair list took 30 s and 4 GB on the message thread (the
+analysis runs there, as before this work). How it is thinned took four review rounds, each
+measured against the unbounded search: not by an index stride (on a waveform with several
+crossings per period a stride keeps one phase class and leaves no in-phase pair: a half-period-off
+splice on sin θ + 0.8 sin 2θ at 2 kHz); not as one run at the marker (a noisy stretch beside the
+marker eats the budget and clean crossings 20–50 ms away are never scored); not on one time grid
+for both sides (every surviving pair's length then sits on a lattice and the lengths between its
+teeth are never scored: a 55 Hz buzz whose exact repeat fell between them). What ships: the
+window is cut into equal time bins, 16 on the start side and 17 on the end side, the budget is
+water-filled (sparse bins keep everything, the rest is shared among the dense ones), and each bin
+keeps its share as one contiguous run at its centre. At 1024 every probe (noise, two-crossing
+tones, a tone under modulated noise, 40–120 Hz buzzes with up to 330 partials) returns the
+unbounded search's seam or one of equal error; windows with fewer crossings are untouched.
+The loop geometry travels inside the published snapshot — loop points, turnaround fades and gain
+laws, fade side, mode, cold start — and a voice takes it from the snapshot it acquires, never from
+the master's plain fields: on CLAP, where processBlock runs without the lock, those fields can
+already belong to the next re-prepare when the voice reads them.
+
+**Measured** with `tools/audition_loop_seams.cpp` (renders a shared voice through the real
+`SamplePlayer`, seams taken from the voice's own read position) and `tools/seam_metrics.py`: two
+click detectors with sources — a short-term LPC residual burst (Vaseghi & Rayner 1990) and a
+long-term pitch-predictor residual (Atal & Schroeder 1979), the second being what sees a
+reversal of a periodic sound — each against a null distribution of the same measure at 200
+random non-seam positions of the same render. 21 bank presets, their own start position and
+Normalize on, at unity. A finding = a seam more than 5 dB above the null's 95th percentile.
+
+| | old code | new code |
+|---|---|---|
+| presets with a seam finding, unity | 14 of 21 | 1 of 21 (Tonewheel-HeliRotor, 9.6 dB over 3.1) |
+| presets with a seam finding, +4 semitones (stretch path) | 1 of 21 | 0 of 21 |
+| ping-pong sine, markers off-extremum, 150 ms fade (calibration) | 15.8 dB burst | 0.3 dB |
+| worst old finding | Trombone-Voices 38.8 dB over 1.8 | — |
+
+Old-code values per preset (LTP, unity): Tonewheel 18.7, Tonewheel-HeliRotor 19.5, GuitSitar 18.4,
+Organ-Rotor 17.5, tmp 17.3, tmp3 17.2, Synthetic Sitar 13.6, SA3 Semantic Axes Demo 12.7, Five
+Percussive Voices 12.5, frenzy dream 9.9; (LPC) Trombone-Voices 38.8, The Birds 19.6, Tubular
+Bells 19.2. New-code values at those seams sit within 0–5 dB of the null.
+
+**Declared, not fixed.** A ping-pong marker whose surroundings are anti-symmetric (r < 0) still
+dips mid-fade: the ±2 ms search reduces it, a fade cannot remove it. With Crossfade 0 a
+turnaround is a bare reversal, as before; the cubic read across it is continuous but the shape
+flip is not hidden. **Found on the way, older code, open:** a held note whose regenerate moves
+the loop region away from the playhead (auto-placed points, the default) jumps on its incoming
+side: the voice's head keeps its position and adopts the new region, and the next position
+advance treats a position outside it as an overshoot in whichever direction, so the new buffer
+teleports (before this work both sides did, at full gain: measured 0.29 against a natural step of
+0.016 on a 234 Hz tone, loop 0.2–0.45 → 0.6–0.8; now the outgoing side plays on unchanged and the
+jump is heard at the incoming side's rising gain). What the voice should do there — run on to the boundary ahead, reflect in
+place, or wrap at once under a fade — is a sound decision and is BJ's; the follow tool has no case
+for it yet. Smaller and also older: a start position modulated (Scan, LFO) to outside the
+normalized hull enters the region with a level step; a OneShot note now ends where it crosses a region
+boundary (a held note whose mode changed under it, already outside the new region, runs on to the end
+of the material instead of looping raw splices or being cut on the spot); the start direction is
+decided against the loop end the optimizer chose, not the raw marker; and with Normalize on, a
+level estimate re-run while a crossfade is running (a publication that moves a bracket triggers
+one) measures the outgoing side at its ramp gain and the incoming side not at all (a dead
+incoming head now counts as silent in it, as in the live read), and the gain it sets is applied
+unsmoothed, so a hot incoming sample can pass the ceiling cap for that note. Older and CLAP only:
+the off-thread publishers share the master's buffer into inactive voices under the callback lock,
+which CLAP's processBlock does not take, so its own distribution pass can write the same voice's
+snapshot pointer at the same moment (a plain shared_ptr assignment on both sides; a torn pointer or
+reference count is possible). This work changes nothing in that race and does not close it.
+
+**BJ's ear decides**: `~/Desktop/akroasys_loop_seams_AB/` holds every preset's
+old and new render (`__OLD` / `__NEW`), unity and +4 semitones.
+
 ## 2026-08-07 — the typing keyboard stopped asking the system which keys are down
 
 BJ, on the typing keyboard: *"Taste a funktioniert komplett im Mac, hängt

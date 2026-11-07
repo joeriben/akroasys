@@ -1042,8 +1042,8 @@ Plays the generated audio buffer directly. Pitch follows MIDI via time-stretchin
 </p>
 <ul>
   <li><strong>Loop Mode</strong> — One-shot, Loop, or Ping-Pong. The three buttons carry glyphs rather than words; hover for the name. The arpeggiator's mode buttons and the sequencer's Division buttons are drawn the same way.</li>
-  <li><strong>Crossfade</strong> — 0–500 ms equal-power crossfade at the loop boundary</li>
-  <li><strong>Opt</strong> (Loop Optimize) — cross-correlation search for the smoothest loop point. Click to cycle <em>Off → Low → High</em>; High searches harder and costs more.</li>
+  <li><strong>Crossfade</strong> — 0–500 ms crossfade at the loop boundary. In Loop mode the material before the loop start is faded into the loop's tail, so the wrap lands on a blend that is already the start. In Ping-Pong mode the turnaround fades the forward continuation into the reversed playback over this time, at both ends. The fade law follows how alike the two sides are: a linear blend where they match (no swell), equal-power where they do not (no dip).</li>
+  <li><strong>Opt</strong> (Loop Optimize) — a search for the cleanest seam near the markers. Candidates are zero crossings of the same direction; each is scored by how well the waveform matches on both sides of the splice (value, slope and curvature over a window), and by how coherent the two regions the crossfade mixes are. In Ping-Pong mode the search looks for a point whose forward and reversed continuations mirror each other, which is where a turnaround is smooth. Click to cycle <em>Off → Low → High</em>: Off takes the markers literally (in Ping-Pong mode within ±2 ms, because a turnaround is clean only at a point of local symmetry and a hand-set marker is never one to the sample), Low searches ±10 ms, High ±50 ms.</li>
   <li><strong>Norm</strong> (Normalize) — on by default. Levels the play region; see below.</li>
 </ul>
 
