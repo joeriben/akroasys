@@ -14,6 +14,19 @@ unbroken.
   one of the channels an MPE controller rotates through. An Expressive E Osmose
   lands there on every fifteenth key, so that key made no sound. Only the XL's
   own echo of its mode switch is ignored now.
+- **The sustain, sostenuto and soft pedals work with a Launch Control XL
+  selected as the MIDI output.** A map of secondary parameters that answers on
+  every channel held Inference Steps and four others on the pedal controllers
+  64-69, so the sustain pedal did not hold and pressing it moved a parameter.
+  Those five now sit on CC 59, 60, 76, 105 and 108. Volume and expression from
+  another device work too, on every channel but those of the XL's faders 3 and 7,
+  which send the same CCs: channel 16 on its DAW port, channels 1 and 16 on its
+  MIDI port.
+- **Shift and a mode change on the XL no longer write a parameter.** On its DAW
+  port the XL reports both on channel 7, and they landed on the bindings for
+  CC 63 and CC 30. A switch to a Custom Mode now also hands CC 7 and CC 11 on
+  channel 1 back to the faders, and selecting an XL output by hand restores full
+  volume and expression.
 
 ## 3.1.2 — shipped as v3.1.2-beta.0
 
