@@ -3757,15 +3757,20 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     const juce::ScopedLock callbackLock (getCallbackLock());
 
     // Here and nowhere else: from this line on, every note in this buffer is a key.
-    dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
+    if (! LaunchControlXLLeds::midiSourcesKnown.load(std::memory_order_relaxed))
+        dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
 
     // The player selected an XL output. Should the device have dropped out of DAW mode
     // before this, its faders 3 and 7 arrived as channel volume and expression, and from
     // here on they are on channel 16 again and can no longer bring either back up.
+    // The standalone knows whether they did; a plugin has to assume it.
     if (xlFaderGainsResetReq_.exchange(false, std::memory_order_acq_rel))
     {
-        voiceManager.setChannelVolume(1.0f);
-        voiceManager.setExpression(1.0f);
+        const bool sourcesKnown = LaunchControlXLLeds::midiSourcesKnown.load(std::memory_order_relaxed);
+        if (xlFaderWroteVolume_ || ! sourcesKnown)
+            voiceManager.setChannelVolume(1.0f);
+        if (xlFaderWroteExpression_ || ! sourcesKnown)
+            voiceManager.setExpression(1.0f);
     }
 
     juce::ScopedNoDenormals noDenormals;
@@ -5639,8 +5644,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     }
 
                     // ── External controller MIDI — real channels → full MPE ──
-                    const auto msg = (*midiIter).getMessage();
+                    auto msg = (*midiIter).getMessage();
                     ++midiIter;
+                    // With no XL output its port is one more controller; only with one
+                    // are its controllers a surface.
+                    const bool fromXlPort = LaunchControlXLLeds::midiSourcesKnown.load(std::memory_order_relaxed)
+                                         && LaunchControlXLLeds::takeXlMark(msg);
+                    const bool fromXl = fromXlPort && xlOutputOpen_.load(std::memory_order_relaxed);
                     const int channel = msg.getChannel();
                     // Watched before anything acts on it, so the MPE tab reports
                     // what ARRIVED rather than what survived the routing -- a CC74
@@ -5799,23 +5809,30 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         // the bend range and be captured as a learn target.
                         const bool learning = midiLearnActive.load(std::memory_order_relaxed);
 
+                        // Whether this can be the XL at all. The standalone knows;
+                        // a plugin has only the XL's channels to go by.
+                        const bool sourcesKnown = LaunchControlXLLeds::midiSourcesKnown.load(std::memory_order_relaxed);
+                        const bool maybeXl = sourcesKnown ? fromXl
+                                                          : dawModeActive_.load(std::memory_order_relaxed);
+
                         const bool consumedAsMpeRpn =
                             ! learning
                             && (isMpeRpnSelectController (cc)
                                 || isNrpnSelectController (cc)
                                 || cc == 6)
-                            && ! (dawModeActive_.load(std::memory_order_relaxed)
-                                  && msg.getChannel() == 16)
+                            && ! (maybeXl && (sourcesKnown || msg.getChannel() == 16))
                             && handleMpeRpnByte (msg.getChannel(), cc, value7);
 
                         if (channel == LaunchControlXLLeds::kFeatureChannel
                             && LaunchControlXLLeds::isFeatureReport(cc)
+                            && ! sourcesKnown
                             && xlOnDawPort_.load(std::memory_order_relaxed))
                         {
-                            // The XL reporting on itself. Falling through would have the
-                            // channel-agnostic binding take Shift for gen_duration and a
-                            // mode change for the Row 3 knob on CC 30, and a learn take
-                            // either for a control.
+                            // The XL reporting on itself; the standalone stops this at its
+                            // port, and here the output is all there is to go by. Falling
+                            // through would have the channel-agnostic binding take Shift for
+                            // gen_duration and a mode change for the Row 3 knob on CC 30, and
+                            // a learn take either for a control.
                             if (cc == LaunchControlXLLeds::kSurfaceModeCc)
                             {
                                 if (LaunchControlXLLeds::isCustomMode(value7))
@@ -5845,7 +5862,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                             // keeps driving Scan, a LinnStrument slide drives brightness.
                             voiceManager.setTimbre(channel, static_cast<float>(value7) / 127.0f);
                         }
-                        else if (dawModeActive_.load(std::memory_order_relaxed)
+                        else if (maybeXl
                                  && msg.getChannel() == 1
                                  && ((cc >= 37 && cc <= 52) || cc == 116 || cc == 118))
                         {
@@ -5860,7 +5877,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                             if (value7 >= 64)
                                 handleXLButtonPress(cc);
                         }
-                        else if (dawModeActive_.load(std::memory_order_relaxed)
+                        else if (maybeXl
                                  && msg.getChannel() == 16
                                  && cc >= 77 && cc <= 100)
                         {
@@ -5879,7 +5896,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                 const juce::SpinLock::ScopedTryLockType tryLock(ccMappingLock_);
                                 if (tryLock.isLocked())
                                 {
-                                    const auto& mapping = resolveCcMapping(absCc, LaunchControlXLLeds::kDawFaderChannel);
+                                    const auto& mapping = resolveCcMapping(absCc, LaunchControlXLLeds::kDawFaderChannel, fromXl);
                                     if (mapping.param != nullptr)
                                     {
                                         // span is signed so an inverted binding keeps its direction.
@@ -5922,7 +5939,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                 if (tryLock.isLocked())
                                 {
                                     // param* and minNorm/maxNorm only — no String access.
-                                    const auto& mapping = resolveCcMapping(cc, channel);
+                                    const auto& mapping = resolveCcMapping(cc, channel, fromXl);
                                     if (mapping.param != nullptr)
                                     {
                                         const float norm = juce::jmap(
@@ -5948,13 +5965,19 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                     // The message thread has the map. A fader skips this
                                     // value and the next one follows; let through, it would
                                     // set a volume nothing brings back up.
-                                    boundHandled = dawModeActive_.load(std::memory_order_relaxed)
+                                    boundHandled = maybeXl
                                         && LaunchControlXLLeds::isFaderSharedWithPlayers(cc)
                                         && isXlFaderChannel(channel);
                                 }
                             }
 
-                            if (! boundHandled)
+                            // A fader whose binding is not up yet, and Solo/Arm and
+                            // Mute/Select on CC 65 and 66, are no player's controls.
+                            const bool xlOwnControl = fromXl
+                                && (LaunchControlXLLeds::isFaderSharedWithPlayers(cc)
+                                    || LaunchControlXLLeds::isSurfaceButton(cc));
+
+                            if (! boundHandled && ! xlOwnControl)
                             {
                                 if (cc == 64)
                                 {
@@ -5991,10 +6014,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                 else if (cc == 7)
                                 {
                                     voiceManager.setChannelVolume(static_cast<float>(value7) / 127.0f);
+                                    xlFaderWroteVolume_ = fromXlPort;
                                 }
                                 else if (cc == 11)
                                 {
                                     voiceManager.setExpression(static_cast<float>(value7) / 127.0f);
+                                    xlFaderWroteExpression_ = fromXlPort;
                                 }
                                 else if (cc == 66)
                                 {
@@ -6023,8 +6048,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                     // Same XL guard as the RPN feed: in DAW mode channel
                                     // 16 is not a MIDI control channel for us, and this
                                     // is the one place that could still reach into it.
-                                    if (! (dawModeActive_.load(std::memory_order_relaxed)
-                                           && msg.getChannel() == 16))
+                                    if (! (maybeXl && msg.getChannel() == 16))
                                         deselectMpeRpn(msg.getChannel(), /*lsbOnly=*/false);
                                 }
                             }
@@ -6755,7 +6779,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 void T5ynthProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     noteHostBlock (juce::Time::getHighResolutionTicks(), buffer.getNumSamples());
-    dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
+    if (! LaunchControlXLLeds::midiSourcesKnown.load(std::memory_order_relaxed))
+        dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
     seedOutputStageGains();
     settleSnapFadeWhileSilent();
     AudioProcessor::processBlockBypassed(buffer, midiMessages);
@@ -12385,7 +12410,7 @@ T5ynthProcessor::CcMapping T5ynthProcessor::getCcMappingCopy(int cc) const
         // the controller" feature in SynthPanel — see the active XL binding for CC 5-36,
         // which now lives in xlDefaults_, not ccMappings_. Asked as the fader's channel:
         // the GUI has no message to take one from, and the answer it wants is the fader's.
-        const auto& m = resolveCcMapping(cc, LaunchControlXLLeds::kDawFaderChannel);
+        const auto& m = resolveCcMapping(cc, LaunchControlXLLeds::kDawFaderChannel, /*fromXl=*/true);
         result.param   = m.param;
         result.minNorm = m.minNorm;
         result.maxNorm = m.maxNorm;
@@ -12860,13 +12885,12 @@ void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId, bool re
         const juce::SpinLock::ScopedLockType lock(midiOutputLock_);
         midiOutputDevice_   = std::move(device);
         midiOutputDeviceId_ = deviceId;
-        // The Mk3 enumerates its ports as "LCXL3 1 DAW In" — it does NOT contain the
-        // string "Launch Control XL", so the original check silently never matched and
-        // auto-apply never fired (the XL stayed in Custom mode → warm default LEDs =
-        // the "orange cast"). Match both the abbreviation and the full product name.
+        // The original check for the full product name silently never matched the Mk3
+        // and auto-apply never fired (the XL stayed in Custom mode → warm default LEDs =
+        // the "orange cast").
         const auto outName = midiOutputDevice_->getName();
-        isXL = outName.containsIgnoreCase("LCXL")
-            || outName.containsIgnoreCase("Launch Control XL");
+        isXL = LaunchControlXLLeds::isXlPort(outName);
+        xlOutputOpen_.store(isXL, std::memory_order_relaxed);
         midiOutputEchoes_ = LaunchControlXLLeds::portEchoesDawMode(outName);
         xlOnDawPort_.store(isXL && LaunchControlXLLeds::isDawPort(outName), std::memory_order_relaxed);
     }
@@ -12879,8 +12903,9 @@ void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId, bool re
     // so this also covers the setStateInformation restore path that may run off-message.
     if (isXL)
     {
-        // Not on a restore: that runs unasked, and a player's volume would jump to full.
-        if (! restoringState)
+        // Not on a restore unless the standalone can tell what a fader wrote: that runs
+        // unasked, and a player's volume would jump to full.
+        if (! restoringState || LaunchControlXLLeds::midiSourcesKnown.load(std::memory_order_relaxed))
             xlFaderGainsResetReq_.store(true, std::memory_order_release);
         xlAutoApplyReq_.store(true, std::memory_order_release);
         triggerAsyncUpdate();
@@ -12913,6 +12938,7 @@ void T5ynthProcessor::closeMidiOutputDevice()
     }
     // After the layer is gone: until then a player's CC 7 would still find the fader's binding.
     xlOnDawPort_.store(false, std::memory_order_relaxed);
+    xlOutputOpen_.store(false, std::memory_order_relaxed);
     xlInCustomMode_.store(false, std::memory_order_relaxed);
     xlAutoApplyReq_.store(false, std::memory_order_release);   // or the layer comes back with no output
 }

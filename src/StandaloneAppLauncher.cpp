@@ -6,12 +6,13 @@
     StandaloneFilterApp -- see
     JUCE/modules/juce_audio_plugin_client/juce_audio_plugin_client_Standalone.cpp.
 
-    It exists for ONE difference from JUCE's default: the app must not open an
-    audio INPUT device while launching. Everything else here is JUCE's own
+    It exists for TWO differences from JUCE's default: the app must not open an
+    audio INPUT device while launching, and MIDI keeps its origin on the way to
+    the processor (StandaloneMidiSources.h). Everything else here is JUCE's own
     default app, kept deliberately identical so this file never becomes a
     second, drifting implementation of the standalone's lifecycle.
 
-    The two lines that make the difference:
+    The two lines that make the difference for the audio input:
       * the channel constraint {0 in, 2 out}, which is what
         StandalonePluginHolder reads to decide whether an input is required at
         all (it does NOT rewrite the processor's bus layout -- the stereo input
@@ -30,6 +31,7 @@
 // opens `namespace juce` and uses unqualified JUCE names, so it does not
 // compile as a first include.
 #include "StandaloneAudioInput.h"
+#include "StandaloneMidiSources.h"
 
 namespace t5ynth
 {
@@ -86,6 +88,8 @@ public:
             outputOnly,
             false);                      // desktop: no MIDI auto-open, as JUCE's default
 
+        midiSources = std::make_unique<standalone::MidiSourceRouter>(*holder);
+
         mainWindow = std::make_unique<juce::StandaloneFilterWindow>(
             getApplicationName(),
             juce::LookAndFeel::getDefaultLookAndFeel()
@@ -97,6 +101,7 @@ public:
 
     void shutdown() override
     {
+        midiSources = nullptr;   // it points into the holder the window owns
         mainWindow = nullptr;
         appProperties.saveIfNeeded();
     }
@@ -122,6 +127,7 @@ public:
 
 private:
     juce::ApplicationProperties appProperties;
+    std::unique_ptr<standalone::MidiSourceRouter> midiSources;
     std::unique_ptr<juce::StandaloneFilterWindow> mainWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StandaloneApp)

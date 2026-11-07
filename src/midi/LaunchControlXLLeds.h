@@ -149,6 +149,13 @@ struct LaunchControlXLLeds
         return ! portName.containsIgnoreCase("MIDI In");
     }
 
+    // The same from the side a message arrives on: the port measured silent is the one
+    // the XL calls "MIDI Out" there.
+    static bool inputAnswersDawMode(const juce::String& portName)
+    {
+        return ! portName.containsIgnoreCase("MIDI Out");
+    }
+
     static bool isDawModeSwitch(const juce::uint8* bytes, int size, bool enable) noexcept
     {
         return size == 3
@@ -310,6 +317,47 @@ struct LaunchControlXLLeds
     static bool isDawPort(const juce::String& portName)
     {
         return portName.containsIgnoreCase("DAW");
+    }
+
+    // Set by the standalone, which can tell its MIDI inputs apart; a plugin gets one
+    // stream without origins and goes by the XL's channels instead. Process-wide, like
+    // the echo counters, because it outlives the processor the standalone can replace
+    // (Reset to default state).
+    inline static std::atomic<bool> midiSourcesKnown { false };
+
+    // The Mk3 enumerates its ports as "LCXL3 1 DAW In", without the product name.
+    static bool isXlPort(const juce::String& portName)
+    {
+        return portName.containsIgnoreCase("LCXL")
+            || portName.containsIgnoreCase("Launch Control XL");
+    }
+
+    // A controller the standalone knows came from the XL's own port. The mark travels
+    // with the message through the block's MIDI, as a SysEx under the manufacturer ID
+    // MIDI reserves for private use, and no longer than a MidiMessage holds inline, so
+    // taking it off on the audio thread allocates nothing.
+    static juce::MidiMessage markAsXl(const juce::MidiMessage& controller)
+    {
+        const juce::uint8 body[] = {
+            0x7D, 0x58,
+            static_cast<juce::uint8>(controller.getChannel() - 1),
+            static_cast<juce::uint8>(controller.getControllerNumber()),
+            static_cast<juce::uint8>(controller.getControllerValue())
+        };
+        auto marked = juce::MidiMessage::createSysExMessage(body, static_cast<int>(sizeof(body)));
+        marked.setTimeStamp(controller.getTimeStamp());
+        return marked;
+    }
+
+    static bool takeXlMark(juce::MidiMessage& message)
+    {
+        if (message.getRawDataSize() != 7)
+            return false;
+        const auto* bytes = message.getRawData();
+        if (bytes[0] != 0xF0 || bytes[1] != 0x7D || bytes[2] != 0x58 || bytes[6] != 0xF7)
+            return false;
+        message = juce::MidiMessage::controllerEvent(bytes[3] + 1, bytes[4], bytes[5]);
+        return true;
     }
 
     // Channel 7 on the DAW port is the device talking about itself: the surface mode

@@ -2359,6 +2359,9 @@ private:
     std::atomic<bool>                 xlOnDawPort_ { false };    // its faders are on channel 16
     std::atomic<bool>                 xlInCustomMode_ { false }; // it reported a Custom Mode: faders off channel 16
     std::atomic<bool>                 xlFaderGainsResetReq_ { false }; // audio thread: back to full on the next block
+    std::atomic<bool>                 xlOutputOpen_ { false };   // an XL is the output, so its controllers are a surface
+    bool                              xlFaderWroteVolume_ = false;     // audio thread: the last CC 7 written came from the XL's port
+    bool                              xlFaderWroteExpression_ = false; // and the last CC 11
     DawModeEchoFilter                 dawModeEchoFilter_;        // audio thread, except prepare
     juce::SpinLock                    midiOutputLock_;
 
@@ -2502,11 +2505,12 @@ private:
     // Resolve a CC to its active binding: the XL device layer wins on the controls it owns
     // (populated only while an XL is connected), otherwise fall through to user/preset
     // bindings. Caller must hold ccMappingLock_ (the audio thread holds the try-lock).
-    const CcMapping& resolveCcMapping (int cc, int channel) const noexcept
+    const CcMapping& resolveCcMapping (int cc, int channel, bool fromXl) const noexcept
     {
         const auto& xl = xlDefaults_[static_cast<size_t>(cc)];
         const bool anotherDevicesCc = LaunchControlXLLeds::isFaderSharedWithPlayers (cc)
-                                   && ! isXlFaderChannel (channel);
+            && (LaunchControlXLLeds::midiSourcesKnown.load (std::memory_order_relaxed)
+                    ? ! fromXl : ! isXlFaderChannel (channel));
         return xl.param != nullptr && ! anotherDevicesCc ? xl : ccMappings_[static_cast<size_t>(cc)];
     }
     mutable juce::SpinLock     ccMappingLock_;

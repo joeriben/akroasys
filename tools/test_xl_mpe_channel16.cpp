@@ -29,9 +29,37 @@
 #include "../src/midi/LaunchControlXLLeds.h"
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <thread>
 #include <utility>
 #include <vector>
+
+// The two members of the standalone's holder the router touches, so that the router
+// itself runs here, on ports with the real names, without a standalone window.
+namespace juce
+{
+    struct StandalonePluginHolder
+    {
+        struct Devices
+        {
+            MidiInputCallback* listening = nullptr;
+            void addMidiInputDeviceCallback (const String&, MidiInputCallback* c) { listening = c; }
+            void removeMidiInputDeviceCallback (const String&, MidiInputCallback* c)
+            {
+                if (listening == c)
+                    listening = nullptr;
+            }
+        } deviceManager;
+
+        struct Player : MidiInputCallback
+        {
+            std::vector<MidiMessage> received;
+            void handleIncomingMidiMessage (MidiInput*, const MidiMessage& m) override { received.push_back (m); }
+        } player;
+    };
+}
+
+#include "../src/StandaloneMidiSources.h"
 
 namespace
 {
@@ -775,6 +803,274 @@ int main()
         rig.send (cc (1, 11, 127));
     }
     pedals ("no XL output");
+
+    std::printf ("[30] the standalone knows which device sent what\n");
+    const auto fromXl = [&] (int channel, int number, int v)
+    {
+        return LaunchControlXLLeds::markAsXl (cc (channel, number, v));
+    };
+    {
+        auto marked = fromXl (16, 7, 100);
+        check (LaunchControlXLLeds::takeXlMark (marked) && marked.isController()
+                   && marked.getChannel() == 16 && marked.getControllerNumber() == 7
+                   && marked.getControllerValue() == 100, "the mark comes off whole");
+        auto keyboard = cc (1, 7, 100);
+        const juce::uint8 body[] = { 0x7D, 0x59, 0, 7, 100 };
+        auto otherSysEx = juce::MidiMessage::createSysExMessage (body, (int) sizeof (body));
+        check (! LaunchControlXLLeds::takeXlMark (keyboard) && ! LaunchControlXLLeds::takeXlMark (otherSysEx),
+               "and is on nothing else");
+    }
+
+    LaunchControlXLLeds::midiSourcesKnown.store (true);
+    const auto bothPorts = [&] (const char* portName)
+    {
+        std::printf ("[31] %s, origins known\n", portName);
+
+        // First, while a switch is still owed an answer: the filter would take these.
+        rig.send (enable);
+        check (rig.voicesOn (12) == 1, "9F 0C 7F from a keyboard is a key, whatever was just switched");
+        rig.send (disable);
+        check (rig.voicesOn (12) == 0, "and 9F 0C 00 its key-up");
+
+        for (const auto& [number, paramId] : { std::pair<int, const char*> { 7, "filter_cutoff" },
+                                               std::pair<int, const char*> { 11, "reverb_mix" } })
+            for (const int channel : { 1, 9, 16 })
+            {
+                char what[80];
+                rig.send (fromXl (channel, number, 20));
+                const float low = value (paramId);
+                rig.send (fromXl (channel, number, 100));
+                std::snprintf (what, sizeof (what), "the XL's CC %d on channel %d is its fader", number, channel);
+                check (value (paramId) > low && gain() == 1.0f, what);
+
+                const float faderPosition = value (paramId);
+                rig.send (cc (channel, number, 20));
+                std::snprintf (what, sizeof (what), "a player's CC %d on channel %d is the player's", number, channel);
+                check (value (paramId) == faderPosition && gain() < 0.2f, what);
+                rig.send (cc (channel, number, 127));
+            }
+
+        check (proc->getCcMappingCopy (7).paramId == "filter_cutoff", "the editor sees the fader's binding");
+
+        {
+            int sounded = 0;
+            for (int channel = 2; channel <= 16; ++channel)
+            {
+                rig.send (juce::MidiMessage::noteOn (channel, 60, (juce::uint8) 90));
+                sounded += rig.voicesOn (60);
+                rig.send (juce::MidiMessage::noteOff (channel, 60, (juce::uint8) 0));
+            }
+            check (sounded == 15, "a key on every channel the Osmose rotates over");
+        }
+
+        rig.send (cc (1, 101, 0));
+        rig.send (cc (1, 100, 0));
+        {
+            const int range = proc->getMpeMasterBendRange();
+            rig.send (fromXl (1, 6, 20));
+            const float low = value ("resynth_amount");
+            rig.send (fromXl (1, 6, 100));
+            check (value ("resynth_amount") > low && proc->getMpeMasterBendRange() == range,
+                   "the XL's CC 6 is its fader, with a player's RPN open on that channel");
+        }
+        rig.send (cc (1, 101, 127));
+        rig.send (cc (1, 100, 127));
+
+        {
+            const int range = proc->getMpePerNoteBendRange();
+            rig.send (cc (16, 101, 0));
+            rig.send (cc (16, 100, 0));
+            rig.send (fromXl (16, 121, 0));
+            rig.send (cc (16, 6, range + 1));
+            check (proc->getMpePerNoteBendRange() == range + 1, "the XL's CC 121 deselects no player's RPN");
+            rig.send (cc (16, 6, range));
+            rig.send (cc (16, 121, 0));
+        }
+
+        rig.send (juce::MidiMessage::noteOn (2, 60, (juce::uint8) 90));
+        rig.send (fromXl (1, 66, 127));
+        rig.send (juce::MidiMessage::noteOff (2, 60, (juce::uint8) 0));
+        check (rig.voicesOn (60) == 0, "the XL's Mute/Select is no sostenuto");
+        rig.send (fromXl (1, 66, 0));
+
+        const auto before = allParams();
+        rig.send (cc (16, 90, 70));
+        rig.send (cc (1, 37, 127));
+        rig.send (cc (1, 37, 0));
+        check (allParams() == before, "another device's CC 90 and CC 37 are no encoder and no button");
+        rig.send (fromXl (16, 90, 70));
+        check (allParams() != before, "the XL's encoder is");
+        rig.send (fromXl (16, 90, 58));
+    };
+
+    check (selectOn (*proc, id, port), "the DAW port selected");
+    bothPorts ("the DAW port");
+    pedals ("the DAW port, origins known");
+    {
+        const auto settled = [&] { rig.leaveEchoWindow(); return gain(); };
+        const auto restored = [&]
+        {
+            proc->closeMidiOutputDevice();
+            proc->openMidiOutputDevice (id, /*restoringState=*/true);
+            return settled();
+        };
+
+        rig.send (cc (9, 7, 40));
+        const float held = gain();
+        check (reselect (*proc), "selected again");
+        check (settled() == held, "no fader wrote it, so a player's volume stays");
+        check (restored() == held, "and a restore leaves it alone as well");
+
+        proc->closeMidiOutputDevice();
+        rig.send (fromXl (1, 7, 20));
+        check (gain() < held, "with no XL output the XL's CC 7 is a volume, as anyone's");
+        check (reselect (*proc), "selected");
+        check (settled() == 1.0f, "selecting the output brings it back, since that fader no longer can");
+
+        proc->closeMidiOutputDevice();
+        rig.send (fromXl (1, 7, 20));
+        check (restored() == 1.0f, "and so does a restore");
+
+        proc->closeMidiOutputDevice();
+        rig.send (fromXl (1, 7, 20));
+        rig.send (cc (9, 7, 40));
+        check (reselect (*proc), "selected");
+        check (settled() == held, "a player who came after the fader keeps the volume");
+
+        proc->closeMidiOutputDevice();
+        rig.send (fromXl (1, 11, 20));
+        check (gain() < held, "the XL's CC 11 is an expression");
+        check (reselect (*proc), "selected");
+        check (settled() == held, "only that comes back, and a player's volume stays");
+
+        rig.send (cc (9, 7, 127));
+        rig.send (cc (9, 11, 40));
+        const float expression = gain();
+        check (reselect (*proc), "selected");
+        check (settled() == expression, "a player's expression stays");
+
+        proc->closeMidiOutputDevice();
+        rig.send (fromXl (1, 11, 20));
+        rig.send (cc (9, 11, 40));
+        check (reselect (*proc), "selected");
+        check (settled() == expression, "and one who came after the fader keeps it");
+
+        rig.send (cc (9, 11, 127));
+    }
+    {
+        rig.send (cc (7, 30, 20));
+        float low = value ("mod2_decay");
+        rig.send (cc (7, 30, 100));
+        check (value ("mod2_decay") > low, "a player's CC 30 on channel 7 is the knob on CC 30");
+        rig.send (fromXl (7, 30, 20));
+        low = value ("mod2_decay");
+        rig.send (fromXl (7, 30, 100));
+        check (value ("mod2_decay") > low, "and what got past the router on channel 7 is a control too");
+    }
+    {
+        std::atomic<bool> stop { false };
+        std::thread gui ([&] { while (! stop.load()) (void) proc->getCcMappingCopy (7); });
+        int lost = 0, leaked = 0;
+        for (int i = 0; i < 400; ++i)
+        {
+            const float held = gain();
+            rig.send (fromXl (1, 7, 20));
+            rig.send (fromXl (16, 11, 20));
+            if (gain() != held)
+                ++leaked;
+            const int volume = (i % 2 == 0) ? 40 : 127;
+            rig.send (cc (16, 7, volume));
+            if (gain() != static_cast<float> (volume) / 127.0f)
+                ++lost;
+        }
+        stop.store (true);
+        gui.join();
+        check (leaked == 0, "the map busy: the XL's faders are no volume");
+        check (lost == 0, "and a player's volume gets through");
+    }
+
+    proc->closeMidiOutputDevice();
+    rig.leaveEchoWindow();
+    check (selectOn (*proc, silentId, silentPort), "the MIDI port selected");
+    bothPorts ("the MIDI port");
+    pedals ("the MIDI port, origins known");
+
+    proc->closeMidiOutputDevice();
+    rig.send (cc (1, 7, 127));
+    proc->openMidiOutputDevice (silentId);
+    rig.send (fromXl (1, 7, 20));
+    check (gain() == 1.0f, "a fader with its binding not up yet sets no volume");
+    proc->closeMidiOutputDevice();
+    LaunchControlXLLeds::midiSourcesKnown.store (false);
+
+    rig.send (juce::MidiMessage::noteOn (2, 60, (juce::uint8) 90));
+    rig.send (fromXl (1, 64, 127));
+    rig.send (juce::MidiMessage::noteOff (2, 60, (juce::uint8) 0));
+    check (rig.voicesOn (60) == 0, "a plugin takes no mark, whatever a host sends");
+
+    std::printf ("[32] the router in front of the player\n");
+    {
+        struct Nobody : juce::MidiInputCallback
+        {
+            void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage&) override {}
+        } nobody;
+        auto xlDaw   = juce::MidiInput::createNewDevice ("LCXL3 1 DAW Out", &nobody);
+        auto xlMidi  = juce::MidiInput::createNewDevice ("LCXL3 1 MIDI Out", &nobody);
+        auto osmose  = juce::MidiInput::createNewDevice ("Osmose 61 osmose play", &nobody);
+        auto xlOther = juce::MidiInput::createNewDevice ("MIDIIN2 (LCXL3 1)", &nobody);
+        check (xlDaw != nullptr && xlMidi != nullptr && osmose != nullptr && xlOther != nullptr,
+               "the rig's ports, and an XL port nobody measured");
+
+        juce::StandalonePluginHolder holder;
+        holder.deviceManager.listening = &holder.player;
+        {
+            t5ynth::standalone::MidiSourceRouter router (holder);
+            check (LaunchControlXLLeds::midiSourcesKnown.load(), "origins are known while it stands");
+            check (holder.deviceManager.listening == &router, "and it is what the inputs reach");
+
+            const auto through = [&] (juce::MidiInput* source, const juce::MidiMessage& m)
+            {
+                holder.player.received.clear();
+                router.handleIncomingMidiMessage (source, m);
+                return holder.player.received;
+            };
+            const auto marked = [&] (std::vector<juce::MidiMessage> got)
+            {
+                return got.size() == 1 && LaunchControlXLLeds::takeXlMark (got[0]);
+            };
+            const auto asIs = [&] (const std::vector<juce::MidiMessage>& got, const juce::MidiMessage& m)
+            {
+                return got.size() == 1 && got[0].getRawDataSize() == m.getRawDataSize()
+                    && std::memcmp (got[0].getRawData(), m.getRawData(), (size_t) m.getRawDataSize()) == 0;
+            };
+
+            check (marked (through (xlDaw.get(), cc (16, 7, 100))), "a DAW-port controller is the XL's");
+            check (marked (through (xlMidi.get(), cc (1, 7, 100))), "and a MIDI-port one");
+            const auto pedal = cc (1, 11, 20);
+            check (asIs (through (osmose.get(), pedal), pedal), "the same CC from the Osmose stays what it is");
+            check (asIs (through (nullptr, pedal), pedal), "and so does one without a port");
+
+            check (through (xlDaw.get(), enable).empty(), "the DAW port's answer to a switch stops here");
+            check (through (xlDaw.get(), disable).empty(), "either way");
+            check (through (xlOther.get(), enable).empty(), "a port nobody measured counts as answering");
+            check (asIs (through (xlMidi.get(), enable), enable), "on the MIDI port those bytes are nothing of the kind");
+            check (asIs (through (osmose.get(), enable), enable), "from the Osmose they are a key");
+            check (asIs (through (osmose.get(), disable), disable), "and its key-up");
+
+            check (through (xlDaw.get(), cc (7, 63, 127)).empty(), "Shift on the DAW port stops here");
+            check (through (xlDaw.get(), cc (7, 30, 2)).empty(), "and so does a surface mode report");
+            check (marked (through (xlDaw.get(), cc (7, 5, 20))), "but no other controller on channel 7");
+            check (marked (through (xlDaw.get(), cc (6, 30, 20))), "and that CC on no other channel");
+            check (marked (through (xlMidi.get(), cc (7, 30, 2))), "on the MIDI port it is a control");
+            const auto ordinary = cc (7, 30, 2);
+            check (asIs (through (osmose.get(), ordinary), ordinary), "from the Osmose too");
+
+            const auto note = juce::MidiMessage::noteOn (1, 60, (juce::uint8) 90);
+            check (asIs (through (xlDaw.get(), note), note), "a note from the XL is not touched");
+        }
+        check (! LaunchControlXLLeds::midiSourcesKnown.load(), "gone with it");
+        check (holder.deviceManager.listening == &holder.player, "and the player is back on the inputs");
+    }
 
     proc->closeMidiOutputDevice();
     proc->releaseResources();
