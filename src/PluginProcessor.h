@@ -2297,7 +2297,7 @@ public:
     std::function<void()> onCacheToggleRequested;
 
     // ── MIDI Output (LED feedback) — message thread only ────────────────────
-    void openMidiOutputDevice(const juce::String& deviceId);
+    void openMidiOutputDevice(const juce::String& deviceId, bool restoringState = false);
     void closeMidiOutputDevice();
     const juce::String& getMidiOutputDeviceId() const { return midiOutputDeviceId_; }
     /** Enable DAW mode, overwrite the XL Page-1 CC bindings with the canonical
@@ -2356,6 +2356,9 @@ private:
     juce::String                      midiOutputDeviceId_;
     std::atomic<bool>                 dawModeActive_ { false };  // XL in DAW mode (LEDs + ch16 controls + buttons); audio thread reads it to gate button actions
     bool                              midiOutputEchoes_ = false; // under midiOutputLock_
+    std::atomic<bool>                 xlOnDawPort_ { false };    // its faders are on channel 16
+    std::atomic<bool>                 xlInCustomMode_ { false }; // it reported a Custom Mode: faders off channel 16
+    std::atomic<bool>                 xlFaderGainsResetReq_ { false }; // audio thread: back to full on the next block
     DawModeEchoFilter                 dawModeEchoFilter_;        // audio thread, except prepare
     juce::SpinLock                    midiOutputLock_;
 
@@ -2488,13 +2491,23 @@ private:
     // with a fine interval + low-end skew (e.g. Attack at its 0 default) escapes the value snap
     // instead of sticking dead at the floor. Dropped when a value reaches a rail.
     std::array<float, 128> relEncoderAccum_ {};
+    bool isXlFaderChannel (int channel) const noexcept
+    {
+        const bool inDawMode = xlOnDawPort_.load (std::memory_order_relaxed)
+                            && ! xlInCustomMode_.load (std::memory_order_relaxed);
+        return channel == LaunchControlXLLeds::kDawFaderChannel
+            || (channel == LaunchControlXLLeds::kStandaloneFaderChannel && ! inDawMode);
+    }
+
     // Resolve a CC to its active binding: the XL device layer wins on the controls it owns
     // (populated only while an XL is connected), otherwise fall through to user/preset
     // bindings. Caller must hold ccMappingLock_ (the audio thread holds the try-lock).
-    const CcMapping& resolveCcMapping (int cc) const noexcept
+    const CcMapping& resolveCcMapping (int cc, int channel) const noexcept
     {
         const auto& xl = xlDefaults_[static_cast<size_t>(cc)];
-        return xl.param != nullptr ? xl : ccMappings_[static_cast<size_t>(cc)];
+        const bool anotherDevicesCc = LaunchControlXLLeds::isFaderSharedWithPlayers (cc)
+                                   && ! isXlFaderChannel (channel);
+        return xl.param != nullptr && ! anotherDevicesCc ? xl : ccMappings_[static_cast<size_t>(cc)];
     }
     mutable juce::SpinLock     ccMappingLock_;
     std::atomic<bool>          midiLearnActive { false };

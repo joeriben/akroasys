@@ -10,6 +10,10 @@
 // excuses one message of its own kind, in the second after it; everything else
 // has to play (DawModeEchoFilter in src/midi/LaunchControlXLLeds.h).
 //
+// BJ, 2026-11-07, on the same open output: "das Haltepedal etc. muessen natuerlich
+// funktionieren". The XL's binding layer answers on every channel, and it held
+// inf_steps on CC 64: the damper did not hold, and pressing it moved a parameter.
+//
 // tools/test_mpe_parity.cpp cannot reach this: it has no XL open. Here the
 // output is REAL. A virtual CoreMIDI destination carries "LCXL" in its name, so
 // openMidiOutputDevice takes the path a player's selection takes, and the
@@ -25,6 +29,7 @@
 #include "../src/midi/LaunchControlXLLeds.h"
 #include <atomic>
 #include <cstdio>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -187,14 +192,14 @@ int main()
     }
 
     FakeXlPort port;
-    auto fake = juce::MidiInput::createNewDevice ("LCXL test port", &port);
+    auto fake = juce::MidiInput::createNewDevice ("LCXL test DAW In", &port);
     if (fake == nullptr) { std::printf ("FAIL  no virtual MIDI device\n"); return 1; }
     fake->start();
     CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.2, false);
 
     juce::String id;
     for (const auto& d : juce::MidiOutput::getAvailableDevices())
-        if (d.name.contains ("LCXL test port"))
+        if (d.name.contains ("LCXL test DAW In"))
             id = d.identifier;
     if (id.isEmpty()) { std::printf ("FAIL  virtual output not listed\n"); return 1; }
 
@@ -474,6 +479,302 @@ int main()
     check (selectOn (*proc, silentId, silentPort), "selected again");
     rig.send (disable);
     check (rig.voicesOn (12) == 0, "9F 0C 00 right after the disable is its key-up");
+
+    const auto value = [&] (const char* paramId)
+    {
+        auto* p = proc->getValueTreeState().getParameter (paramId);
+        return p != nullptr ? p->getValue() : -1.0f;
+    };
+    const auto cc = [] (int channel, int number, int v)
+    {
+        return juce::MidiMessage::controllerEvent (channel, number, v);
+    };
+    const auto gain = [&] { return proc->getVoiceManager().performanceOutputGain(); };
+    const auto allParams = [&]
+    {
+        std::vector<float> values;
+        for (auto* p : proc->getParameters())
+            values.push_back (p->getValue());
+        return values;
+    };
+    const char* const movedOffThePedals[] = { "inf_steps", "gen_cfg", "gen_start", "gen_axes_amount", "seq_bpm" };
+
+    const auto pedals = [&] (const char* portName)
+    {
+        std::printf ("[22] the pedals with %s selected\n", portName);
+        for (const int channel : { 1, 2, 7, 9, 16 })
+        {
+            const int keyChannel = channel == 1 ? 2 : channel;
+            char what[80];
+            const auto before = allParams();
+
+            rig.send (cc (channel, 64, 127));
+            rig.send (juce::MidiMessage::noteOn (keyChannel, 60, (juce::uint8) 90));
+            rig.send (juce::MidiMessage::noteOff (keyChannel, 60, (juce::uint8) 0));
+            std::snprintf (what, sizeof (what), "the damper on channel %d holds a lifted key", channel);
+            check (rig.voicesOn (60) == 1, what);
+            rig.send (cc (channel, 64, 0));
+            std::snprintf (what, sizeof (what), "and lets it go on channel %d", channel);
+            check (rig.voicesOn (60) == 0, what);
+
+            rig.send (juce::MidiMessage::noteOn (keyChannel, 60, (juce::uint8) 90));
+            rig.send (cc (channel, 66, 127));
+            rig.send (juce::MidiMessage::noteOff (keyChannel, 60, (juce::uint8) 0));
+            std::snprintf (what, sizeof (what), "sostenuto on channel %d holds a lifted key", channel);
+            check (rig.voicesOn (60) == 1, what);
+            rig.send (cc (channel, 66, 0));
+            check (rig.voicesOn (60) == 0, "and lets it go");
+
+            const float full = gain();
+            rig.send (cc (channel, 67, 127));
+            std::snprintf (what, sizeof (what), "the soft pedal on channel %d softens", channel);
+            check (gain() < full, what);
+            rig.send (cc (channel, 67, 0));
+            check (gain() == full, "and stops");
+
+            for (const int pedal : { 65, 67, 68, 69 })
+            {
+                rig.send (cc (channel, pedal, 127));
+                rig.send (cc (channel, pedal, 0));
+            }
+            std::snprintf (what, sizeof (what), "no pedal on channel %d moved a parameter", channel);
+            check (allParams() == before, what);
+        }
+    };
+
+    std::printf ("[23] what left the pedals is still reachable\n");
+    {
+        const std::pair<int, const char*> moved[] = {
+            { 59, "inf_steps" }, { 60, "gen_cfg" }, { 76, "gen_start" },
+            { 105, "gen_axes_amount" }, { 108, "seq_bpm" } };
+        check (reselect (*proc), "the DAW port selected");
+        rig.leaveEchoWindow();
+        for (const auto& [number, paramId] : moved)
+        {
+            rig.send (cc (1, number, 20));
+            const float low = value (paramId);
+            rig.send (cc (1, number, 100));
+            char what[80];
+            std::snprintf (what, sizeof (what), "CC %d drives %s", number, paramId);
+            check (value (paramId) > low, what);
+        }
+
+        const auto before = allParams();
+        for (const int button : { 65, 66, 102, 103, 104, 106, 107 })
+        {
+            rig.send (cc (1, button, 127));
+            rig.send (cc (1, button, 0));
+        }
+        check (allParams() == before, "a tap on the XL's own buttons writes no parameter");
+    }
+    pedals ("the DAW port");
+
+    std::printf ("[24] CC 7 and CC 11 with the DAW port: the faders are on channel 16\n");
+    for (const auto& [number, paramId] : { std::pair<int, const char*> { 7, "filter_cutoff" },
+                                           std::pair<int, const char*> { 11, "reverb_mix" } })
+    {
+        char what[80];
+        rig.send (cc (16, number, 20));
+        const float low = value (paramId);
+        rig.send (cc (16, number, 100));
+        std::snprintf (what, sizeof (what), "CC %d on channel 16 is the fader", number);
+        check (value (paramId) > low, what);
+        check (gain() == 1.0f, "and no volume");
+        const float faderPosition = value (paramId);
+        for (const int channel : { 1, 9 })
+        {
+            rig.send (cc (channel, number, 20));
+            std::snprintf (what, sizeof (what), "CC %d on channel %d leaves it alone", number, channel);
+            check (value (paramId) == faderPosition, what);
+            std::snprintf (what, sizeof (what), "CC %d on channel %d turns the instrument down", number, channel);
+            check (gain() < 0.2f, what);
+            rig.send (cc (channel, number, 127));
+            check (gain() == 1.0f, "and back up");
+        }
+    }
+
+    std::printf ("[25] on channel 7 the XL is talking about itself\n");
+    {
+        const auto before = allParams();
+        rig.send (cc (7, 30, 1));
+        rig.send (cc (7, 30, 2));
+        for (const int report : { 63, 69, 70, 71, 72, 73 })
+        {
+            rig.send (cc (7, report, 127));
+            rig.send (cc (7, report, 0));
+        }
+        rig.send (cc (7, 30, 6));
+        rig.send (cc (7, 30, 2));
+        check (allParams() == before, "no report writes a parameter");
+
+        rig.send (cc (7, 74, 90));
+        check (allParams() == before, "an MPE slide on channel 7 is no report and no knob");
+
+        rig.send (cc (7, 30, 0));
+        const float cutoff = value ("filter_cutoff");
+        rig.send (cc (1, 7, 20));
+        check (value ("filter_cutoff") == cutoff, "a value that is no mode changes nothing");
+        rig.send (cc (1, 7, 127));
+
+        const char* const row3Knob = LaunchControlXLLeds::paramIdForCc (30);
+        rig.send (cc (16, 30, 20));
+        const float low = value (row3Knob);
+        rig.send (cc (16, 30, 100));
+        check (value (row3Knob) > low, "CC 30 on channel 16 is still the knob");
+
+        rig.send (cc (1, 63, 20));
+        const float lowDuration = value ("gen_duration");
+        rig.send (cc (1, 63, 100));
+        check (value ("gen_duration") > lowDuration, "CC 63 from another device still drives gen_duration");
+    }
+
+    std::printf ("[26] a Custom Mode takes the faders off channel 16\n");
+    for (const int customMode : { 6, 29 })
+    {
+        rig.send (cc (7, 30, customMode));
+        for (const auto& [number, paramId] : { std::pair<int, const char*> { 7, "filter_cutoff" },
+                                               std::pair<int, const char*> { 11, "reverb_mix" } })
+        {
+            char what[80];
+            rig.send (cc (1, number, 20));
+            const float low = value (paramId);
+            rig.send (cc (1, number, 100));
+            std::snprintf (what, sizeof (what), "mode %d: CC %d on channel 1 is the fader", customMode, number);
+            check (value (paramId) > low, what);
+            check (gain() == 1.0f, "and no volume");
+            const float faderPosition = value (paramId);
+            rig.send (cc (9, number, 20));
+            check (value (paramId) == faderPosition && gain() < 0.2f, "channel 9 is still the player's");
+            rig.send (cc (9, number, 127));
+        }
+        rig.send (cc (7, 30, 2));
+        const float cutoff = value ("filter_cutoff");
+        rig.send (cc (1, 7, 20));
+        check (value ("filter_cutoff") == cutoff && gain() < 0.2f, "back on a DAW surface it is a volume again");
+        rig.send (cc (1, 7, 127));
+    }
+
+    std::printf ("[27] selecting the output takes back what a stray fader left\n");
+    rig.send (cc (1, 7, 20));
+    rig.send (cc (1, 11, 20));
+    check (gain() < 0.1f, "turned down");
+    rig.send (cc (7, 30, 6));
+    check (reselect (*proc), "selected again");
+    rig.leaveEchoWindow();
+    check (gain() == 1.0f, "full level");
+    {
+        const float cutoff = value ("filter_cutoff");
+        rig.send (cc (1, 7, 20));
+        check (value ("filter_cutoff") == cutoff, "and the Custom Mode is forgotten with the old selection");
+        rig.send (cc (1, 7, 127));
+    }
+
+    std::printf ("[27a] a restored session leaves a player's volume where it is\n");
+    {
+        rig.send (cc (9, 7, 40));
+        const float held = gain();
+        juce::MemoryBlock state;
+        proc->getStateInformation (state);
+        const int seen = port.enables.load();
+        proc->setStateInformation (state.getData(), (int) state.getSize());
+        for (int i = 0; i < 200 && port.enables.load() == seen; ++i)
+            CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.01, false);
+        check (port.enables.load() > seen, "the restore selected the output again");
+        rig.leaveEchoWindow();
+        check (gain() == held, "still there");
+        rig.send (cc (9, 7, 127));
+    }
+
+    std::printf ("[27b] a fader that loses the map to the message thread is no volume\n");
+    {
+        std::atomic<bool> stop { false };
+        std::thread gui ([&] { while (! stop.load()) (void) proc->getCcMappingCopy (7); });
+        for (int i = 0; i < 400; ++i)
+        {
+            rig.send (cc (16, 7, 20));
+            rig.send (cc (16, 11, 20));
+        }
+        check (gain() == 1.0f, "full level");
+        int lost = 0;
+        for (int i = 0; i < 400; ++i)
+        {
+            const int volume = (i % 2 == 0) ? 40 : 127;
+            rig.send (cc (9, 7, volume));
+            if (gain() != static_cast<float> (volume) / 127.0f)
+                ++lost;
+        }
+        stop.store (true);
+        gui.join();
+        check (lost == 0, "a player's volume gets through all the same");
+    }
+
+    std::printf ("[27c] an output closed before its bindings were applied stays closed\n");
+    {
+        proc->closeMidiOutputDevice();
+        rig.leaveEchoWindow();
+        const int seen = port.enables.load();
+        proc->openMidiOutputDevice (id);
+        proc->closeMidiOutputDevice();
+        for (int i = 0; i < 30; ++i)
+            CFRunLoopRunInMode (kCFRunLoopDefaultMode, 0.01, false);
+        check (port.enables.load() == seen, "no enable went out");
+        const float cutoff = value ("filter_cutoff");
+        rig.send (cc (1, 7, 40));
+        check (value ("filter_cutoff") == cutoff, "and no fader binding came back");
+        rig.send (cc (1, 7, 127));
+    }
+
+    rig.leaveEchoWindow();
+    check (selectOn (*proc, silentId, silentPort), "the MIDI port selected");
+    pedals ("the MIDI port");
+
+    std::printf ("[28] CC 7 and CC 11 with the MIDI port: the faders are on channel 1\n");
+    for (const auto& [number, paramId] : { std::pair<int, const char*> { 7, "filter_cutoff" },
+                                           std::pair<int, const char*> { 11, "reverb_mix" } })
+    {
+        char what[80];
+        rig.send (cc (1, number, 20));
+        const float low = value (paramId);
+        rig.send (cc (1, number, 100));
+        std::snprintf (what, sizeof (what), "CC %d on channel 1 is the fader", number);
+        check (value (paramId) > low, what);
+        check (gain() == 1.0f, "and no volume");
+
+        rig.send (cc (16, number, 20));
+        const float low16 = value (paramId);
+        rig.send (cc (16, number, 100));
+        std::snprintf (what, sizeof (what), "CC %d on channel 16 is the fader too", number);
+        check (value (paramId) > low16 && gain() == 1.0f, what);
+
+        const float faderPosition = value (paramId);
+        for (const int channel : { 2, 9, 15 })
+        {
+            rig.send (cc (channel, number, 20));
+            std::snprintf (what, sizeof (what), "CC %d on channel %d is the player's", number, channel);
+            check (value (paramId) == faderPosition && gain() < 0.2f, what);
+            rig.send (cc (channel, number, 127));
+        }
+    }
+    rig.send (cc (7, 63, 20));
+    {
+        const float low = value ("gen_duration");
+        rig.send (cc (7, 63, 100));
+        check (value ("gen_duration") > low, "channel 7 is an ordinary channel here");
+    }
+
+    std::printf ("[29] with no XL selected the pedals and controllers are the player's\n");
+    proc->closeMidiOutputDevice();
+    {
+        const float cutoff = value ("filter_cutoff");
+        rig.send (cc (1, 7, 30));
+        check (value ("filter_cutoff") == cutoff, "CC 7 moves no fader binding");
+        check (gain() < 0.3f, "CC 7 is the volume");
+        rig.send (cc (1, 7, 127));
+        rig.send (cc (1, 11, 30));
+        check (gain() < 0.3f, "CC 11 is the expression");
+        rig.send (cc (1, 11, 127));
+    }
+    pedals ("no XL output");
 
     proc->closeMidiOutputDevice();
     proc->releaseResources();

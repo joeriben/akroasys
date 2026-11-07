@@ -3758,6 +3758,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // Here and nowhere else: from this line on, every note in this buffer is a key.
     dawModeEchoFilter_.process(midiMessages, arpFilteredMidi_, buffer.getNumSamples());
 
+    // The player selected an XL output. Should the device have dropped out of DAW mode
+    // before this, its faders 3 and 7 arrived as channel volume and expression, and from
+    // here on they are on channel 16 again and can no longer bring either back up.
+    if (xlFaderGainsResetReq_.exchange(false, std::memory_order_acq_rel))
+    {
+        voiceManager.setChannelVolume(1.0f);
+        voiceManager.setExpression(1.0f);
+    }
+
     juce::ScopedNoDenormals noDenormals;
 
     // ── External-audio capture (Resynth init_audio source) ──────────────────
@@ -5798,7 +5807,23 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                   && msg.getChannel() == 16)
                             && handleMpeRpnByte (msg.getChannel(), cc, value7);
 
-                        if (learning)
+                        if (channel == LaunchControlXLLeds::kFeatureChannel
+                            && LaunchControlXLLeds::isFeatureReport(cc)
+                            && xlOnDawPort_.load(std::memory_order_relaxed))
+                        {
+                            // The XL reporting on itself. Falling through would have the
+                            // channel-agnostic binding take Shift for gen_duration and a
+                            // mode change for the Row 3 knob on CC 30, and a learn take
+                            // either for a control.
+                            if (cc == LaunchControlXLLeds::kSurfaceModeCc)
+                            {
+                                if (LaunchControlXLLeds::isCustomMode(value7))
+                                    xlInCustomMode_.store(true, std::memory_order_relaxed);
+                                else if (LaunchControlXLLeds::isDawSurface(value7))
+                                    xlInCustomMode_.store(false, std::memory_order_relaxed);
+                            }
+                        }
+                        else if (learning)
                         {
                             // CC Learn intercept: signal the message thread with the CC number.
                             midiLearnTargetCc.store(cc, std::memory_order_release);
@@ -5853,7 +5878,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                 const juce::SpinLock::ScopedTryLockType tryLock(ccMappingLock_);
                                 if (tryLock.isLocked())
                                 {
-                                    const auto& mapping = resolveCcMapping(absCc);
+                                    const auto& mapping = resolveCcMapping(absCc, LaunchControlXLLeds::kDawFaderChannel);
                                     if (mapping.param != nullptr)
                                     {
                                         // span is signed so an inverted binding keeps its direction.
@@ -5896,7 +5921,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                 if (tryLock.isLocked())
                                 {
                                     // param* and minNorm/maxNorm only — no String access.
-                                    const auto& mapping = resolveCcMapping(cc);
+                                    const auto& mapping = resolveCcMapping(cc, channel);
                                     if (mapping.param != nullptr)
                                     {
                                         const float norm = juce::jmap(
@@ -5916,6 +5941,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                             std::memory_order_release);
                                         boundHandled = true;
                                     }
+                                }
+                                else
+                                {
+                                    // The message thread has the map. A fader skips this
+                                    // value and the next one follows; let through, it would
+                                    // set a volume nothing brings back up.
+                                    boundHandled = dawModeActive_.load(std::memory_order_relaxed)
+                                        && LaunchControlXLLeds::isFaderSharedWithPlayers(cc)
+                                        && isXlFaderChannel(channel);
                                 }
                             }
 
@@ -9964,7 +9998,7 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
     {
         const auto deviceId = xml->getStringAttribute("midiOutputDeviceId");
         if (deviceId.isNotEmpty())
-            openMidiOutputDevice(deviceId);
+            openMidiOutputDevice(deviceId, /*restoringState=*/ true);
 
         if (xml->getBoolAttribute("midiClockEnabled", false))
             setMidiClockEnabled(true);
@@ -12299,11 +12333,12 @@ T5ynthProcessor::CcMapping T5ynthProcessor::getCcMappingCopy(int cc) const
     CcMapping result;
     {
         const juce::SpinLock::ScopedLockType lock(ccMappingLock_);
-        // Resolve through the SAME precedence the audio thread uses (XL device layer wins,
-        // else user/preset) so GUI consumers — e.g. the easy-mode "ENV/LFO/Drift tab follows
+        // Resolve through the precedence the audio thread uses (XL device layer wins, else
+        // user/preset) so GUI consumers — e.g. the easy-mode "ENV/LFO/Drift tab follows
         // the controller" feature in SynthPanel — see the active XL binding for CC 5-36,
-        // which now lives in xlDefaults_, not ccMappings_.
-        const auto& m = resolveCcMapping(cc);
+        // which now lives in xlDefaults_, not ccMappings_. Asked as the fader's channel:
+        // the GUI has no message to take one from, and the answer it wants is the fader's.
+        const auto& m = resolveCcMapping(cc, LaunchControlXLLeds::kDawFaderChannel);
         result.param   = m.param;
         result.minNorm = m.minNorm;
         result.maxNorm = m.maxNorm;
@@ -12764,7 +12799,7 @@ int T5ynthProcessor::findBoundCc(const juce::String& paramId) const
 
 // ── MIDI Output (LED feedback) ─────────────────────────────────────────────
 
-void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId)
+void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId, bool restoringState)
 {
     closeMidiOutputDevice();
     if (deviceId.isEmpty()) return;
@@ -12786,6 +12821,7 @@ void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId)
         isXL = outName.containsIgnoreCase("LCXL")
             || outName.containsIgnoreCase("Launch Control XL");
         midiOutputEchoes_ = LaunchControlXLLeds::portEchoesDawMode(outName);
+        xlOnDawPort_.store(isXL && LaunchControlXLLeds::isDawPort(outName), std::memory_order_relaxed);
     }
 
     // Selecting (or restoring) a Launch Control XL output is self-sufficient: auto-apply the
@@ -12796,6 +12832,9 @@ void T5ynthProcessor::openMidiOutputDevice(const juce::String& deviceId)
     // so this also covers the setStateInformation restore path that may run off-message.
     if (isXL)
     {
+        // Not on a restore: that runs unasked, and a player's volume would jump to full.
+        if (! restoringState)
+            xlFaderGainsResetReq_.store(true, std::memory_order_release);
         xlAutoApplyReq_.store(true, std::memory_order_release);
         triggerAsyncUpdate();
     }
@@ -12825,6 +12864,10 @@ void T5ynthProcessor::closeMidiOutputDevice()
         xlDefaults_.fill({});
         relEncoderAccum_.fill(0.0f);   // drop any parked relative-encoder remainder with the bindings
     }
+    // After the layer is gone: until then a player's CC 7 would still find the fader's binding.
+    xlOnDawPort_.store(false, std::memory_order_relaxed);
+    xlInCustomMode_.store(false, std::memory_order_relaxed);
+    xlAutoApplyReq_.store(false, std::memory_order_release);   // or the layer comes back with no output
 }
 
 void T5ynthProcessor::sendMidiOutputMessage(const juce::MidiMessage& msg)
@@ -12856,8 +12899,8 @@ void T5ynthProcessor::applyXLDefaultBindings()
     // Host LED control requires the device in DAW mode (programmer's ref p.8-12);
     // a Custom Mode's LEDs cannot be recoloured by the host. Enable it first so the
     // deferred LED burst below is honoured. (User must select the XL's "DAW" USB
-    // port; faders/knobs then transmit on ch16 — handled by the channel-agnostic
-    // binding apply in processBlock.) Flag DAW mode active ONLY if a device actually
+    // port; faders/knobs then transmit on ch16, which is what resolveCcMapping tells
+    // fader 3 and 7 apart by.) Flag DAW mode active ONLY if a device actually
     // received the enable, and write the flag under the lock that guards it.
     {
         const juce::SpinLock::ScopedLockType lock(midiOutputLock_);

@@ -81,7 +81,9 @@ struct LaunchControlXLLeds
     // Left transport (ch1, programmer's ref p.9 DAW-mode surface):
     //   Play ▶  = CC 116 (0x74)   Record ● = CC 118 (0x76)
     //   Page ^v = CC 106/107      Track ‹› = CC 103/102   (nav — unused by T5ynth)
+    //   Solo/Arm = CC 65          Mute/Select = CC 66     small button beside it = CC 104
     //   Shift   = CC 63 on ch7    (device-managed feature control — never host-driven)
+    //   Mode transmits nothing.
 
     // Map a CC number → LED control index. Returns -1 if not an XL control.
     // (control-index == CC# assumed; see header note.)
@@ -236,40 +238,99 @@ struct LaunchControlXLLeds
 
     static constexpr int kPage1Count = static_cast<int>(std::size(kPage1));
 
-    // ── Extended map — secondary parameters (CC 53-76) ───────────────────────
-    // CC 53-76 sits between the button row (CC 52) and the relative-encoder
-    // overlay (CC 77-100). No XL DAW-mode control transmits these CCs, so
-    // this range is safe for generic MIDI controllers without any XL conflict.
+    // ── Extended map — secondary parameters (CC 53-63, 70-76, 105, 108) ───────
     // Applied by populateXLDefaultBindings() alongside kPage1, so the table is
     // active in xlDefaults_ and any controller whose knob CC falls here is
     // immediately usable without manual CC-learn.
     //
-    // Layout: three groups of 8 (mirrors the XL's 3×8 encoder grid for orientation):
-    //   Block A CC 53-60  FX secondary
-    //   Block B CC 61-68  Generation secondary
-    //   Block C CC 69-76  Sequencer + misc
+    // This table is live whenever an XL output is selected, on every channel, so
+    // what it may hold is limited twice. CC 64-69 are the pedals of whatever else
+    // is plugged in: holding inf_steps on CC 64 meant the damper did not hold.
+    // And the XL's own buttons outside the two bottom rows must not land here
+    // either, or a tap writes a parameter; mapsLeaveTheseAlone() below keeps both.
+    //
+    // Layout:
+    //   Block A CC 53-60       FX secondary, then Generation
+    //   Block B CC 61-63       Generation secondary
+    //   Block C CC 70-76       Sequencer + misc, then Generation
+    //   Block D CC 105, 108    what no longer fits between them
     static constexpr lcxl3_detail::Binding kExtMap[] = {
         // Block A — FX secondary (CC 53-60)
         { "delay_time",       53, kColorFx  }, { "delay_feedback",   54, kColorFx  },
         { "delay_damp",       55, kColorFx  }, { "algo_room",        56, kColorFx  },
         { "algo_damping",     57, kColorFx  }, { "algo_width",       58, kColorFx  },
-        // CC 59-60 spare (future: reverb pre-delay, IR trim)
+        { "inf_steps",        59, kColorGen }, { "gen_cfg",          60, kColorGen },
 
-        // Block B — Generation secondary (CC 61-68)
+        // Block B — Generation secondary (CC 61-63)
         { "gen_magnitude",    61, kColorGen }, { "gen_noise",        62, kColorGen },
-        { "gen_duration",     63, kColorGen }, { "inf_steps",        64, kColorGen },
-        { "gen_cfg",          65, kColorGen }, { "gen_start",        66, kColorGen },
-        { "gen_axes_amount",  67, kColorGen },
-        // CC 68 spare (future: gen_seed, gen_hf_boost)
+        { "gen_duration",     63, kColorGen },
 
-        // Block C — Sequencer + misc (CC 69-76)
-        { "seq_bpm",          69, kColorSeq }, { "seq_steps",        70, kColorSeq },
+        // Block C — Sequencer + misc (CC 70-76)
+        { "seq_steps",        70, kColorSeq },
         { "seq_gate",         71, kColorSeq }, { "seq_shuffle",      72, kColorSeq },
         { "seq_glide_time",   73, kColorSeq }, { "osc_scan",         74, kColorGen },
-        { "drift_crossfade",  75, kColorDrift},
-        // CC 76 spare (was aftertouch_amount; AT is now 12 per-target bars in the easy panel)
+        { "drift_crossfade",  75, kColorDrift}, { "gen_start",       76, kColorGen },
+
+        // Block D (undefined in the MIDI spec, and no control of the XL sends them)
+        { "gen_axes_amount", 105, kColorGen }, { "seq_bpm",         108, kColorSeq },
     };
     static constexpr int kExtMapCount = static_cast<int>(std::size(kExtMap));
+
+    // The XL's buttons outside the two bottom rows (programmer's ref p.9, channel 1).
+    static constexpr bool isSurfaceButton(int cc) noexcept
+    {
+        return cc == 65 || cc == 66 || (cc >= 102 && cc <= 104)
+            || cc == 106 || cc == 107 || cc == 116 || cc == 118;
+    }
+
+    static constexpr bool isFootController(int cc) noexcept { return cc >= 64 && cc <= 69; }
+
+    static constexpr bool mapsLeaveTheseAlone() noexcept
+    {
+        for (const auto& binding : kPage1)
+            if (isFootController(binding.cc) || isSurfaceButton(binding.cc))
+                return false;
+        for (const auto& binding : kExtMap)
+            if (isFootController(binding.cc) || isSurfaceButton(binding.cc))
+                return false;
+        return true;
+    }
+
+    // Two of the faders sit on CCs that are also a player's controls: fader 3 on
+    // CC 7 (channel volume), fader 7 on CC 11 (expression). Only the channel can
+    // tell them apart: 16 in DAW mode, 1 outside it, where a keyboard's expression
+    // pedal is too, so there channel 1 stays the fader's. Every other channel is
+    // the player's. Channel 16 stays the fader's on any XL port, because a DAW port
+    // whose name does not say so would otherwise turn fader 3 into a volume.
+    static constexpr int kDawFaderChannel = 16;
+    static constexpr int kStandaloneFaderChannel = 1;
+
+    static bool isFaderSharedWithPlayers(int cc) noexcept { return cc == 7 || cc == 11; }
+
+    static bool isDawPort(const juce::String& portName)
+    {
+        return portName.containsIgnoreCase("DAW");
+    }
+
+    // Channel 7 on the DAW port is the device talking about itself: the surface mode
+    // whenever the player changes it, Shift, and its replies to the feature controls
+    // (programmer's ref p.9-10, p.17). None of that is a control, whatever the CC
+    // number says: CC 30 here is a mode report, not the Row 3 knob.
+    static constexpr int kFeatureChannel = 7;
+    static constexpr int kSurfaceModeCc  = 30;
+
+    static constexpr bool isFeatureReport(int cc) noexcept
+    {
+        return cc == kSurfaceModeCc || cc == 63 || (cc >= 69 && cc <= 73);
+    }
+
+    // 1 = DAW Mixer, 2 = DAW Control. In a Custom Mode the faders leave the DAW port for
+    // the MIDI port and channel 16 for the mode's own. Any other value is not a report.
+    static constexpr bool isDawSurface(int mode) noexcept { return mode == 1 || mode == 2; }
+    static constexpr bool isCustomMode(int mode) noexcept
+    {
+        return (mode >= 6 && mode <= 9) || (mode >= 18 && mode <= 29);
+    }
 
     // Canonical Page-1 paramId bound to a CC, or nullptr if the CC is not in the map.
     static const char* paramIdForCc(int cc) noexcept
@@ -296,6 +357,10 @@ struct LaunchControlXLLeds
         return loadedParamId;
     }
 };
+
+static_assert(LaunchControlXLLeds::mapsLeaveTheseAlone(),
+              "the XL layer answers on every channel: CC 64-69 are the player's, "
+              "and the XL's own buttons must not write a parameter");
 
 // Takes the XL's echo of a DAW-mode switch out of a block's MIDI, before anything
 // reads it.
