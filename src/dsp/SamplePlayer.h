@@ -8,9 +8,10 @@
  * Sample playback engine (ported from useSamplePlayer.ts).
  *
  * Features:
- *   - Forward loop, one-shot, ping-pong (palindrome buffer)
- *   - Equal-power crossfade baked into buffer at loop boundary
- *   - Cross-correlation loop-point optimization
+ *   - Forward loop, one-shot, ping-pong (reflection with turnaround fade)
+ *   - Loop crossfade baked into the tail, gain law from the measured coherence
+ *   - Seam search (LoopFinder): windowed splice mismatch + fade-region correlation
+ *   - Ping-pong turnaround fade at runtime (forward continuation blended into the reversal)
  *   - Signal-aware normalization (sustained vs. transient vs. hot/silent)
  *   - Fractional loop start/end ("brackets")
  *   - MIDI transposition via Signalsmith Stretch (pitch-preserving)
@@ -43,6 +44,17 @@ public:
         int playEnd = 0;
         int coldStart = 0;
         bool audioLoaded = false;
+        // PingPong turnaround fades (samples) and the mirror correlation that
+        // shapes each — see readLoopedSample. 0 = hard reflection on that side.
+        int   ppFadeStart = 0;
+        int   ppFadeEnd   = 0;
+        float ppCorrStart = 1.0f;
+        float ppCorrEnd   = 1.0f;
+        // Loop mode: which side the baked crossfade sits on (-1 tail, +1 head).
+        // Decides at READ time which first pass may see the faded buffer.
+        int   loopFadeSide = -1;
+        // The mode this state was prepared under (its fades belong to it).
+        LoopMode loopMode = LoopMode::Loop;
     };
 
     struct PreparedBufferLoad
@@ -141,6 +153,12 @@ public:
     float getSourceGain() const { return sourceGain_; }
 
     bool isPlaying() const { return playing; }
+
+    /** Current read position (samples into the playback buffer) and direction
+     *  (+1 forward, -1 backward). Plain reads of audio-thread-owned state, for
+     *  offline tools (tools/audition_loop_seams.cpp locates seams with them). */
+    double getReadPosition() const { return readPosition; }
+    int getPlayDirection() const { return playDirection_; }
 
     // ─── Loop region ("brackets") ───
     /** Set loop start as fraction of buffer (0.0–1.0). P2. Clamped against the
@@ -325,6 +343,22 @@ private:
         juce::AudioBuffer<float> playBuffer;
         juce::AudioBuffer<float> firstPassBuffer;
         double bufferOriginalSR = 44100.0;
+        // The loop geometry that belongs to THESE buffers travels with them:
+        // a voice that acquires the snapshot pointer reads its loop points,
+        // fades, gain laws and mode from here, never from the master's plain
+        // fields, which a re-prepare on another thread may already have
+        // moved on to the next buffer (the CLAP build runs processBlock with
+        // no lock, so the plain fields can be torn or a generation ahead).
+        int      playStart = 0, playEnd = 0, coldStart = 0;
+        int      ppFadeStart = 0, ppFadeEnd = 0;
+        float    ppCorrStart = 1.0f, ppCorrEnd = 1.0f;
+        // Which side this buffer's loop fade sits on (-1 tail, +1 head): an
+        // outgoing snapshot keeps being read by its own side during a morph,
+        // not by the incoming buffer's (the side is geometric and can flip
+        // with a Crossfade or marker change).
+        int      loopFadeSide = -1;
+        LoopMode loopMode = LoopMode::Loop;
+        bool     audioLoaded = false;
     };
 
     // Original (unprocessed) buffer — kept for re-preparation when settings change
@@ -412,10 +446,111 @@ private:
     // Playback bounds in samples (within playBuffer)
     int playStart  = 0;
     int playEnd    = 0;
-    int coldStart  = 0; // past crossfade zone (Loop mode only)
+    int coldStart  = 0; // where a fresh share starts reading (= playStart)
+
+    // PingPong turnaround fades, published with the region (applyPreparedPlaybackState)
+    // and adopted with it (shareBufferFrom / morphToBufferFrom). Audio-thread reads.
+    int   ppFadeStart_ = 0;
+    int   ppFadeEnd_   = 0;
+    float ppCorrStart_ = 1.0f;
+    float ppCorrEnd_   = 1.0f;
+    int   loopFadeSide_ = -1;
+
+    /** Everything a read needs to know about WHERE a playhead is and what it
+     *  last did, and about the buffer's loop geometry. The voice's own fields
+     *  are these, spelled out as members (currentHead / currentGeometry pack
+     *  them); the outgoing side of a held-note morph carries its own pair
+     *  (morphTail_), because its loop points, fade side, mode and last
+     *  reflection are the OLD buffer's and the shared position no longer
+     *  wraps where that buffer's fade was baked. */
+    struct Playhead
+    {
+        double pos       = 0.0;
+        int    dir       = 1;
+        bool   firstPass = true;
+        double turnPos   = 0.0;    // last PingPong reflection: where ...
+        int    turnFade  = 0;      // ... with which fade length (0 = none in flight)
+        float  turnCorr  = 1.0f;   // ... and which gain law
+    };
+    struct LoopGeometry
+    {
+        int      playStart = 0, playEnd = 0;
+        int      ppFadeStart = 0, ppFadeEnd = 0;
+        float    ppCorrStart = 1.0f, ppCorrEnd = 1.0f;
+        int      fadeSide = -1;
+        LoopMode mode = LoopMode::Loop;
+    };
+    /** The outgoing side of a held-note morph: the old buffer keeps playing
+     *  exactly as it did (its own position, direction, loop points, fades,
+     *  mode) under the cos ramp, while the voice's own head carries on into
+     *  the new buffer. Audio-thread-owned. */
+    struct MorphTail
+    {
+        Playhead     head;
+        LoopGeometry geo;
+        bool         active = false;
+    };
+    MorphTail morphTail_;
+    // The voice's own head has ended (a OneShot crossing, or it ran off the
+    // material) while the outgoing side of a morph may still be sounding: the
+    // voice then stays alive, silent on the incoming side, until the tail ends
+    // or the ramp completes. Reset by retrigger().
+    bool headEnded_ = false;
+    // Level the fade-from side had when it became the fade-from (1 for a side
+    // that was playing at full level). Its gain is fadeFromGain(morphFromGain_,
+    // ramp): it starts at that level and recovers toward the plain cos law as
+    // the ramp runs, so a side kept or promoted mid-crossfade carries on at
+    // the level it has (no step) and a stream of publications does not drain
+    // the held note.
+    float morphFromGain_ = 1.0f;
+    // Level the kept side recovers to: the level the whole voice had at the
+    // publication (both sides' power), so a side that was quiet because the
+    // note itself was fading stays on its fade, and a side that was quiet
+    // only because the other side carried the rest comes back up.
+    float morphRecoverTarget_ = 1.0f;
+    // Ramp position at which that recovery is complete (10 ms into the
+    // crossfade, or a quarter of a shorter crossfade).
+    float morphRecoverAlpha_ = 1.0f;
+    static float fadeFromGain(float startLevel, float target, float ramp, float recoverAlpha) noexcept;
+    // Stretch path only: once the voice has ended, the stretcher still holds
+    // one window of the sound; this many output samples are still rendered
+    // from silent input so the end is the material's own, not a cut.
+    int  stretchDrainLeft_ = 0;
+
+    Playhead     currentHead() const;
+    LoopGeometry currentGeometry() const;
+    /** Take the loop geometry, mode and SR of a snapshot this voice has
+     *  acquired (shareBufferFrom / morphToBufferFrom). */
+    void adoptGeometry(const PlaybackSnapshot& snap);
+
+    /** Loop mode, first pass: true when this pass must read the pristine copy.
+     *  A forward pass plays THROUGH a tail fade (-1) and so reads the faded
+     *  buffer, but must not pass through a head fade (+1); a backward pass
+     *  (start beyond the loop end) is the mirror of that. Decided from the
+     *  live direction, so a start position dragged or modulated across the
+     *  loop end after prepare still reads the right buffer. */
+    static bool firstPassReadsPristine(const Playhead& h, const LoopGeometry& g)
+    {
+        return h.firstPass && g.mode == LoopMode::Loop && ((h.dir > 0) == (g.fadeSide > 0));
+    }
+    bool firstPassReadsPristine() const { return firstPassReadsPristine(currentHead(), currentGeometry()); }
+
+    /** One source-sample step of a playhead against a loop geometry: wrap,
+     *  reflect (recording the reflection), or end a OneShot at a crossing.
+     *  Returns false when the playhead has stopped. */
+    static bool advanceHead(Playhead& h, const LoopGeometry& g, double speedMagnitude, int bufLen);
 
     // 3-point playback state (per-voice, reset on retrigger)
     bool inFirstPass_   = true;   // true until first loop boundary hit
+    // The last PingPong reflection this voice made: where, with which fade
+    // length and gain law. The turnaround fade is anchored on that EVENT, not
+    // on whichever buffer is current, so a held note whose buffer (and loop
+    // points) change mid-fade keeps the fade it was playing, and a reflection
+    // after the change fades every sounding buffer around the same point.
+    // Audio-thread-owned; reset by retrigger().
+    double turnPos_  = 0.0;
+    int    turnFade_ = 0;
+    float  turnCorr_ = 1.0f;
     int  playDirection_ = 1;      // +1 forward, -1 backward
 
     // Settings
@@ -477,39 +612,43 @@ private:
                                                const PrepareConfig& config) const;
     void applyPreparedPlaybackState(PreparedPlaybackState preparedState);
 
-    /** Cross-correlation loop-end optimizer with boundary smoothness penalty.
-     *  Returns the refined loop end (channel 0). */
-    int optimizeLoopEnd(const float* data, int loopStart, int loopEnd, int bufLen, int level) const;
+    /** Bake the loop crossfade into the TAIL: x[loopEnd-fade .. loopEnd) becomes
+     *  a fade from itself into the material that precedes the loop start,
+     *  x[loopStart-fade .. loopStart), so the wrap lands on x[loopStart] as the
+     *  original signal did. The gain law follows `correlation` (the measured
+     *  coherence of the two regions): linear at 1, equal-power at 0 — see
+     *  LoopFinder::crossfadeGains. The loop region itself is not shortened. */
+    static void applyLoopCrossfade(juce::AudioBuffer<float>& buf, int loopStart, int loopEnd,
+                                   int fadeSamples, int fadeSide, float correlation);
 
-    /** Local refinement of loopStart so the splice {data[loopEnd-1] -> data[loopStart]}
-     *  matches in amplitude AND slope. Searches a small neighborhood around the user's
-     *  loopStart. Returns refined start (channel 0). */
-    int refineLoopStart(const float* data, int loopStart, int loopEnd, int bufLen, int level) const;
 
-    /** Find the nearest local extremum (zero of first derivative) around `centre`.
-     *  Used by ping-pong to place reversal points where slope is naturally near zero,
-     *  eliminating velocity-discontinuity clicks. Returns sample index (channel 0). */
-    int snapToLocalExtremum(const float* data, int centre, int searchRadius,
-                            int boundLo, int boundHi) const;
+    /** playbackSample plus the PingPong turnaround fade: for the first
+     *  ppFade* samples after a reflection the forward continuation beyond the
+     *  boundary (x[E + tau]) is blended into the reversed playback (x[E - tau]),
+     *  with gains shaped by the mirror correlation measured at prepare time.
+     *  Time reversal negates every odd derivative; this is what removes the kink.
+     *  Not applied during the first pass (no turnaround has happened yet). */
+    float readLoopedSample(double pos, bool useFirstPassBuffer) const;
 
-    /** Apply equal-power crossfade at loop boundary. */
-    static void applyLoopCrossfade(juce::AudioBuffer<float>& buf, int loopStart, int& loopEnd,
-                                   float crossfadeMs, double bufferSampleRate);
+    /** One buffer read at `pos`: the boundary-aware cubic sample, plus the
+     *  PingPong turnaround fade when the playhead is inside the last
+     *  reflection's fade. readLoopedSample calls this for the current buffer
+     *  and, during a held-note morph, for the outgoing snapshot, and blends
+     *  the two. `pristine` = the first-pass copy (no boundary wrapping). */
+    float loopedSampleFrom(const juce::AudioBuffer<float>& buf, bool pristine,
+                           const Playhead& h, const LoopGeometry& g) const;
 
-    /** Write boundary continuation samples into playBuffer so cubic interpolation
-     *  near loop edges sees the *correct* surrounding context, not unrelated audio
-     *  past the loop region. Mode-aware:
-     *    - Loop:     periodic continuation (wrap)
-     *    - PingPong: palindromic continuation (mirror)
-     *    - OneShot:  no-op
-     *  Writes up to kBoundaryGuardSamples on each side, clamped to buffer bounds. */
-    static void writeBoundaryGuards(juce::AudioBuffer<float>& buf,
-                                    int playStart, int playEnd, LoopMode mode);
+    /** Cubic read whose taps beyond a loop boundary come from where the
+     *  playhead goes next (Loop: the other end; PingPong: the mirror image),
+     *  instead of from guard samples written into the buffer. On the first
+     *  pass only the boundary the playhead is moving toward wraps, so the
+     *  attack before the loop and a reversed start beyond it play pristine. */
+    float boundaryAwareSample(const juce::AudioBuffer<float>& buf, bool pristine,
+                              const Playhead& h, const LoopGeometry& g) const;
 
     /** Cubic interpolation needs i1-1, i1, i1+1, i1+2 — at most 2 samples ahead and
      *  1 behind. We use 4 on each side to absorb overshoot at high transposition
      *  ratios (worst case ~ srRatio * transposeRatio per step). */
-    static constexpr int kBoundaryGuardSamples = 4;
 
     float chooseNormalizeGain(const NormalizeAnalysis& analysis, NormalizeMode mode) const;
 
@@ -524,7 +663,4 @@ private:
     /** Remove a sustained near-silent TAIL (< ~-50 dB) from a source buffer. */
     void trimTrailingSilence(juce::AudioBuffer<float>& buffer) const;
 
-    // Per-level xcorr parameters: [0]=unused, [1]=Low, [2]=High
-    static constexpr int XCORR_WINDOW[3] = { 0,  512, 2048 };
-    static constexpr int XCORR_SEARCH[3] = { 0, 2000, 8000 };
 };

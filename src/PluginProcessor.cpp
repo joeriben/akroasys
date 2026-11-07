@@ -4,6 +4,7 @@
 #include "BinaryData.h"
 #include "UpdateChecker.h"
 #include "dsp/Tuning.h"
+#include "dsp/LoopFinder.h"
 #include "midi/LaunchControlXLLeds.h"
 #include "presets/CalibrationMigration.h"
 #include <algorithm>
@@ -7289,7 +7290,8 @@ struct GeneratedRegions
 
 GeneratedRegions analyzeGeneratedRegions (const juce::AudioBuffer<float>& feedBuffer,
                                           double sr,
-                                          SamplePlayer::LoopMode samplerLoopMode)
+                                          SamplePlayer::LoopMode samplerLoopMode,
+                                          float crossfadeMs)
 {
     float loopStartFrac = 0.0f;
     float loopEndFrac   = 1.0f;
@@ -7394,15 +7396,42 @@ GeneratedRegions analyzeGeneratedRegions (const juce::AudioBuffer<float>& feedBu
             // the full generated evolution. Looping the entire active region of
             // AI material often creates slow macro-dynamics that read like a
             // "broken normalize" even when the gain is static.
+            //
+            // WHERE that excerpt sits is decided by seam quality, not loudness:
+            // LoopFinder runs the editor cascade (feature-level similarity of the
+            // two regions the fade will mix, then zero-crossing candidates scored
+            // by windowed splice mismatch and fade-region correlation). The
+            // loudest window is only the fallback when the material is too short
+            // for the search. docs/plans/SAMPLER_LOOP_FINDING_ANALYSIS.md.
             if (samplerLoopMode != SamplePlayer::LoopMode::OneShot)
             {
                 const int activeLen = lastActive - firstActive;
-                const int minLoopSamples = static_cast<int>(std::round(sr * 1.5));
-                const int maxLoopSamples = static_cast<int>(std::round(sr * 6.0));
-                int targetLoopSamples = juce::jlimit(minLoopSamples, maxLoopSamples, activeLen / 3);
+                const int fadeSamples = juce::jmax (0, static_cast<int> (std::round (crossfadeMs * 0.001 * sr)));
+                const int minLoopSamples = juce::jmin (static_cast<int> (std::round (sr * 1.5)),
+                                                       juce::jmax (4, activeLen / 2));
+                const int maxLoopSamples = juce::jmin (static_cast<int> (std::round (sr * 6.0)), activeLen);
+                const int targetLoopSamples = juce::jlimit (minLoopSamples, juce::jmax (minLoopSamples, maxLoopSamples),
+                                                            activeLen / 3);
+                bool placed = false;
 
-                if (activeLen > targetLoopSamples + windowSize)
+                if (samplerLoopMode == SamplePlayer::LoopMode::Loop)
                 {
+                    const auto seam = LoopFinder::findLoopInRegion (data, numSamples, sr, fadeSamples,
+                                                                    firstActive, lastActive,
+                                                                    minLoopSamples, maxLoopSamples,
+                                                                    targetLoopSamples);
+                    if (seam.valid && seam.end - seam.start >= minLoopSamples)
+                    {
+                        loopStartFrac = static_cast<float> (seam.start) / static_cast<float> (numSamples);
+                        loopEndFrac   = static_cast<float> (seam.end)   / static_cast<float> (numSamples);
+                        placed = true;
+                    }
+                }
+
+                if (! placed && activeLen > targetLoopSamples + windowSize)
+                {
+                    // Loudest window of the target length (10 ms steps) — the
+                    // ping-pong window, and the forward-loop fallback.
                     std::vector<double> powerPrefix(static_cast<size_t>(numSamples + 1), 0.0);
                     for (int i = 0; i < numSamples; ++i)
                     {
@@ -7426,10 +7455,28 @@ GeneratedRegions analyzeGeneratedRegions (const juce::AudioBuffer<float>& feedBu
                             bestStart = pos;
                         }
                     }
+                    int ls = bestStart;
+                    int le = bestStart + targetLoopSamples;
 
-                    loopStartFrac = static_cast<float>(bestStart) / static_cast<float>(numSamples);
-                    loopEndFrac   = static_cast<float>(bestStart + targetLoopSamples)
-                                  / static_cast<float>(numSamples);
+                    if (samplerLoopMode == SamplePlayer::LoopMode::PingPong)
+                    {
+                        // A ping-pong window has no seam between its ends, only two
+                        // turnarounds: pull each to the point of best local
+                        // time-symmetry within +-50 ms that leaves the turnaround
+                        // fade its forward continuation.
+                        const int radius  = static_cast<int> (0.050 * sr);
+                        const int halfLen = juce::jmax (4, (le - ls) / 2);
+                        const int fadePP  = juce::jmin (fadeSamples, halfLen);
+                        const auto tE = LoopFinder::findTurnaround (data, numSamples, fadePP,
+                                                                    juce::jmax (ls + halfLen, le - radius), le + radius, le);
+                        if (tE.valid) le = tE.position;
+                        const auto tS = LoopFinder::findTurnaround (data, numSamples, fadePP,
+                                                                    ls - radius, juce::jmin (ls + radius, le - halfLen), ls);
+                        if (tS.valid && tS.position <= le - 4) ls = tS.position;
+                    }
+
+                    loopStartFrac = static_cast<float>(ls) / static_cast<float>(numSamples);
+                    loopEndFrac   = static_cast<float>(le) / static_cast<float>(numSamples);
                 }
             }
         }
@@ -7525,7 +7572,7 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
 
     if (autoPositionPoints)
     {
-        const auto regions = analyzeGeneratedRegions (feedBuffer, sr, samplerLoopMode);
+        const auto regions = analyzeGeneratedRegions (feedBuffer, sr, samplerLoopMode, samplerConfig.crossfadeMs);
         activeStartFrac = regions.activeStartFrac;
         activeEndFrac   = regions.activeEndFrac;
         loopStartFrac   = regions.loopStartFrac;
@@ -8117,7 +8164,7 @@ bool T5ynthProcessor::prepareCachePosition (CachePositionEngines& dest,
         // points; this one deliberately does not touch them, because P1/P2/P3
         // are one set of controls on the panel and sixteen positions cannot all
         // own them.
-        const auto regions = analyzeGeneratedRegions (feed, sr, config.loopMode);
+        const auto regions = analyzeGeneratedRegions (feed, sr, config.loopMode, config.crossfadeMs);
         activeStartFrac = regions.activeStartFrac;
         activeEndFrac   = regions.activeEndFrac;
         config.loopStartFrac = regions.loopStartFrac;
