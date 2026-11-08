@@ -969,11 +969,14 @@ void PromptPanel::timerCallback()
             // one the loop's rewrites built.
             editorNamed_ = GeneratedPitch::namedIn(loopOriginalA_, loopOriginalB_, 0, 0);
             processorRef.forgetPitchSeries();
-            // NOTE: do NOT touch the durable human-prompt store here — it already holds
-            // these originals (loopOriginalA_/B_ were sourced from it on engage) and must
-            // survive so a later save/buffer-write persists the human text even if this
-            // restore edge is ever missed. setText above used dontSendNotification, so
-            // onTextChange won't overwrite it with the reverted text either.
+            // The durable human-prompt store names these originals too, because a
+            // preset save writes the store (PresetFormat), and what the player sees
+            // and hears now is the originals. It held them from the engage on (they
+            // were sourced from it), unless the player typed while the loop ran:
+            // onTextChange then wrote that text into it, the restore just above put
+            // the originals back over it, and a save would have stored the typed
+            // text the editors no longer show.
+            processorRef.setHumanPrompts(loopOriginalA_, loopOriginalB_);
             loopOriginalsValid_ = false;
             loopEngaged_ = false;   // re-arm the original-capture edge for the next run
             pendingLoopPromptA_.clear();
