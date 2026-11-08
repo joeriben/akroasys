@@ -230,7 +230,9 @@ namespace Music
     {
         int pitchClass = 0;   // 0=C, 1=C#/Db … 11=B (accidentals resolved, mod 12)
         int octave     = 0;   // scientific-pitch octave as written (the digits after the note)
-        int midiNote   = 0;   // MIDI number, SPN convention: A4→69, C4(middle C)→60, i.e. (octave+1)*12+pc.
+        int midiNote   = 0;   // MIDI number, SPN convention: A4→69, C4(middle C)→60, i.e. (octave+1)*12+pc
+                              // with pc taken before the wrap, so the octave stays the letter's:
+                              // Cb3 = B2 = 47, B#2 = C3 = 48. Can fall outside 0..127 (cb-1, b#9).
                               // (If T5ynth adopts C3=60 elsewhere, that's a fixed +12 the consumer applies.)
         juce::String text;    // the token VERBATIM as the user wrote it ("C#3", "db5")
     };

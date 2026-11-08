@@ -642,7 +642,9 @@ namespace Music
                     }
                 n.pitchClass = ((pc % 12) + 12) % 12;
                 n.octave     = juce::String (m[4].str().c_str()).getIntValue();
-                n.midiNote   = (n.octave + 1) * 12 + n.pitchClass;   // SPN: A4→69
+                // SPN: A4→69. The octave belongs to the letter, so the accidentals
+                // count before the wrap: Cb3 is B2 (47), B#2 is C3 (48).
+                n.midiNote   = (n.octave + 1) * 12 + pc;
                 spec.notes.add (n);
             }
         }
