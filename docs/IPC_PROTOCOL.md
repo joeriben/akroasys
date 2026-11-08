@@ -488,17 +488,27 @@ After the PCM body, the server appends:
 
 ```
 <uint16 LE num_dims>
-<float32[num_dims] emb_a>    // only if num_dims > 0
-<float32[num_dims] emb_b>    // only if num_dims > 0
+<float32[num_dims] emb_a>       // only if num_dims > 0
+<float32[num_dims] emb_b>       // only if num_dims > 0
+<float32[num_dims] baseline>    // only if num_dims > 0
 ```
 
-Written by `send_audio()` at `backend/pipe_inference.py:908-916`, parsed by
-`PipeInference::generate()` at
-`src/inference/PipeInference.cpp:549-557`.
+THREE vectors follow the count, not two. `baseline` is the pooled conditioning
+as the model saw it after the A/B blend and the pre-offsets but BEFORE the
+DimExplorer's dimension offsets — the GUI explorer's "this is what the model
+sees before your offsets" reference. A client that reads only `emb_a` and
+`emb_b` leaves `num_dims` floats in the pipe, and the next frame's status byte
+is read out of the middle of a float32 (measured 2026-11-08 with a test client
+written from the previous text of this section: status byte `0x4F`).
+
+Written by `send_audio()` (`backend/pipe_inference.py`, the `emb_stats`
+triple), parsed by `PipeInference::generate()` into `Result::embeddingA`,
+`embeddingB` and `embeddingBaseline` (`src/inference/PipeInference.cpp:1225-1234`);
+the preload reply's reader discards `3 * num_dims` floats for the same reason
+(`PipeInference.cpp:1906-1911`).
 
 - `num_dims` is `768` in the diffusers (SA Open) and native paths (mean-pooled
-  T5 encoder output). `emb_b` is a zero vector when `prompt_b` is empty
-  (`pipe_inference.py:801`).
+  T5 encoder output). `emb_b` is a zero vector when `prompt_b` is empty.
 - `num_dims` is `0` for the AudioLDM2 path (`_generate_audioldm2` returns
   `emb_stats=None`, `pipe_inference.py:607`; `send_audio`'s else branch
   writes `struct.pack('<H', 0)`, line 915).
