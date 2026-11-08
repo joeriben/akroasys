@@ -37,6 +37,11 @@ unbroken.
   fired on its own after the load and replaced the audio the preset brought.
   Both are now dropped when a preset loads.
 
+- **A translation no longer overwrites newer prompts.** If a preset, snapshot or
+  Init was loaded, or the text was edited, while a translation was running, the
+  old prompt arrived in English over the new one. It now only replaces the text
+  it translated, and the status line says when it was not applied.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
