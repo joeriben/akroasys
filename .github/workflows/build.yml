@@ -10,7 +10,7 @@ on:
 jobs:
   # ── macOS (Apple Silicon + Intel Universal) ──────────────────────
   macos:
-    runs-on: macos-14   # Apple Silicon runner
+    runs-on: macos-15   # Apple Silicon runner (macos-14 retired by GitHub, 2026-11-08)
     steps:
       - uses: actions/checkout@v4
         with:
