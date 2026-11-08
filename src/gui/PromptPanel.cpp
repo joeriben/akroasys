@@ -4249,12 +4249,34 @@ void PromptPanel::translatePromptsInPlace()
         {
             if (auto* self = safeThis.getComponent())
             {
-                if (enA != srcA) self->promptAEditor.setText(enA, juce::sendNotification);
-                if (enB != srcB) self->promptBEditor.setText(enB, juce::sendNotification);
+                // Only over the text it translated: a preset, snapshot or Init
+                // loaded meanwhile (none of them waits for a translation), or the
+                // player typing on, put other prompts there, and the old text in
+                // English must not land over them. Compared exactly: a space
+                // typed after the last word is the player still typing.
+                bool dropped = false, written = false;
+                auto land = [&dropped, &written](juce::TextEditor& editor, const juce::String& src,
+                                                 const juce::String& en)
+                {
+                    if (en == src)
+                        return;
+                    if (editor.getText() == src)
+                    {
+                        editor.setText(en, juce::sendNotification);
+                        written = true;
+                    }
+                    else
+                        dropped = true;
+                };
+                land(self->promptAEditor, srcA, enA);
+                land(self->promptBEditor, srcB, enB);
                 self->translateToggle.setPulsing(false);
                 self->translatingPrompts_ = false;  // auto-regen resumes here (param untouched)
                 if (self->onStatusChanged)
-                    self->onStatusChanged(errMsg.isNotEmpty() ? errMsg : juce::String("translated"), false);
+                    self->onStatusChanged(errMsg.isNotEmpty() ? errMsg
+                                          : ! dropped ? juce::String("translated")
+                                          : written   ? juce::String("prompts changed, translation applied in part")
+                                                      : juce::String("prompts changed, translation not applied"), false);
             }
         });
     }).detach();
