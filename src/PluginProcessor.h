@@ -1879,6 +1879,7 @@ private:
     // replayModeActive_ is true. nextNoteIdx / nextGenIdx are audio-thread-only;
     // nextParamIdx is message-thread-only (replayTimerTick).
     std::atomic<bool>     replayModeActive_ { false };
+    std::atomic<juce::uint32> stateRestoreSerial_ { 0 };   // see getStateRestoreSerial()
     ReplayState           replayState_;
     std::atomic<uint64_t> replayPlayhead_        { 0 };   // audio thread writes, both read (TAPE samples)
     std::atomic<float>    replayRate_            { 1.0f };// speed multiplier, see setReplayRate()
@@ -2002,6 +2003,15 @@ public:
 
     /** Stop replay and return to live control. Message thread only. Idempotent. */
     void stopReplay();
+
+    /** Counts the states setStateInformation takes on (a host recalling a
+     *  state, a session log's start patch and the patch its Stop puts back),
+     *  twice each: at the start and at the end of the restore. The editor
+     *  learns of none of them otherwise, and a render or an LRO authoring still
+     *  running across one was asked for the sound it replaced (PromptPanel's
+     *  load check). Any thread. */
+    juce::uint32 getStateRestoreSerial() const noexcept
+    { return stateRestoreSerial_.load(std::memory_order_acquire); }
 
     bool     isReplayActive()        const noexcept { return replayModeActive_.load(std::memory_order_acquire); }
     uint64_t getReplayPlayhead()     const noexcept { return replayPlayhead_.load(std::memory_order_relaxed); }

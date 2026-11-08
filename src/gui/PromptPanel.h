@@ -114,6 +114,14 @@ public:
      *  has been replaced under it (a preset load), and a run whose cadence was
      *  switched off mid-pass did not record a take. */
     void disarmLroTakeStep() { lroTakeStepArmed_ = false; }
+    /** Init, or a preset with an LRO sound or an LRO cache, was loaded: an
+     *  authoring pass or a Re-Prompt step still running was asked for the
+     *  sound before, and is dropped when it lands (lroPassOutlivedLoad). Not
+     *  for a preset without either, nor a T5 oscillator snapshot: those leave
+     *  the LRO's sound, prompt, card and cache as they were, and a pass landing
+     *  after them only detaches the current preset's name, as it does without
+     *  a load. An LRO snapshot that holds a sound is refused while a pass runs. */
+    void dropLroPassInFlight() { ++lroLoadSeq_; }
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -454,10 +462,23 @@ private:
      *  never consumes a step. */
     void stepOfflineTakeAfterCapture(bool captured);
 
-    /** At a render's landing: true when a sound was loaded (loadPresetData)
-     *  after the render was asked for. The render is then dropped whole, and
-     *  this says so on the status line. */
+    /** Where the loads stand, taken when a render is asked for: the panel's
+     *  own (loadPresetData: a preset, a snapshot, Init) plus the processor's
+     *  state restores (a host recall, a session log's start and Stop). Both
+     *  only grow, so the sum changes whenever either does. */
+    unsigned long long neuralLoadEpoch() const;
+    /** The LRO's: dropLroPassInFlight plus the same state restores. */
+    unsigned long long lroLoadEpoch() const;
+
+    /** At a render's landing: true when a sound was loaded after the render
+     *  was asked for (neuralLoadEpoch moved). The render is then dropped whole,
+     *  and this says so on the status line. */
     bool renderOutlivedLoad(unsigned long long askedAtLoad);
+
+    /** The same for the LRO: an authoring pass or a Re-Prompt step that a
+     *  load overtook (lroLoadEpoch moved). `line` says what was dropped; it
+     *  goes on the card unless the load put its own trace there. */
+    bool lroPassOutlivedLoad(unsigned long long askedAtLoad, const juce::String& line);
 
     /** The auto-regen cadence in seconds, from the REGENERATE mode + its BPM: what
      *  one step of an offline take advances the generation-side drift by. ASAP
@@ -889,6 +910,8 @@ private:
     // when a sound is loaded was asked for the sound before it, and landing it
     // would replace the loaded audio with a render of the old prompts.
     unsigned long long presetLoadSeq_ = 0;
+    // The LRO's own (dropLroPassInFlight).
+    unsigned long long lroLoadSeq_ = 0;
     bool translatingPrompts_ = false;  // Union-Jack translate in flight (blocks IPC overlap)
     std::vector<std::pair<int, float>> pendingOffsets_;  // for DimensionExplorer
     std::map<juce::String, float> pendingAxes_;          // for SemanticAxes

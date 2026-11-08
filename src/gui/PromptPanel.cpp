@@ -2709,6 +2709,9 @@ void PromptPanel::pollCsoundPerformanceEnded()
 // ──────────────────────────────────────────────────────────────────────────────
 void PromptPanel::triggerDcoBake()
 {
+    // Before anything this request is built from is read: a load landing
+    // in between then moves the epoch, and the result is dropped.
+    const auto askedAtLoad = lroLoadEpoch();
     // csound_author.py's backend handler resolves the SAME installed model this
     // flag tracks (_resolve_coder_model_dir), so "language model not installed"
     // is the exact failure mode blocking this trigger.
@@ -2818,17 +2821,17 @@ void PromptPanel::triggerDcoBake()
     // switch on afterwards had nothing to turn on. Now every authoring describes
     // its whole sound and the switch decides when that reaches the patch.
     const juce::var synthParams = processorRef.buildAuthorParamIndex();
-    std::thread([safeThis, pipePtr, text, bakeSeq, synthParams]() mutable
+    std::thread([safeThis, pipePtr, text, bakeSeq, synthParams, askedAtLoad]() mutable
     {
       // Publishing ONE attempt — engine swap, card, Re-Prompt bookkeeping. The
       // first authoring and every correction publish identically (a correction IS
       // the sound now, not a preview), so this is one lambda rather than two
       // copies that could drift apart.
-      auto publish = [safeThis, text]
+      auto publish = [safeThis, text, askedAtLoad]
                      (const PipeInference::CsoundAuthorResult& authored,
                       int attempt, bool moreToCome)
       {
-        juce::MessageManager::callAsync([safeThis, authored, text, attempt, moreToCome]()
+        juce::MessageManager::callAsync([safeThis, authored, text, attempt, moreToCome, askedAtLoad]()
         {
             auto* self = safeThis.getComponent();
             if (self == nullptr) return;   // panel gone — nothing to write
@@ -2845,6 +2848,10 @@ void PromptPanel::triggerDcoBake()
                 self->dcoBaking_ = false;
                 if (self->onLcoBusyChanged) self->onLcoBusyChanged(false);
             }
+
+            if (self->lroPassOutlivedLoad(askedAtLoad,
+                    "Instrument dropped: a new sound was loaded while it was written"))
+                return;
 
             if (! authored.success)
             {
@@ -3321,6 +3328,9 @@ juce::String PromptPanel::bodyFromOrchestra(const juce::String& orchestra)
 // "was bewusst NICHT kopiert wird").
 void PromptPanel::triggerDcoReprompt()
 {
+    // Before anything this request is built from is read: a load landing
+    // in between then moves the epoch, and the result is dropped.
+    const auto askedAtLoad = lroLoadEpoch();
     // Message-thread gates, mirroring triggerDcoBake's gate order/shape. Every
     // early-out reports through dcoStatusLabel so the user always sees WHY a
     // click did nothing (house pattern: triggerDcoBake, triggerGeneration).
@@ -3456,7 +3466,7 @@ void PromptPanel::triggerDcoReprompt()
     // rule; house pattern: triggerDcoBake / runSemanticLoopStep).
     juce::Component::SafePointer<PromptPanel> safeThis(this);
     std::thread([safeThis, pipePtr, stanceKey, flags, prev, recent, vocab,
-                 orchestra, probeRate, probeOs, listenRate, device]() mutable
+                 orchestra, probeRate, probeOs, listenRate, device, askedAtLoad]() mutable
     {
         // ── The ear ──────────────────────────────────────────────────────────
         // The BARE oscillator: the Csound output alone, no ADSR and no filter.
@@ -3525,12 +3535,16 @@ void PromptPanel::triggerDcoReprompt()
         // instrument was heard, which is the one thing this change exists to stop.
         if (heardTags.isEmpty() && heardSpectral.isEmpty())
         {
-            juce::MessageManager::callAsync([safeThis, earError, orchestraUnheard]()
+            juce::MessageManager::callAsync([safeThis, earError, orchestraUnheard, askedAtLoad]()
             {
                 auto* self = safeThis.getComponent();
                 if (self == nullptr) return;
                 self->dcoRepromptBusy_ = false;
                 if (self->onLcoBusyChanged) self->onLcoBusyChanged(false);
+                // What could not be heard was the instrument before the load.
+                if (self->lroPassOutlivedLoad(askedAtLoad,
+                        "Rewrite dropped: a new sound was loaded while it ran"))
+                    return;
                 // Arm the bake route ONLY when the ORCHESTRA is what cannot be
                 // heard: that is a sound the user needs to REPLACE, and every
                 // further press would otherwise re-attempt a step that cannot work.
@@ -3585,13 +3599,19 @@ void PromptPanel::triggerDcoReprompt()
         const juce::String cleaned = r.success ? RepromptStances::cleanPrompt(r.text) : juce::String();
 
         juce::MessageManager::callAsync(
-            [safeThis, success = r.success, cleaned, errorMessage = r.errorMessage]()
+            [safeThis, success = r.success, cleaned, errorMessage = r.errorMessage, askedAtLoad]()
         {
             auto* self = safeThis.getComponent();
             if (self == nullptr) return;   // panel gone — nothing to write
 
             self->dcoRepromptBusy_ = false;
             if (self->onLcoBusyChanged) self->onLcoBusyChanged(false);
+
+            // A rewrite of the instrument before the load: written into the
+            // prompt and authored, it would replace the loaded one.
+            if (self->lroPassOutlivedLoad(askedAtLoad,
+                    "Rewrite dropped: a new sound was loaded while it ran"))
+                return;
 
             if (! success || cleaned.isEmpty())
             {
@@ -4299,6 +4319,9 @@ void PromptPanel::translatePromptsInPlace()
 
 void PromptPanel::triggerGeneration()
 {
+    // Before anything this request is built from is read: a load landing
+    // in between then moves the epoch, and the result is dropped.
+    const auto askedAtLoad = neuralLoadEpoch();
     // A running tape owns the generation pipe and the sample buffer: a manual render
     // would loadGeneratedAudio() over the sound the replay just faded in, dragging
     // every held voice to a timbre the tape never contained. Say so rather than
@@ -4369,7 +4392,6 @@ void PromptPanel::triggerGeneration()
     // seconds); the message thread adopts it when it lands. The note comes from
     // the prompts the request carries, as the model gets them.
     auto pitchJob = processorRef.beginPitchFit(req.promptA, req.promptB);
-    const auto askedAtLoad = presetLoadSeq_;
     std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
                  askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
     {
@@ -4492,6 +4514,9 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                                             float effectiveResynth,
                                             bool /*holdForBar*/)
 {
+    // Before anything this request is built from is read: a load landing
+    // in between then moves the epoch, and the result is dropped.
+    const auto askedAtLoad = neuralLoadEpoch();
     if (generating || translatingPrompts_ || loopStepInFlight_) return;
 
     lastGenAlpha_ = effectiveAlpha;
@@ -4547,7 +4572,6 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
     // seconds); the message thread adopts it when it lands. The note comes from
     // the prompts the request carries, as the model gets them.
     auto pitchJob = processorRef.beginPitchFit(req.promptA, req.promptB);
-    const auto askedAtLoad = presetLoadSeq_;
     std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
                  askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
     {
@@ -4894,9 +4918,19 @@ void PromptPanel::stepOfflineTakeAfterCapture(bool captured)
     processorRef.requestDriftGenerationStep(static_cast<float>(cadenceIntervalSeconds()));
 }
 
+unsigned long long PromptPanel::neuralLoadEpoch() const
+{
+    return presetLoadSeq_ + processorRef.getStateRestoreSerial();
+}
+
+unsigned long long PromptPanel::lroLoadEpoch() const
+{
+    return lroLoadSeq_ + processorRef.getStateRestoreSerial();
+}
+
 bool PromptPanel::renderOutlivedLoad(unsigned long long askedAtLoad)
 {
-    if (askedAtLoad == presetLoadSeq_)
+    if (askedAtLoad == neuralLoadEpoch())
         return false;
     // Asked for the sound before the load. Nothing of it is kept: not the audio
     // (it would replace the loaded one), not the cache entry (the loaded
@@ -4907,6 +4941,25 @@ bool PromptPanel::renderOutlivedLoad(unsigned long long askedAtLoad)
     takeStepArmed_ = false;
     if (onStatusChanged)
         onStatusChanged("render dropped: a new sound was loaded while it ran", false);
+    return true;
+}
+
+bool PromptPanel::lroPassOutlivedLoad(unsigned long long askedAtLoad, const juce::String& line)
+{
+    if (askedAtLoad == lroLoadEpoch())
+        return false;
+    // Asked for the instrument before the load. Nothing of it reaches the
+    // processor: not the orchestra, its knobs and settings (they would replace
+    // the loaded ones), not the LRO cache (the loaded preset's own), not the
+    // engine mode, not the preset's name; a rewrite is neither written into
+    // the prompt nor authored.
+    lroTakeStepArmed_ = false;
+    // A preset with an LRO sound put its trace on the card, and it describes
+    // what plays now. Anything else there is this pass as it ran. (Not the
+    // main status line: the LRO reports on its card, and the main line and its
+    // glow can belong to a neural render or a translation meanwhile.)
+    if (! dcoTraceView.isShowingTrace())
+        setLcoStatus(line);
     return true;
 }
 

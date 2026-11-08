@@ -9850,7 +9850,14 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
     stateRestoreMarkerName_.clear();
 
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
-    if (xml != nullptr && xml->hasTagName(parameters.state.getType()))
+    const bool takesState = xml != nullptr && xml->hasTagName(parameters.state.getType());
+    // The editor's load check (getStateRestoreSerial) counts only a state that
+    // is taken on, and counts it at the start and again at the end: a host can
+    // call this off the message thread, and a render or an LRO pass the editor
+    // asks for meanwhile is built from a half-restored state.
+    if (takesState)
+        stateRestoreSerial_.fetch_add(1, std::memory_order_acq_rel);
+    if (takesState)
     {
         auto loadedTree = juce::ValueTree::fromXml(*xml);
 
@@ -10166,6 +10173,10 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
     // instrument the project was saved with. (It was safe to leave standing only while
     // the LCO stance was read exclusively by user-initiated presses.)
     parameters.getParameter(PID::dcoRepromptStance)->setValueNotifyingHost(0.0f);
+    // After the stances are Off: a self-running step the restored stance could
+    // start before this line is asked within the count, and dropped.
+    if (takesState)
+        stateRestoreSerial_.fetch_add(1, std::memory_order_acq_rel);
 
     // Treat the restored seqPreset as not-yet-applied so the next processBlock
     // reloads its canned pattern (the step pattern isn't part of the saved

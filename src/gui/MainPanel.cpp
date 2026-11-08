@@ -2521,6 +2521,17 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
 
     processorRef.setCsoundCacheCapacity(0);
     promptPanel.disarmLroTakeStep();   // an in-flight authoring pass must not claim this cache
+    // ...nor land over an LRO sound or cache this preset brings. The engine
+    // mode is the one the file restored; both language modes are the LRO, as
+    // in the panel switch below.
+    {
+        const int em = static_cast<int>(
+            processorRef.getValueTreeState().getRawParameterValue(PID::engineMode)->load());
+        if (result.hasLco || result.csoundCacheCapacity > 0
+            || em == static_cast<int>(EngineMode::Lco)
+            || em == static_cast<int>(EngineMode::Csound))
+            promptPanel.dropLroPassInFlight();
+    }
     if (result.csoundCacheCapacity > 0)
     {
         processorRef.setCsoundCacheCapacity(result.csoundCacheCapacity);
@@ -4842,6 +4853,7 @@ void MainPanel::loadInitPreset()
     processorRef.setCsoundCacheCapacity(0);
     promptPanel.disarmOfflineTakeStep();
     promptPanel.disarmLroTakeStep();
+    promptPanel.dropLroPassInFlight();
     processorRef.setLastPrompts({}, {});
     processorRef.setLastPresetName({});
     processorRef.setLastTags({});

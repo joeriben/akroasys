@@ -299,6 +299,9 @@ public:
         relayout();
     }
 
+    /** A trace is on the card (setTrace), not a status line or a stream. */
+    bool isShowingTrace() const noexcept { return trace_.valid; }
+
     /** What the RUNNING station currently shows. The panel's runtime-ended
      *  poll keys its precedence on THIS, not on a shadow copy of its own last
      *  write: setTrace()/setStatus() reset compile_ to Unknown without going
