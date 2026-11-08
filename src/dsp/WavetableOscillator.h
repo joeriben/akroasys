@@ -445,9 +445,9 @@ private:
     // doc comment for the off-lock/publish contract.
     MipDataPtr prepareMipLevels(const std::vector<std::vector<float>>& srcFrames);
 
-    // Pitch detection (simplified YIN). GeneratedOctave reads a regenerated
+    // Pitch detection (simplified YIN). GeneratedPitch reads a regenerated
     // sample's pitch with this same detector.
-    friend class GeneratedOctave;
+    friend class GeneratedPitch;
     static PitchEstimate analyzePitchWindow(const float* data, int length, double sr);
     static float detectPitch(const float* data, int length, double sr);
     static int nearestZeroCrossing(const float* data, int length, int pos, int maxSearch);

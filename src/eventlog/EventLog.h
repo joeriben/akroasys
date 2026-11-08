@@ -88,10 +88,10 @@ struct GenerationEventLogEntry
     double       initAudioSampleRate = 0.0;
     float        initNoiseLevel      = 1.0f;
 
-    // Whole octaves the octave fit moved the result by before it played
-    // (GeneratedOctave; positive = up). Absent on a tape older than the fit,
+    // Semitones the pitch fit moved the result by before it played
+    // (GeneratedPitch; positive = up). Absent on a tape older than the fit,
     // which reads as 0: those results played as the model made them.
-    int          octaveMove          = 0;
+    float        pitchMove           = 0.0f;
 };
 
 /** Coarse marker for a bulk parameter load (preset import / DAW state restore)

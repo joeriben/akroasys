@@ -8,6 +8,7 @@
 #include <optional>
 #include "../inference/PipeInference.h"
 #include "../eventlog/EventLog.h"   // GenerationEventLogEntry (replay transport)
+#include "../dsp/GeneratedPitch.h"  // GeneratedPitch::Named (the notes the editors name)
 #include "../dsp/BlockParams.h"   // RepromptCoupling (Re-Prompt coupling enum)
 #include "GuiHelpers.h"  // FlippedVerticalSlider, AlphaSliderLnF, impulse colours
 // (the baked table is now drawn in the engine window — SynthPanel/WaveformDisplay
@@ -492,7 +493,7 @@ private:
      *  generation (manual Generate or the Auto-Regen standing trigger) renders the
      *  rewritten prompts. No-op (cheap early-out) unless a stance is active AND the
      *  model is SA3. */
-    /** heard: the render as it plays (octave-fitted), before any drift join. */
+    /** heard: the render as it plays (pitch-fitted), before any drift join. */
     void runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate);
 
     T5ynthProcessor& processorRef;
@@ -896,6 +897,13 @@ private:
     std::map<juce::String, float> lastGenAxes_;
     juce::String lastGenPromptA_;
     juce::String lastGenPromptB_;
+    // The notes the two editors named when the pitch series was last kept or
+    // started: an edit forgets the series only when it changes them (half-typed
+    // text included, so retyping the note starts a new series). Written on every
+    // edit and wherever the editors are filled silently (a preset, the
+    // Re-Prompt restore, a Re-Prompt rewrite as it is revealed). Message thread.
+    GeneratedPitch::Named editorNamed_;
+    void forgetPitchSeriesIfNotesChanged();
     double lastRegenTimeMs_ = 0.0; // for beat-based cooldown
     // Same beat-based cooldown for the LCO Re-Prompt cadence. A SEPARATE clock
     // from lastRegenTimeMs_ on purpose: the two paradigms never run at once

@@ -71,7 +71,7 @@ private:
         bool valid = false;
         juce::AudioBuffer<float> audio;
         double sampleRate = 44100.0;
-        // The unmoved model output when the octave fit moved audio
+        // The unmoved model output when the pitch fit moved audio
         // (T5ynthProcessor::getResynthSeed); empty otherwise. In memory only.
         juce::AudioBuffer<float> resynthSeed;
         juce::ValueTree parameters;

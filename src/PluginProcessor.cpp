@@ -7780,22 +7780,27 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         publishWtDisplayFromOscFrames();
 }
 
-GeneratedOctaveJob T5ynthProcessor::beginOctaveFit() const
+GeneratedPitchJob T5ynthProcessor::beginPitchFit(const juce::String& promptA,
+                                                 const juce::String& promptB) const
 {
-    GeneratedOctaveJob job;
-    job.seriesVersion = octaveSeriesVersion_;
-    // The wavetable reads a pitched sample one period at a time and plays each
-    // period at the key's pitch, so the octave the model chose is not heard
-    // there; a move would only take material away (moved down, the frames
-    // cover half of it). Nothing is read and nothing is moved.
-    job.skip = isWavetableMode();
+    GeneratedPitchJob job;
+    job.seriesVersion = pitchSeriesVersion_;
+    job.named = GeneratedPitch::namedIn(promptA, promptB,
+        static_cast<int>(parameters.getRawParameterValue(PID::tuning)->load()),
+        static_cast<int>(parameters.getRawParameterValue(PID::scaleRoot)->load()));
+    // No note named: the player is not asking for one, and the sample plays as
+    // the model made it. The wavetable reads a pitched sample one period at a
+    // time and plays each period at the key's pitch, so the pitch the model
+    // chose is not heard there; a move would only change the material.
+    // Nothing is read and nothing is moved in either case.
+    job.skip = ! job.named.any() || isWavetableMode();
     if (job.skip)
         return job;
-    job.series        = generatedOctave_;
+    job.series        = generatedPitch_;
     // What plays was not loaded by a fit (a preset, a snapshot, a cache take):
     // the series has to be read from it, and that reading costs as much as the
     // fresh one, so it goes to the generation thread as well.
-    if (octaveSeriesSerial_ != generatedLoadSerial_.load(std::memory_order_acquire))
+    if (pitchSeriesSerial_ != generatedLoadSerial_.load(std::memory_order_acquire))
     {
         job.readLoaded = true;
         job.loaded.makeCopyOf(generatedAudioRaw);
@@ -7804,11 +7809,11 @@ GeneratedOctaveJob T5ynthProcessor::beginOctaveFit() const
     return job;
 }
 
-FittedGeneration T5ynthProcessor::finishOctaveFit(GeneratedOctaveJob& job,
-                                                  const juce::AudioBuffer<float>& fresh)
+FittedGeneration T5ynthProcessor::finishPitchFit(GeneratedPitchJob& job,
+                                                 const juce::AudioBuffer<float>& fresh)
 {
-    // A render keeps the octave of the series as it stood when it was asked
-    // for. Whatever was loaded meanwhile (a cache take under the finger, a
+    // A render lands on the series' target as it stood when it was asked for.
+    // Whatever was loaded meanwhile (a cache take under the finger, a
     // snapshot) is replaced by this render as it lands, so the series goes on
     // from there.
     FittedGeneration fitted;
@@ -7817,30 +7822,30 @@ FittedGeneration T5ynthProcessor::finishOctaveFit(GeneratedOctaveJob& job,
     if (job.skip)
     {
         // As the model made it. What plays is then not in the series: the next
-        // request outside the wavetable reads it, as after any other load -
-        // unless the player asked anew while this rendered; then the series
-        // stays empty and the first render of the new prompt starts it.
+        // request that names a note reads it, as after any other load - unless
+        // the player asked anew while this rendered; then the series stays
+        // empty and the first render of the new prompt starts it.
         fitted.audio.makeCopyOf(fresh);
-        octaveSeriesSerial_ = (job.seriesVersion < octaveForgetVersion_)
-                            ? serial + 1 : std::numeric_limits<juce::uint64>::max();
-        ++octaveSeriesVersion_;
+        pitchSeriesSerial_ = (job.seriesVersion < pitchForgetVersion_)
+                           ? serial + 1 : std::numeric_limits<juce::uint64>::max();
+        ++pitchSeriesVersion_;
         return fitted;
     }
 
-    if (job.seriesVersion < octaveForgetVersion_)
+    if (job.seriesVersion < pitchForgetVersion_)
     {
         // The player asked anew while this rendered. It keeps the old series'
-        // octave but does not enter the series, which the forget emptied, so
-        // the first render of the new prompt starts it.
-        fitted.octaves = job.octaves;
-        if (fitted.octaves != 0)
+        // move but does not enter the series, which the forget emptied, so the
+        // first render of the new prompt starts it.
+        fitted.semitones = job.semitones;
+        if (fitted.semitones != 0.0f)
             fitted.audio = std::move(job.moved);
     }
-    else if (job.seriesVersion == octaveSeriesVersion_)
+    else if (job.seriesVersion == pitchSeriesVersion_)
     {
-        generatedOctave_ = job.series;
-        fitted.octaves = job.octaves;
-        if (fitted.octaves != 0)
+        generatedPitch_ = job.series;
+        fitted.semitones = job.semitones;
+        if (fitted.semitones != 0.0f)
             fitted.audio = std::move(job.moved);
     }
     else
@@ -7848,26 +7853,28 @@ FittedGeneration T5ynthProcessor::finishOctaveFit(GeneratedOctaveJob& job,
         // Another render landed after this one was asked for. The generating
         // guard in PromptPanel keeps renders from overlapping, so this does not
         // happen today; if it ever does, the series as it now stands decides,
-        // and the move runs on this thread.
-        fitted.octaves = generatedOctave_.fit(job.freshReading);
-        if (fitted.octaves != 0)
-            fitted.audio = GeneratedOctave::moveOctaves(fresh, fitted.octaves);
+        // and the move runs on this thread. The loaded sound this request read
+        // is not what plays any more (that render replaced it), so its reading
+        // is not used.
+        fitted.semitones = generatedPitch_.fit(job.named, job.freshReading);
+        if (fitted.semitones != 0.0f)
+            fitted.audio = GeneratedPitch::move(fresh, fitted.semitones);
     }
 
-    if (fitted.octaves == 0)
+    if (fitted.semitones == 0.0f)
         fitted.audio.makeCopyOf(fresh);
 
     // The caller loads the result next; that load is the fit's own.
-    octaveSeriesSerial_ = serial + 1;
-    ++octaveSeriesVersion_;
+    pitchSeriesSerial_ = serial + 1;
+    ++pitchSeriesVersion_;
     return fitted;
 }
 
-void T5ynthProcessor::forgetOctaveSeries()
+void T5ynthProcessor::forgetPitchSeries()
 {
-    generatedOctave_.forget();
-    octaveSeriesSerial_ = generatedLoadSerial_.load(std::memory_order_acquire);
-    octaveForgetVersion_ = ++octaveSeriesVersion_;
+    generatedPitch_.forget();
+    pitchSeriesSerial_ = generatedLoadSerial_.load(std::memory_order_acquire);
+    pitchForgetVersion_ = ++pitchSeriesVersion_;
 }
 
 void T5ynthProcessor::setResynthSeedForNextLoad(juce::AudioBuffer<float> seed)

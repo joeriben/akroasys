@@ -19,7 +19,7 @@
 #include "dsp/AlgorithmicReverb.h"
 #include "dsp/Limiter.h"
 #include "dsp/AmpEffects.h"
-#include "dsp/GeneratedOctave.h"
+#include "dsp/GeneratedPitch.h"
 #include "sequencer/StepSequencer.h"
 #include "sequencer/GenerativeSequencer.h"
 #include "sequencer/Arpeggiator.h"
@@ -101,17 +101,19 @@ public:
     // Load generated audio into the engine
     void loadGeneratedAudio(const juce::AudioBuffer<float>& buffer, double sampleRate);
 
-    /** A regenerate keeps the octave the series sounds in (GeneratedOctave).
-     *  Message thread: begin at the request, job.run() on the generation
-     *  thread, finish with the result and load what it returns right away
-     *  with loadGeneratedAudio. */
-    GeneratedOctaveJob beginOctaveFit() const;
-    FittedGeneration finishOctaveFit(GeneratedOctaveJob& job,
-                                     const juce::AudioBuffer<float>& fresh);
-    /** The player changed a prompt: the next sample starts a new series. */
-    void forgetOctaveSeries();
+    /** A regenerate lands on the note the prompts name (GeneratedPitch).
+     *  Message thread: begin at the request with the request's prompts,
+     *  job.run() on the generation thread, finish with the result and load what
+     *  it returns right away with loadGeneratedAudio. */
+    GeneratedPitchJob beginPitchFit(const juce::String& promptA, const juce::String& promptB) const;
+    FittedGeneration finishPitchFit(GeneratedPitchJob& job,
+                                    const juce::AudioBuffer<float>& fresh);
+    /** A sound asked anew (a preset, a snapshot, Init, the Re-Prompt restore,
+     *  or an edit that changes the note a prompt names): the next sample
+     *  starts a new series. */
+    void forgetPitchSeries();
     /** What an internal Resynth render is seeded with: the model's own output,
-     *  as before the octave fit existed. That is generatedAudioRaw unless the
+     *  as before the pitch fit existed. That is generatedAudioRaw unless the
      *  loaded sample was moved; then the unmoved one, which is set right before
      *  that load with setResynthSeedForNextLoad and belongs to it alone (any
      *  other load drops it). A moved sample has another length than the model
@@ -195,7 +197,7 @@ public:
     {
         juce::AudioBuffer<float> audio;
         double sampleRate = 44100.0;
-        // The unmoved take when the octave fit moved it (see getResynthSeed);
+        // The unmoved take when the pitch fit moved it (see getResynthSeed);
         // empty when audio is its own seed. In memory only, never in a preset.
         juce::AudioBuffer<float> resynthSeed;
     };
@@ -1663,23 +1665,23 @@ private:
     std::vector<float> lastEmbeddingA, lastEmbeddingB;
     juce::AudioBuffer<float> generatedAudioFull;  // boosted buffer for engines + display
     juce::AudioBuffer<float> generatedAudioRaw;   // raw VAE output (for re-apply on toggle)
-    // Octave series of the regenerates (beginOctaveFit / finishOctaveFit).
+    // Pitch series of the regenerates (beginPitchFit / finishPitchFit).
     // generatedLoadSerial_ counts the loads that change generatedAudioRaw (a
     // reload of generatedAudioRaw itself, the HF toggle, is the same sound and
     // does not count). Every caller of loadGeneratedAudio and everything here
-    // runs on the message thread; the atomic only costs nothing. The series is valid for what plays while octaveSeriesSerial_
+    // runs on the message thread; the atomic only costs nothing. The series is valid for what plays while pitchSeriesSerial_
     // equals it, i.e. while the last load was the fit's own. Anything else
     // loaded (a preset, a snapshot, a cache take) makes the next request read
-    // the series from the loaded audio. octaveSeriesVersion_ counts changes of
+    // the series from the loaded audio. pitchSeriesVersion_ counts changes of
     // the series itself, so a fit worked out on the generation thread is only
-    // adopted when nothing touched the series meanwhile; octaveForgetVersion_
+    // adopted when nothing touched the series meanwhile; pitchForgetVersion_
     // is the version the last forget made, so a render requested before it
     // can tell. Message thread, except the serial.
-    GeneratedOctave generatedOctave_;
+    GeneratedPitch generatedPitch_;
     std::atomic<juce::uint64> generatedLoadSerial_ { 0 };
-    juce::uint64 octaveSeriesSerial_  = std::numeric_limits<juce::uint64>::max();
-    juce::uint64 octaveSeriesVersion_ = 0;
-    juce::uint64 octaveForgetVersion_ = 0;
+    juce::uint64 pitchSeriesSerial_  = std::numeric_limits<juce::uint64>::max();
+    juce::uint64 pitchSeriesVersion_ = 0;
+    juce::uint64 pitchForgetVersion_ = 0;
     // See getResynthSeed. Bound to the load whose serial it carries.
     juce::AudioBuffer<float> resynthSeed_;
     juce::uint64 resynthSeedSerial_ = std::numeric_limits<juce::uint64>::max();
