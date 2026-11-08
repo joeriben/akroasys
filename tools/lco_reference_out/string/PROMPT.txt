@@ -1,0 +1,5 @@
+solo {cello|violin}, one instrument alone, single sustained bowed note, close microphone, dry studio recording, unaccompanied, no reverb
+
+model: stable-audio-3-medium   steps: 50  cfg: 6.0  seconds: 6.0  alpha: -1 (pure A)  track_type: Instrument
+generated 2026-11-07 for the bowed-string analysis (docs/plans/LRO_BOWED_STRING_ANALYSIS.md).
+Measured: every file carries vibrato, p10-p90 30-36 cents at 4.6-5.8 Hz (cello seed11 is at A2 110.6 Hz, seed22 at A3 221.9 Hz; both violins at A4 441 Hz).

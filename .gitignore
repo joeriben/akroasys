@@ -74,6 +74,7 @@ tools/clap_homeostasis_out/results.json
 # dropped in by hand is NOT covered by this and has to be added deliberately,
 # with its licence.
 tools/lco_reference_out/*/sa3_*.wav
+tools/lco_reference_out/*/*_sa3_*.wav
 tools/lco_reference_out/*/lco_*.wav
 tools/lco_reference_out/*/incumbent_*.wav
 # CLAP semantic loop: keep REPORT.md + per-experiment manifest.json, drop WAVs + run log
