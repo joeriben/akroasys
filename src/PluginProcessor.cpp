@@ -7567,8 +7567,13 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     // restoreLanguageEngineMode); loading audio only loads audio.
 
     // Store raw audio (unmodified) for preset embedding and re-apply on toggle
-    if (&audioBuffer != &generatedAudioRaw)
+    const bool newSound = (&audioBuffer != &generatedAudioRaw);   // see generatedLoadSerial_
+    if (newSound)
         generatedAudioRaw.makeCopyOf(audioBuffer);
+    // A Resynth seed set for another load is let go here, not kept until the
+    // next one is set (it can be a whole take).
+    if (newSound && resynthSeedSerial_ != generatedLoadSerial_.load(std::memory_order_acquire) + 1)
+        resynthSeed_ = juce::AudioBuffer<float>();
 
     const bool hfOn = paramCache.genHfBoost->load() > 0.5f;
     juce::AudioBuffer<float> cleanBuffer = conditionGeneratedSource (audioBuffer, sr, hfOn);
@@ -7700,6 +7705,8 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
         const juce::ScopedLock sl (getCallbackLock());
 
         generatedSampleRate = sr;
+        if (newSound)
+            generatedLoadSerial_.fetch_add(1, std::memory_order_acq_rel);
 
         // Keep generatedAudioFull in sync (used for waveform display + presets)
         generatedAudioFull = std::move(preparedGeneratedAudio);
@@ -7771,6 +7778,102 @@ void T5ynthProcessor::loadGeneratedAudio(const juce::AudioBuffer<float>& audioBu
     // display). Outside the lock — the strip build allocates. Sampler/Freeze skip.
     if (wavetableMode)
         publishWtDisplayFromOscFrames();
+}
+
+GeneratedOctaveJob T5ynthProcessor::beginOctaveFit() const
+{
+    GeneratedOctaveJob job;
+    job.seriesVersion = octaveSeriesVersion_;
+    // The wavetable reads a pitched sample one period at a time and plays each
+    // period at the key's pitch, so the octave the model chose is not heard
+    // there; a move would only take material away (moved down, the frames
+    // cover half of it). Nothing is read and nothing is moved.
+    job.skip = isWavetableMode();
+    if (job.skip)
+        return job;
+    job.series        = generatedOctave_;
+    // What plays was not loaded by a fit (a preset, a snapshot, a cache take):
+    // the series has to be read from it, and that reading costs as much as the
+    // fresh one, so it goes to the generation thread as well.
+    if (octaveSeriesSerial_ != generatedLoadSerial_.load(std::memory_order_acquire))
+    {
+        job.readLoaded = true;
+        job.loaded.makeCopyOf(generatedAudioRaw);
+        job.loadedRate = generatedSampleRate;
+    }
+    return job;
+}
+
+FittedGeneration T5ynthProcessor::finishOctaveFit(GeneratedOctaveJob& job,
+                                                  const juce::AudioBuffer<float>& fresh)
+{
+    // A render keeps the octave of the series as it stood when it was asked
+    // for. Whatever was loaded meanwhile (a cache take under the finger, a
+    // snapshot) is replaced by this render as it lands, so the series goes on
+    // from there.
+    FittedGeneration fitted;
+    const auto serial = generatedLoadSerial_.load(std::memory_order_acquire);
+
+    if (job.skip)
+    {
+        // As the model made it. What plays is then not in the series: the next
+        // request outside the wavetable reads it, as after any other load -
+        // unless the player asked anew while this rendered; then the series
+        // stays empty and the first render of the new prompt starts it.
+        fitted.audio.makeCopyOf(fresh);
+        octaveSeriesSerial_ = (job.seriesVersion < octaveForgetVersion_)
+                            ? serial + 1 : std::numeric_limits<juce::uint64>::max();
+        ++octaveSeriesVersion_;
+        return fitted;
+    }
+
+    if (job.seriesVersion < octaveForgetVersion_)
+    {
+        // The player asked anew while this rendered. It keeps the old series'
+        // octave but does not enter the series, which the forget emptied, so
+        // the first render of the new prompt starts it.
+        fitted.octaves = job.octaves;
+        if (fitted.octaves != 0)
+            fitted.audio = std::move(job.moved);
+    }
+    else if (job.seriesVersion == octaveSeriesVersion_)
+    {
+        generatedOctave_ = job.series;
+        fitted.octaves = job.octaves;
+        if (fitted.octaves != 0)
+            fitted.audio = std::move(job.moved);
+    }
+    else
+    {
+        // Another render landed after this one was asked for. The generating
+        // guard in PromptPanel keeps renders from overlapping, so this does not
+        // happen today; if it ever does, the series as it now stands decides,
+        // and the move runs on this thread.
+        fitted.octaves = generatedOctave_.fit(job.freshReading);
+        if (fitted.octaves != 0)
+            fitted.audio = GeneratedOctave::moveOctaves(fresh, fitted.octaves);
+    }
+
+    if (fitted.octaves == 0)
+        fitted.audio.makeCopyOf(fresh);
+
+    // The caller loads the result next; that load is the fit's own.
+    octaveSeriesSerial_ = serial + 1;
+    ++octaveSeriesVersion_;
+    return fitted;
+}
+
+void T5ynthProcessor::forgetOctaveSeries()
+{
+    generatedOctave_.forget();
+    octaveSeriesSerial_ = generatedLoadSerial_.load(std::memory_order_acquire);
+    octaveForgetVersion_ = ++octaveSeriesVersion_;
+}
+
+void T5ynthProcessor::setResynthSeedForNextLoad(juce::AudioBuffer<float> seed)
+{
+    resynthSeed_ = std::move(seed);
+    resynthSeedSerial_ = generatedLoadSerial_.load(std::memory_order_acquire) + 1;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8640,7 +8743,8 @@ void T5ynthProcessor::publishInferenceCacheTraversableZones()
     inferenceCacheGeneration_.fetch_add(1, std::memory_order_acq_rel);
 }
 
-bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate)
+bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate,
+                                             const juce::AudioBuffer<float>& resynthSeed)
 {
     if (inferenceCacheCapacity <= 0
         || static_cast<int>(inferenceCacheEntries.size()) >= inferenceCacheCapacity
@@ -8653,6 +8757,8 @@ bool T5ynthProcessor::addInferenceCacheEntry(const juce::AudioBuffer<float>& buf
     InferenceCacheEntry entry;
     entry.audio.makeCopyOf(buffer);
     entry.sampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    if (resynthSeed.getNumSamples() > 0)
+        entry.resynthSeed.makeCopyOf(resynthSeed);
 
     // The push_back is under the mutex, for the reason clearInferenceCache
     // states: the position builder reads this vector from another thread, and a
@@ -8680,6 +8786,10 @@ bool T5ynthProcessor::playInferenceCacheEntry(int index)
     // sequence, so a Re-Prompt step after a hand-driven jump carries on from
     // where the hand left off instead of from where the sweep had got to.
     inferenceCachePlaybackIndex = (index + 1) % count;
+    juce::AudioBuffer<float> seed;   // empty: the take is its own seed
+    if (entry.resynthSeed.getNumSamples() > 0)
+        seed.makeCopyOf(entry.resynthSeed);
+    setResynthSeedForNextLoad(std::move(seed));
     loadGeneratedAudio(entry.audio, entry.sampleRate);
     return true;
 }

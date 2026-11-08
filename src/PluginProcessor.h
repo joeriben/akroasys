@@ -19,6 +19,7 @@
 #include "dsp/AlgorithmicReverb.h"
 #include "dsp/Limiter.h"
 #include "dsp/AmpEffects.h"
+#include "dsp/GeneratedOctave.h"
 #include "sequencer/StepSequencer.h"
 #include "sequencer/GenerativeSequencer.h"
 #include "sequencer/Arpeggiator.h"
@@ -99,6 +100,29 @@ public:
 
     // Load generated audio into the engine
     void loadGeneratedAudio(const juce::AudioBuffer<float>& buffer, double sampleRate);
+
+    /** A regenerate keeps the octave the series sounds in (GeneratedOctave).
+     *  Message thread: begin at the request, job.run() on the generation
+     *  thread, finish with the result and load what it returns right away
+     *  with loadGeneratedAudio. */
+    GeneratedOctaveJob beginOctaveFit() const;
+    FittedGeneration finishOctaveFit(GeneratedOctaveJob& job,
+                                     const juce::AudioBuffer<float>& fresh);
+    /** The player changed a prompt: the next sample starts a new series. */
+    void forgetOctaveSeries();
+    /** What an internal Resynth render is seeded with: the model's own output,
+     *  as before the octave fit existed. That is generatedAudioRaw unless the
+     *  loaded sample was moved; then the unmoved one, which is set right before
+     *  that load with setResynthSeedForNextLoad and belongs to it alone (any
+     *  other load drops it). A moved sample has another length than the model
+     *  rendered, and the backend pads a short seed with silence. */
+    const juce::AudioBuffer<float>& getResynthSeed() const
+    { return hasResynthSeedOverride() ? resynthSeed_ : generatedAudioRaw; }
+    bool hasResynthSeedOverride() const
+    { return resynthSeedSerial_ == generatedLoadSerial_.load(std::memory_order_acquire)
+             && resynthSeed_.getNumSamples() > 0; }
+    /** Empty: the next load is its own seed. Message thread. */
+    void setResynthSeedForNextLoad(juce::AudioBuffer<float> seed);
     /** Reload already-processed audio into sampler (no Rumble/HF/Normalize). */
     void reloadProcessedAudio(const juce::AudioBuffer<float>& processed);
     /** Load DCO-baked single-cycle frames (mono strip, N*2048 samples laid
@@ -171,6 +195,9 @@ public:
     {
         juce::AudioBuffer<float> audio;
         double sampleRate = 44100.0;
+        // The unmoved take when the octave fit moved it (see getResynthSeed);
+        // empty when audio is its own seed. In memory only, never in a preset.
+        juce::AudioBuffer<float> resynthSeed;
     };
     /** The five depths both cache rows offer: 0, 2, 4, 8, 16. Anything between
      *  two of them rounds UP to the next - a depth that holds everything - and
@@ -193,7 +220,8 @@ public:
     unsigned getInferenceCacheGeneration() const
     { return inferenceCacheGeneration_.load(std::memory_order_acquire); }
     void clearInferenceCache();
-    bool addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate);
+    bool addInferenceCacheEntry(const juce::AudioBuffer<float>& buffer, double sampleRate,
+                                const juce::AudioBuffer<float>& resynthSeed = {});
     bool playNextInferenceCacheEntry();
     /** Play cache entry `index` (clamped) and leave the sequential cursor one
      *  past it. This is the same call the Re-Prompt stepping makes - the
@@ -1635,6 +1663,26 @@ private:
     std::vector<float> lastEmbeddingA, lastEmbeddingB;
     juce::AudioBuffer<float> generatedAudioFull;  // boosted buffer for engines + display
     juce::AudioBuffer<float> generatedAudioRaw;   // raw VAE output (for re-apply on toggle)
+    // Octave series of the regenerates (beginOctaveFit / finishOctaveFit).
+    // generatedLoadSerial_ counts the loads that change generatedAudioRaw (a
+    // reload of generatedAudioRaw itself, the HF toggle, is the same sound and
+    // does not count). Every caller of loadGeneratedAudio and everything here
+    // runs on the message thread; the atomic only costs nothing. The series is valid for what plays while octaveSeriesSerial_
+    // equals it, i.e. while the last load was the fit's own. Anything else
+    // loaded (a preset, a snapshot, a cache take) makes the next request read
+    // the series from the loaded audio. octaveSeriesVersion_ counts changes of
+    // the series itself, so a fit worked out on the generation thread is only
+    // adopted when nothing touched the series meanwhile; octaveForgetVersion_
+    // is the version the last forget made, so a render requested before it
+    // can tell. Message thread, except the serial.
+    GeneratedOctave generatedOctave_;
+    std::atomic<juce::uint64> generatedLoadSerial_ { 0 };
+    juce::uint64 octaveSeriesSerial_  = std::numeric_limits<juce::uint64>::max();
+    juce::uint64 octaveSeriesVersion_ = 0;
+    juce::uint64 octaveForgetVersion_ = 0;
+    // See getResynthSeed. Bound to the load whose serial it carries.
+    juce::AudioBuffer<float> resynthSeed_;
+    juce::uint64 resynthSeedSerial_ = std::numeric_limits<juce::uint64>::max();
 
     // ── External-audio capture (live input → Resynth init_audio seed) ───────
     // The audio thread writes the main input bus into this pre-allocated ring

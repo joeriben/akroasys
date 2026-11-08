@@ -142,6 +142,25 @@ static void applyDriftCrossfade(juce::AudioBuffer<float>& newBuf,
     }
 }
 
+// What the next internal Resynth render is seeded with once a fitted result is
+// loaded (T5ynthProcessor::getResynthSeed): the model's own output, joined to the
+// previous seed the way what plays is joined when xfadeSamples > 0. Empty when
+// that is exactly what plays anyway. Call before the load it belongs to.
+static juce::AudioBuffer<float> resynthSeedAfterFit(const T5ynthProcessor& processor,
+                                                    const juce::AudioBuffer<float>& modelOutput,
+                                                    int octaves, int xfadeSamples)
+{
+    const bool joined = xfadeSamples > 0;
+    if (octaves == 0 && ! (joined && processor.hasResynthSeedOverride()))
+        return {};
+    juce::AudioBuffer<float> seed;
+    seed.makeCopyOf(modelOutput);
+    const auto& previous = processor.getResynthSeed();
+    if (joined && previous.getNumSamples() > 0)
+        applyDriftCrossfade(seed, previous, xfadeSamples);
+    return seed;
+}
+
 constexpr float kResynthLoopFloor          = 0.05f;  // keep effective resynth > attach gate (0.01)
 
 static void makeSlider(juce::Slider& s, juce::Component* p)
@@ -188,6 +207,9 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
         // typing + translation (loop/restore/load writes use dontSendNotification),
         // so the loop can never poison it. Per-pole: an A edit must not recapture B.
         processorRef.setHumanPromptA(promptAEditor.getText().trim());
+        // A sound the player asked for anew sets its own octave: the next
+        // sample starts the octave series instead of being fitted to the old one.
+        processorRef.forgetOctaveSeries();
     };
     promptAEditor.setBufferedToImage(true);
     addAndMakeVisible(promptAEditor);
@@ -207,6 +229,7 @@ PromptPanel::PromptPanel(T5ynthProcessor& processor)
         pendingLoopPromptB_.clear();  // user override: discard any staged loop prompt
         // Record human authorship of pole B (see promptAEditor.onTextChange).
         processorRef.setHumanPromptB(promptBEditor.getText().trim());
+        processorRef.forgetOctaveSeries();   // see promptAEditor.onTextChange
     };
     promptBEditor.setBufferedToImage(true);
     addAndMakeVisible(promptBEditor);
@@ -940,6 +963,10 @@ void PromptPanel::timerCallback()
             lastGenPromptA_ = loopOriginalA_;
             lastGenPromptB_ = loopOriginalB_;
             processorRef.setLastPrompts(loopOriginalA_, loopOriginalB_);
+            // The clean re-render below is the original asked anew, not a step of
+            // the loop: it starts the octave series instead of being fitted to the
+            // one the loop's rewrites built.
+            processorRef.forgetOctaveSeries();
             // NOTE: do NOT touch the durable human-prompt store here — it already holds
             // these originals (loopOriginalA_/B_ were sourced from it on engage) and must
             // survive so a later save/buffer-write persists the human text even if this
@@ -1623,6 +1650,10 @@ void PromptPanel::loadPresetData(const juce::String& promptA, const juce::String
     // them), regardless of any rewrite the loop later puts in the editors. setText
     // above used dontSendNotification, so onTextChange did NOT fire — set explicitly.
     processorRef.setHumanPrompts(promptA, promptB);
+    // New prompts from a preset are a sound asked anew, like typing them: the next
+    // sample starts the octave series (a preset that brings audio is read as the
+    // series' start on the next request anyway).
+    processorRef.forgetOctaveSeries();
     // Write BOTH seed fields before syncing: syncSeedModeFromCurrentState()
     // derives the VAR switchbox mode from getLastRandomSeed(), so the random
     // flag must be current or the box shows the previous preset's mode.
@@ -3802,7 +3833,8 @@ PipeInference::Request PromptPanel::buildInferenceRequest(
         {
             // INTERNAL (default): self-feedback — seed from the last raw generation,
             // so each render evolves from the previous. The original Resynth path.
-            const auto& rawBuf = processorRef.getGeneratedAudioRaw();
+            // The model's own output, also when the octave fit moved what plays.
+            const auto& rawBuf = processorRef.getResynthSeed();
             if (rawBuf.getNumSamples() > 0 && rawBuf.getNumChannels() > 0)
             {
                 req.initAudio.makeCopyOf(rawBuf);
@@ -4272,10 +4304,18 @@ void PromptPanel::triggerGeneration()
                .getRawParameterValue(PID::resynthSource)->load()) == 0;
     auto pipePtr = processorRef.getPipeInferencePtr();
     juce::Component::SafePointer<PromptPanel> safeThis(this);
-    std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth]() mutable
+    // The pitch of the result is read and the octave move made here on the
+    // generation thread (a read costs about 0.2 s per 3 s of audio, a move of a
+    // long render seconds); the message thread adopts it when it lands.
+    auto octaveJob = processorRef.beginOctaveFit();
+    std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
+                 octaveJob = std::move(octaveJob)]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
-        juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth]()
+        if (inferenceResult.success)
+            octaveJob.run(inferenceResult.audio, inferenceResult.sampleRate);
+        juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth,
+                                         octaveJob = std::move(octaveJob)]() mutable
         {
             if (auto* self = safeThis.getComponent())
             {
@@ -4284,9 +4324,17 @@ void PromptPanel::triggerGeneration()
                 self->generateButton.setEnabled(true);
                 if (result.success)
                 {
+                    // In the octave the series sounds in (GeneratedOctave); the
+                    // cache keeps it as it is played. Resynth goes on seeding from
+                    // the model's own output (getResynthSeed).
+                    auto fitted = processor.finishOctaveFit(octaveJob, result.audio);
+                    const juce::AudioBuffer<float> unmoved;
+                    const auto& takeSeed = fitted.octaves != 0 ? result.audio : unmoved;
+                    processor.setResynthSeedForNextLoad(
+                        resynthSeedAfterFit(processor, result.audio, fitted.octaves, 0));
                     self->stepOfflineTakeAfterCapture(
-                        processor.addInferenceCacheEntry(result.audio, result.sampleRate));
-                    processor.loadGeneratedAudio(result.audio, result.sampleRate);
+                        processor.addInferenceCacheEntry(fitted.audio, result.sampleRate, takeSeed));
+                    processor.loadGeneratedAudio(fitted.audio, result.sampleRate);
                     // The sound in the engine is now a new, unsaved one — drop the
                     // loaded/last-saved preset identity so Save stops pre-filling
                     // that name and warning it will "Replace" a file this sound has
@@ -4302,8 +4350,11 @@ void PromptPanel::triggerGeneration()
                     // empty otherwise), so this is a no-op for every other model and the Music slot.
                     processor.setLastModel(taggedPersistId(modelForLabel, req.trackType == "sfx"));
                     processor.setLastSeed(result.seed);
-                    processor.recordEventLogGeneration(buildEventLogGenerationEntry(req, result),
-                                                       wasInternalResynth);
+                    {
+                        auto logEntry = buildEventLogGenerationEntry(req, result);
+                        logEntry.octaveMove = fitted.octaves;   // a replayed tape moves the same
+                        processor.recordEventLogGeneration(logEntry, wasInternalResynth);
+                    }
                     // Reveal the loop prompt that just became wirksam in this generation.
                     if (self->pendingLoopPromptA_.isNotEmpty())
                     {
@@ -4348,7 +4399,8 @@ void PromptPanel::triggerGeneration()
 
                     // Semantic loop: listen to this render and rewrite the prompt(s)
                     // for the next generation (no-op unless a stance is active + SA3).
-                    self->runSemanticLoopStep(result);
+                    // It hears the render in the octave it plays in.
+                    self->runSemanticLoopStep(fitted.audio, result.sampleRate);
                 }
                 else
                 {
@@ -4422,10 +4474,18 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                .getRawParameterValue(PID::resynthSource)->load()) == 0;
     auto pipePtr = processorRef.getPipeInferencePtr();
     juce::Component::SafePointer<PromptPanel> safeThis(this);
-    std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth]() mutable
+    // The pitch of the result is read and the octave move made here on the
+    // generation thread (a read costs about 0.2 s per 3 s of audio, a move of a
+    // long render seconds); the message thread adopts it when it lands.
+    auto octaveJob = processorRef.beginOctaveFit();
+    std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
+                 octaveJob = std::move(octaveJob)]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
-        juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth]()
+        if (inferenceResult.success)
+            octaveJob.run(inferenceResult.audio, inferenceResult.sampleRate);
+        juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth,
+                                         octaveJob = std::move(octaveJob)]() mutable
         {
             if (auto* self = safeThis.getComponent())
             {
@@ -4434,7 +4494,11 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                 self->generateButton.setEnabled(true);
                 if (result.success)
                 {
-                    auto newAudio = result.audio;
+                    // In the octave the series sounds in (GeneratedOctave), before
+                    // the previous output is joined to it, so both sides of the
+                    // join sound in one octave. The cache keeps it unjoined, as before.
+                    auto fitted = processor.finishOctaveFit(octaveJob, result.audio);
+                    auto newAudio = fitted.audio;
 
                     // The previous loop output (output N-1) lives in the processor
                     // until loadGeneratedAudio overwrites it below; capture it once
@@ -4447,11 +4511,17 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                     int xfadeSamples = juce::roundToInt(xfadeMs * 0.001f * static_cast<float>(result.sampleRate));
                     if (xfadeSamples > 0 && oldRaw.getNumSamples() > 0)
                         applyDriftCrossfade(newAudio, oldRaw, xfadeSamples);
+                    // Resynth goes on seeding from the model's own output, joined
+                    // the same way (getResynthSeed).
+                    processor.setResynthSeedForNextLoad(
+                        resynthSeedAfterFit(processor, result.audio, fitted.octaves, xfadeSamples));
+                    const juce::AudioBuffer<float> unmoved;
+                    const auto& takeSeed = fitted.octaves != 0 ? result.audio : unmoved;
                     // Offline take: this cache point is recorded, so the parameters
                     // move on to the next one — by one cadence interval, not by
                     // however long this render happened to take.
                     self->stepOfflineTakeAfterCapture(
-                        processor.addInferenceCacheEntry(result.audio, result.sampleRate));
+                        processor.addInferenceCacheEntry(fitted.audio, result.sampleRate, takeSeed));
                     processor.loadGeneratedAudio(newAudio, result.sampleRate);
                     // Reveal the loop prompt that just became wirksam in this generation.
                     if (self->pendingLoopPromptA_.isNotEmpty())
@@ -4469,8 +4539,11 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                     processor.setLastDevice(deviceForLabel);
                     processor.setLastModel(taggedPersistId(modelForLabel, req.trackType == "sfx"));
                     processor.setLastSeed(result.seed);
-                    processor.recordEventLogGeneration(buildEventLogGenerationEntry(req, result),
-                                                       wasInternalResynth);
+                    {
+                        auto logEntry = buildEventLogGenerationEntry(req, result);
+                        logEntry.octaveMove = fitted.octaves;   // a replayed tape moves the same
+                        processor.recordEventLogGeneration(logEntry, wasInternalResynth);
+                    }
                     processor.setLastPrompts(promptA, promptB);
                     self->lastGenPromptA_ = promptA;
                     self->lastGenPromptB_ = promptB;
@@ -4498,9 +4571,10 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
 
                     // Semantic loop: listen to this Auto-Regen render and rewrite the
                     // prompt(s) for the next tick (no-op unless a stance is active +
-                    // SA3). Uses the PRISTINE result.audio (what CLAP should hear),
-                    // not the boundary-crossfaded newAudio that was loaded for playback.
-                    self->runSemanticLoopStep(result);
+                    // SA3). Uses the PRISTINE render (what CLAP should hear), not the
+                    // boundary-crossfaded newAudio that was loaded for playback, in
+                    // the octave it plays in.
+                    self->runSemanticLoopStep(fitted.audio, result.sampleRate);
                 }
                 else
                 {
@@ -4611,8 +4685,9 @@ void PromptPanel::fireReplayGeneration(const GenerationEventLogEntry& logged)
     req.splitEnd              = logged.splitEnd;
 
     // Resynth. An INTERNAL-resynth link (parent != 0) reconstructs for free: the
-    // parent generation already replayed, so its raw output is exactly what sits in
-    // the processor right now — the same buffer buildInferenceRequest would take.
+    // parent generation already replayed, so its output is exactly the processor's
+    // Resynth seed right now (getResynthSeed, the unmoved output when the octave fit
+    // moved what plays) — the same buffer buildInferenceRequest would take.
     // Two cases degrade to text-only, both deliberately:
     //  * EXTERNAL capture (parent == 0 with init audio): live mic audio, genuinely
     //    gone. The disclosed fidelity gap.
@@ -4621,7 +4696,7 @@ void PromptPanel::fireReplayGeneration(const GenerationEventLogEntry& logged)
     //    the parent's output, so seeding from it would resynthesize the wrong sound.
     if (logged.hadInitAudio && logged.parentGenerationId != 0 && lastReplayGenSucceeded_)
     {
-        const auto& rawBuf = processorRef.getGeneratedAudioRaw();
+        const auto& rawBuf = processorRef.getResynthSeed();
         if (rawBuf.getNumSamples() > 0 && rawBuf.getNumChannels() > 0)
         {
             req.initAudio.makeCopyOf(rawBuf);
@@ -4642,10 +4717,17 @@ void PromptPanel::fireReplayGeneration(const GenerationEventLogEntry& logged)
 
     auto pipePtr = processorRef.getPipeInferencePtr();
     juce::Component::SafePointer<PromptPanel> safeThis(this);
-    std::thread([safeThis, pipePtr, req, epoch]() mutable
+    // The tape recorded by how many octaves the fit moved each result; the same
+    // move is made here, on the generation thread, so the tape sounds as it did.
+    const int octaveMove = logged.octaveMove;
+    std::thread([safeThis, pipePtr, req, epoch, octaveMove]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
-        juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, epoch]()
+        juce::AudioBuffer<float> moved;
+        if (inferenceResult.success && octaveMove != 0)
+            moved = GeneratedOctave::moveOctaves(inferenceResult.audio, octaveMove);
+        juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, epoch,
+                                         octaveMove, moved = std::move(moved)]()
         {
             auto* self = safeThis.getComponent();
             if (self == nullptr)
@@ -4668,7 +4750,8 @@ void PromptPanel::fireReplayGeneration(const GenerationEventLogEntry& logged)
 
             if (result.success)
             {
-                auto newAudio = result.audio;
+                const bool wasMoved = moved.getNumSamples() > 0;
+                auto newAudio = wasMoved ? moved : result.audio;
 
                 // The identical crossfade-then-load block the drift loop uses, so held
                 // voices follow the new sample over Regen XFade through the single
@@ -4679,6 +4762,8 @@ void PromptPanel::fireReplayGeneration(const GenerationEventLogEntry& logged)
                 const int xfadeSamples = juce::roundToInt(xfadeMs * 0.001f * static_cast<float>(result.sampleRate));
                 if (xfadeSamples > 0 && oldRaw.getNumSamples() > 0)
                     applyDriftCrossfade(newAudio, oldRaw, xfadeSamples);
+                processor.setResynthSeedForNextLoad(
+                    resynthSeedAfterFit(processor, result.audio, wasMoved ? octaveMove : 0, xfadeSamples));
                 processor.loadGeneratedAudio(newAudio, result.sampleRate);
 
                 // Deliberately NO fingerprints: the tape must not overwrite the
@@ -5268,7 +5353,7 @@ void PromptPanel::pollLcoRepromptCadence()
 // repromptLoop otherwise). On SA3 with Resynth the init_audio carry is forced to
 // init_noise ~0.9 so the rewritten words dominate it; off-SA3 (or Resynth off) it is
 // a pure word loop that re-renders fresh from the prompt. From BOTH gen-complete cbs.
-void PromptPanel::runSemanticLoopStep(const PipeInference::Result& result)
+void PromptPanel::runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate)
 {
     // (1) Off early-out FIRST (cheap), like pollDriftRegen's regenMode==0.
     auto& apvts = processorRef.getValueTreeState();
@@ -5298,7 +5383,7 @@ void PromptPanel::runSemanticLoopStep(const PipeInference::Result& result)
     //     manual Generate mid-step must not contend on the single IPC pipe.
     if (loopStepInFlight_ || generating || translatingPrompts_)
         return;
-    if (result.audio.getNumSamples() <= 0 || result.audio.getNumChannels() <= 0)
+    if (heard.getNumSamples() <= 0 || heard.getNumChannels() <= 0)
         return;   // nothing to listen to
 
     const int couplingIdx = static_cast<int>(apvts.getRawParameterValue(PID::repromptCoupling)->load());
@@ -5378,8 +5463,8 @@ void PromptPanel::runSemanticLoopStep(const PipeInference::Result& result)
     const juce::String device = defaultInferenceDevice_;
     // The just-rendered audio (CLAP listens to THIS, the source of the next prompt).
     juce::AudioBuffer<float> audioForClap;
-    audioForClap.makeCopyOf(result.audio);
-    const double sr = result.sampleRate;
+    audioForClap.makeCopyOf(heard);
+    const double sr = sampleRate;
 
     juce::Component::SafePointer<PromptPanel> safeThis(this);
     std::thread([safeThis, pipePtr, device, audioCopy = std::move(audioForClap), sr,

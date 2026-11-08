@@ -87,6 +87,11 @@ struct GenerationEventLogEntry
     bool         hadInitAudio        = false;   // true iff req.initAudio was non-empty — NOT the audio itself
     double       initAudioSampleRate = 0.0;
     float        initNoiseLevel      = 1.0f;
+
+    // Whole octaves the octave fit moved the result by before it played
+    // (GeneratedOctave; positive = up). Absent on a tape older than the fit,
+    // which reads as 0: those results played as the model made them.
+    int          octaveMove          = 0;
 };
 
 /** Coarse marker for a bulk parameter load (preset import / DAW state restore)

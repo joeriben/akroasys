@@ -492,7 +492,8 @@ private:
      *  generation (manual Generate or the Auto-Regen standing trigger) renders the
      *  rewritten prompts. No-op (cheap early-out) unless a stance is active AND the
      *  model is SA3. */
-    void runSemanticLoopStep(const PipeInference::Result& result);
+    /** heard: the render as it plays (octave-fitted), before any drift join. */
+    void runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate);
 
     T5ynthProcessor& processorRef;
 

@@ -1,5 +1,6 @@
 #include "EventLogReader.h"
 #include "../dsp/VoiceManager.h"
+#include "../dsp/GeneratedOctave.h"
 
 namespace
 {
@@ -227,6 +228,14 @@ bool EventLogReader::parseGenerationEvent(const juce::var& obj)
     e.hadInitAudio        = static_cast<bool>(obj.getProperty("hadInitAudio", false));
     e.initAudioSampleRate = static_cast<double>(obj.getProperty("initAudioSampleRate", 0.0));
     e.initNoiseLevel      = static_cast<float>(static_cast<double>(obj.getProperty("initNoiseLevel", 1.0)));
+    // Clamped to what the fit can do before it becomes an int, so a damaged
+    // tape cannot ask for a move that would take the sample apart.
+    {
+        const double move = static_cast<double>(obj.getProperty("octaveMove", 0));
+        const double reach = static_cast<double>(GeneratedOctave::kMaxOctaves);
+        e.octaveMove = std::isfinite(move)
+                     ? static_cast<int>(std::round(juce::jlimit(-reach, reach, move))) : 0;
+    }
 
     generationEvents_.push_back(e);
     totalDurationSamples_ = juce::jmax(totalDurationSamples_, e.timestamp);

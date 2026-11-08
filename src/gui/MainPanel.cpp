@@ -3420,6 +3420,8 @@ MainPanel::MainSnapshot MainPanel::captureMainSnapshot()
         return snapshot;
 
     snapshot.audio.makeCopyOf(sourceAudio);
+    if (processorRef.hasResynthSeedOverride())
+        snapshot.resynthSeed.makeCopyOf(processorRef.getResynthSeed());
     snapshot.sampleRate = processorRef.getGeneratedSampleRate();
     if (snapshot.sampleRate <= 0.0)
         snapshot.sampleRate = processorRef.getSampleRate() > 0.0 ? processorRef.getSampleRate() : 44100.0;
@@ -3549,6 +3551,12 @@ void MainPanel::restoreMainSnapshot(const MainSnapshot& snapshot)
         dimensionExplorer.clear();
     }
 
+    {
+        juce::AudioBuffer<float> seed;   // empty: the snapshot's audio is its own seed
+        if (snapshot.resynthSeed.getNumSamples() > 0)
+            seed.makeCopyOf(snapshot.resynthSeed);
+        processorRef.setResynthSeedForNextLoad(std::move(seed));
+    }
     processorRef.loadGeneratedAudio(snapshot.audio, snapshot.sampleRate);
     {
         const juce::ScopedLock sl(processorRef.getCallbackLock());

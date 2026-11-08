@@ -554,6 +554,7 @@ target_sources(T5ynth PRIVATE
     src/dsp/SamplePlayer.cpp
     src/dsp/LoopFinder.cpp
     src/dsp/FreezeTextureEngine.cpp
+    src/dsp/GeneratedOctave.cpp
     src/dsp/SynthVoice.cpp
     src/dsp/VoiceManager.cpp
     src/dsp/ModulationMatrix.cpp

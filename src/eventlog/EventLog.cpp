@@ -140,6 +140,7 @@ juce::DynamicObject::Ptr eventLogEntryToDynamicObject(const GenerationEventLogEn
     obj->setProperty("hadInitAudio",        e.hadInitAudio);
     obj->setProperty("initAudioSampleRate", e.initAudioSampleRate);
     obj->setProperty("initNoiseLevel",      static_cast<double>(e.initNoiseLevel));
+    obj->setProperty("octaveMove",          e.octaveMove);
     return obj;
 }
 
