@@ -2302,7 +2302,22 @@ def _bundled_csound_libs():
     the one that plays (BJ 2026-08-05: "wir arbeiten nicht mit der
     homebrew-installation"). `third_party/csound/<platform>/` holds the exact
     bytes the app ships, so a checkout can point at those and measure what it
-    delivers. It comes LAST: an installed host's own copy always wins."""
+    delivers. It comes LAST: an installed host's own copy always wins.
+
+    Only THIS platform's payload is a candidate. The checkout carries both the
+    macOS and the Windows payload, and a candidate is used for more than loading:
+    _csound_opcodedir() derives OPCODE6DIR64 for the CLI child from it. Measured
+    on Fedora 42 with Csound 6.18.1 installed: handed the macOS Opcodes64 (a
+    directory of .dylib files) the CLI registered 1159 opcode names instead of
+    the installation's 1427 — scanu/scans, urandom, lfsr, fractalnoise and every
+    STK opcode gone — while the ctypes path loaded libcsound64.so with no such
+    override and saw all 1427. Linux vendors nothing in third_party/
+    (docs/CSOUND_INTEGRATION.md): the .deb and a source checkout use the
+    installed Csound's own baked-in plugin directory, so this walk adds no
+    candidate there and the child inherits the environment. The Linux tarball's
+    libs/libcsound64.so.6.0 + libs/Opcodes64 is a host payload, not a vendored
+    one, and reaches the backend only via T5YNTH_CSOUND_LIB — which
+    PipeInference.cpp exports on macOS alone today."""
     here = Path(getattr(sys, "_MEIPASS", "") or os.path.abspath(sys.argv[0]))
     ancestors = [here] + list(here.parents)
     for parent in ancestors:
@@ -2315,10 +2330,14 @@ def _bundled_csound_libs():
             yield str(dll)
             break
     vendor = Path(__file__).resolve().parent.parent / "third_party" / "csound"
-    for rel in ("macos-arm64/lib/CsoundLib64", "windows-x64/bin/csound64.dll"):
-        cand = vendor / rel
-        if cand.is_file():
-            yield str(cand)
+    if sys.platform == "darwin":
+        payload = vendor / "macos-arm64" / "lib" / "CsoundLib64"
+    elif sys.platform == "win32":
+        payload = vendor / "windows-x64" / "bin" / "csound64.dll"
+    else:
+        payload = None
+    if payload is not None and payload.is_file():
+        yield str(payload)
 
 
 def _opcodedir_beside(lib_path):
