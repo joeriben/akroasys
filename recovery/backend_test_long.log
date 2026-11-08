@@ -1,6 +1,0 @@
-2026-04-18 09:57:27,543 [pipe_inference] Lazy-loading stable-audio-open-small on cpu...
-2026-04-18 09:57:28,036 [pipe_inference] Loading native pipeline from /Users/joerissen/Library/T5ynth/models/stable-audio-open-small on cpu...
-No module named 'flash_attn'
-flash_attn not installed, disabling Flash Attention
-torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
-  WeightNorm.apply(module, name, dim)

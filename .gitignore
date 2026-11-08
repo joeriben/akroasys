@@ -139,3 +139,8 @@ tools/lco_trace_wire_out/
 
 # Hidden scratch measurement scripts (the shipped ones carry no leading dot)
 tools/.lco_*.py
+
+# Local recovery snapshots, agent memory and test logs; not part of the project
+/.codex_safety/
+/.claude/projects/
+/recovery/backend_test*.log
