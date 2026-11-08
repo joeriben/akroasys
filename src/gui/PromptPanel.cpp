@@ -1656,6 +1656,17 @@ void PromptPanel::loadPresetData(const juce::String& promptA, const juce::String
     // the processor restores separately (Off for presets predating Re-Prompt).
     loopEngaged_ = false;
     loopOriginalsValid_ = false;
+    // The same holds for what the loop staged or owes for the OLD prompts. A
+    // rewrite waiting to become active: buildInferenceRequest prefers it over the
+    // editors, so the next render would still use the old session's rewrite and
+    // its landing would write it over the preset's prompt. And the clean
+    // re-render a stance-Off restore still owes its originals: left armed, the
+    // timer would render the preset's prompts unasked once the pipe frees, over
+    // the audio the preset brought (the pair dice clears it for the same reason).
+    pendingLoopPromptA_.clear();
+    pendingLoopPromptB_.clear();
+    pendingOriginalReRender_ = false;
+    forceCleanRenderOnce_ = false;
     // The loaded prompts ARE the human authorship for this preset — seed the durable
     // store so a re-save reproduces them (and a subsequent loop engage restores to
     // them), regardless of any rewrite the loop later puts in the editors. setText
