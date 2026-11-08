@@ -38,10 +38,17 @@ command -v patchelf >/dev/null || { echo "patchelf is not installed" >&2; exit 1
 
 # Never copied: the core runtime every ELF on the system shares. Bundling these is
 # how a "self-contained" build becomes one that segfaults on a machine whose kernel,
-# loader or C++ runtime is newer than the one it was built against.
+# loader or C++ runtime is newer than the one it was built against. The list is
+# every glibc library that can appear as a NEEDED entry plus the GCC runtime, not
+# only the ones a given Csound happens to pull: measured on Fedora 42, a
+# libcsound64 built with GCC 15 NEEDs
+# libmvec.so.1 directly and libresolv.so.2 arrived through curl → krb5; both are
+# glibc, and both had been copied into libs/.
 is_system_lib() {
     case "$1" in
-        libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|ld-linux*|\
+        libc.so.*|libm.so.*|libmvec.so.*|libdl.so.*|libpthread.so.*|librt.so.*|\
+        libresolv.so.*|libutil.so.*|libanl.so.*|libnss_*.so.*|libBrokenLocale.so.*|\
+        libthread_db.so.*|ld-linux*|\
         libgcc_s.so.*|libstdc++.so.*|libatomic.so.*|linux-vdso.so.*)  return 0 ;;
         *) return 1 ;;
     esac

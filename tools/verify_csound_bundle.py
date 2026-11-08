@@ -378,7 +378,13 @@ def _pe_imports(path):
 # deliberately does NOT copy these — a bundled libc or libstdc++ is how a
 # "self-contained" build becomes one that dies on a newer kernel or loader.
 LINUX_SYSTEM_LIBS = (
-    "libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so", "ld-linux",
+    # every glibc library that can appear as a NEEDED entry (the same set
+    # tools/bundle_csound_linux.sh never copies — a libcsound64 built with GCC 15
+    # NEEDs libmvec.so.1 directly) ...
+    "libc.so", "libm.so", "libmvec.so", "libdl.so", "libpthread.so", "librt.so",
+    "libresolv.so", "libutil.so", "libanl.so", "libnss_", "libBrokenLocale.so",
+    "libthread_db.so", "ld-linux",
+    # ... and the GCC runtime.
     "libgcc_s.so", "libstdc++.so", "libatomic.so", "linux-vdso.so",
 )
 
