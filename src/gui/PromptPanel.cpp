@@ -1023,17 +1023,20 @@ void PromptPanel::timerCallback()
     // last mutated B; buildInferenceRequest consumes both flags.
     //
     // The guard MUST mirror triggerGeneration's own real-generation preconditions
-    // (cache-not-full + backend-ready): those paths return BEFORE buildInferenceRequest,
+    // (no tape replaying, cache-not-full, backend-ready): those paths return BEFORE buildInferenceRequest,
     // which is the only place the flags are consumed — calling into them would leave
     // pendingOriginalReRender_ stuck true and re-fire every tick (cache replay / status
     // spam at 10 Hz, and the intended clean render never happening). When a real
     // generation cannot proceed the debt simply persists (a cheap bool check, no spin)
-    // and discharges the moment it can — e.g. the backend finishes connecting.
+    // and discharges the moment it can — e.g. the backend finishes connecting, or
+    // the tape stops (without that condition every tick also wrote triggerGeneration's
+    // "replay running" refusal over the replay's own status line).
     // easyMode_ too: this is a neural render of the (in Advanced: hidden)
     // prompts — deferred until the user is back on the Easy view, same
     // debt-persists semantics as the other preconditions.
     if (pendingOriginalReRender_ && easyMode_
         && !generating && !translatingPrompts_ && !loopStepInFlight_
+        && !processorRef.isReplayActive()
         && processorRef.isInferenceReady()
         && !processorRef.isInferenceCacheFull())
         triggerGeneration();
