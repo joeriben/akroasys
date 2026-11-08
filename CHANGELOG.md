@@ -8,22 +8,27 @@ unbroken.
 
 ### Generation
 
-- **A regenerate stays in the octave the sound plays in.** A new seed or a
-  wide drift often lands the model an octave or two away from a note that has
-  already sounded, so a held note jumped octaves on regenerate. The new sample
-  is now moved back by whole octaves onto that note, tape-style: an octave up
-  plays twice as fast and lasts half as long, an octave down plays half as fast
-  and keeps its length, holding the first half of the material. Only the octave
-  moves, never the note or the tuning; a sample without a clear pitch, on a new
-  note or more than two octaves away is left as the model made it. A new prompt
-  (typed, translated, from a preset, or restored when Re-Prompt is switched
-  off) starts afresh, and a loaded preset, snapshot or cache take is what the
-  next regenerate follows. The wavetable plays one period at a time at the
-  key's pitch and is left alone. Within a session, internal Resynth still seeds
-  from the model's own output; after a moved sound is reloaded from a preset or
-  the saved session, it seeds from the moved sample. The Re-Prompt loop listens
-  to the sample as it plays, and a recorded session replays with the same
-  moves.
+- **A prompt that names a note keeps every regenerate on that note.** With a
+  trailing note in a prompt ("…, c3"), a new seed or a wide drift no longer
+  makes a held note jump: the model often lands an octave or two away, and on
+  "c3" it also makes real G4 sounds a twelfth up. Every new sample with a clear
+  pitch is now moved exactly onto one note of the series, note and cents, as
+  the synth's Tuning and Scale Root tune it: measured, the moved samples sit
+  within about one cent of it. The series keeps the octave the sound already
+  plays in; a sample that shows no octave of the named note goes to the note as
+  the prompt writes it. The move is tape-style: up plays faster and lasts
+  shorter, down plays slower and keeps its length, holding the first part of
+  the material. A prompt without a note is left as the model made it, as is a
+  sample without a clear pitch or more than two octaves from the target. A
+  prompt edit or translation that keeps the note keeps the series; an edit
+  that changes the note starts afresh, and so does a preset, a snapshot, Init
+  or the restore when Re-Prompt is switched off. A loaded preset, snapshot or
+  cache take with a clear pitch is what the next regenerate follows. The
+  wavetable plays one period at a time at the key's pitch and is left alone.
+  Within a session, internal Resynth still seeds from the model's own output;
+  after a moved sound is reloaded from a preset or the saved session, it seeds
+  from the moved sample. The Re-Prompt loop listens to the sample as it plays,
+  and a recorded session replays with the same moves.
 
 ### Sample engine
 
