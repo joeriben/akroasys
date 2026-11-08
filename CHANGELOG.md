@@ -6,6 +6,25 @@ unbroken.
 
 ## Unreleased
 
+### Generation
+
+- **A regenerate stays in the octave the sound plays in.** A new seed or a
+  wide drift often lands the model an octave or two away from a note that has
+  already sounded, so a held note jumped octaves on regenerate. The new sample
+  is now moved back by whole octaves onto that note, tape-style: an octave up
+  plays twice as fast and lasts half as long, an octave down plays half as fast
+  and keeps its length, holding the first half of the material. Only the octave
+  moves, never the note or the tuning; a sample without a clear pitch, on a new
+  note or more than two octaves away is left as the model made it. A new prompt
+  (typed, translated, from a preset, or restored when Re-Prompt is switched
+  off) starts afresh, and a loaded preset, snapshot or cache take is what the
+  next regenerate follows. The wavetable plays one period at a time at the
+  key's pitch and is left alone. Within a session, internal Resynth still seeds
+  from the model's own output; after a moved sound is reloaded from a preset or
+  the saved session, it seeds from the moved sample. The Re-Prompt loop listens
+  to the sample as it plays, and a recorded session replays with the same
+  moves.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
