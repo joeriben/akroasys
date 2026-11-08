@@ -6,6 +6,24 @@ unbroken.
 
 ## Unreleased
 
+### Language-Resonant Oscillator
+
+- **A bowed string.** Violin, viola, cello, double bass, "bowed string", "arco",
+  "bow" and their German forms now open `bowed_string`: a bow drawn across a
+  waveguide string, with the string's losses set in hertz so it is the same
+  instrument at every engine rate, a bow arm that bites at the start of the note
+  and drifts in weight and speed, and a body of five violin resonances. Three
+  controls: Place (near the bridge to over the fingerboard), Gut (gut to steel
+  string) and Box (a cello's body up past a violin's). The bowed note sits a few
+  cents sharp, more the higher it is played (about four cents at A4, thirteen at
+  E6). The string follows the key to about 1.9 kHz at a 44.1 kHz engine rate and
+  2.5 kHz at the 4× rate; above that the bow walks toward the middle of the
+  string by itself. The plucked words (guitar, harp, koto, pizzicato) stay with
+  `string`, whose own Bow control is unchanged.
+
+- The singing bowl is missing from the oscillator's instrument list in this
+  version.
+
 ### Generation
 
 - **A prompt that names a note keeps every regenerate on that note.** With a
