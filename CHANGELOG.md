@@ -30,6 +30,13 @@ unbroken.
   from the moved sample. The Re-Prompt loop listens to the sample as it plays,
   and a recorded session replays with the same moves.
 
+- **Loading a preset no longer brings back the old Re-Prompt state.** A Re-Prompt
+  rewrite that was waiting for the next render still went into it after a
+  preset, snapshot or Init was loaded, and then replaced the preset's prompt in
+  the text field. A clean re-render still owed from switching Re-Prompt off
+  fired on its own after the load and replaced the audio the preset brought.
+  Both are now dropped when a preset loads.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
