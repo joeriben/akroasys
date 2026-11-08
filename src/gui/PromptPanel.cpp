@@ -1676,6 +1676,12 @@ void PromptPanel::loadPresetData(const juce::String& promptA, const juce::String
     // And a render still running was asked for the old sound: it is dropped when
     // it lands (presetLoadSeq_).
     ++presetLoadSeq_;
+    // So are the Dimension Explorer offsets and the semantic axes an Apply +
+    // Generate parked for a render that was then refused (a Re-Prompt step
+    // listening, a tape replaying, no backend): buildInferenceRequest takes
+    // whatever is parked, so the loaded sound's first render would carry them.
+    pendingOffsets_.clear();
+    pendingAxes_.clear();
     // The loaded prompts ARE the human authorship for this preset — seed the durable
     // store so a re-save reproduces them (and a subsequent loop engage restores to
     // them), regardless of any rewrite the loop later puts in the editors. setText
