@@ -60,6 +60,34 @@ unbroken.
   old prompt arrived in English over the new one. It now only replaces the text
   it translated, and the status line says when it was not applied.
 
+- **After Re-Prompt is switched off, a saved preset holds the prompts you see.**
+  Switching Re-Prompt off puts the original prompts back and renders them again.
+  If you had typed in a prompt field while the loop ran, a preset saved
+  afterwards still stored that typed text instead of the restored prompts.
+
+- **A render still running when a preset, snapshot or Init loads, a session
+  log starts playing or the plugin host recalls a state, is dropped.** It used
+  to arrive after the load, replace the loaded sound with a render of the old
+  prompts and set the seed to that render's. The status line says when a
+  render was dropped.
+
+- **The same holds for the oscillator.** An instrument still being written, or
+  a Re-Prompt rewrite still running, is dropped when Init or a preset with an
+  oscillator sound or cache loads, a session log starts playing or the host
+  recalls a state. It used to replace the loaded instrument, its knobs and its
+  cache, and clear the preset's name, so the next save went under a new name.
+  A preset without an oscillator sound and a T5 oscillator snapshot leave it
+  alone.
+
+- **Dimension Explorer offsets no longer carry over into a loaded preset.**
+  Apply + Generate pressed while a render could not start (a Re-Prompt step
+  listening, a tape replaying, no backend) left its offsets waiting, and the
+  first render of the next preset, snapshot or Init carried them.
+
+- **During a tape replay, the re-render owed from switching Re-Prompt off
+  waits.** It was attempted on every timer tick of the replay and wrote "replay
+  running" over the status line each time; it now runs once the replay stops.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
