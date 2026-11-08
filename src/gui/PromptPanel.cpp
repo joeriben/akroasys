@@ -1670,6 +1670,9 @@ void PromptPanel::loadPresetData(const juce::String& promptA, const juce::String
     pendingLoopPromptB_.clear();
     pendingOriginalReRender_ = false;
     forceCleanRenderOnce_ = false;
+    // And a render still running was asked for the old sound: it is dropped when
+    // it lands (presetLoadSeq_).
+    ++presetLoadSeq_;
     // The loaded prompts ARE the human authorship for this preset — seed the durable
     // store so a re-save reproduces them (and a subsequent loop engage restores to
     // them), regardless of any rewrite the loop later puts in the editors. setText
@@ -4357,20 +4360,23 @@ void PromptPanel::triggerGeneration()
     // seconds); the message thread adopts it when it lands. The note comes from
     // the prompts the request carries, as the model gets them.
     auto pitchJob = processorRef.beginPitchFit(req.promptA, req.promptB);
+    const auto askedAtLoad = presetLoadSeq_;
     std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
-                 pitchJob = std::move(pitchJob)]() mutable
+                 askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
         if (inferenceResult.success)
             pitchJob.run(inferenceResult.audio, inferenceResult.sampleRate);
         juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth,
-                                         pitchJob = std::move(pitchJob)]() mutable
+                                         askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
         {
             if (auto* self = safeThis.getComponent())
             {
                 auto& processor = self->processorRef;
                 self->generating = false;
                 self->generateButton.setEnabled(true);
+                if (self->renderOutlivedLoad(askedAtLoad))
+                    return;
                 if (result.success)
                 {
                     // On the note the prompts name (GeneratedPitch); the cache
@@ -4532,20 +4538,23 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
     // seconds); the message thread adopts it when it lands. The note comes from
     // the prompts the request carries, as the model gets them.
     auto pitchJob = processorRef.beginPitchFit(req.promptA, req.promptB);
+    const auto askedAtLoad = presetLoadSeq_;
     std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
-                 pitchJob = std::move(pitchJob)]() mutable
+                 askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
         if (inferenceResult.success)
             pitchJob.run(inferenceResult.audio, inferenceResult.sampleRate);
         juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth,
-                                         pitchJob = std::move(pitchJob)]() mutable
+                                         askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
         {
             if (auto* self = safeThis.getComponent())
             {
                 auto& processor = self->processorRef;
                 self->generating = false;
                 self->generateButton.setEnabled(true);
+                if (self->renderOutlivedLoad(askedAtLoad))
+                    return;
                 if (result.success)
                 {
                     // On the note the prompts name (GeneratedPitch), before the
@@ -4874,6 +4883,22 @@ void PromptPanel::stepOfflineTakeAfterCapture(bool captured)
     takeStepArmed_ = false;
     processorRef.setInferenceCacheOfflineTake(true);
     processorRef.requestDriftGenerationStep(static_cast<float>(cadenceIntervalSeconds()));
+}
+
+bool PromptPanel::renderOutlivedLoad(unsigned long long askedAtLoad)
+{
+    if (askedAtLoad == presetLoadSeq_)
+        return false;
+    // Asked for the sound before the load. Nothing of it is kept: not the audio
+    // (it would replace the loaded one), not the cache entry (the loaded
+    // preset's cache is its own), not the event log (it never sounded), not
+    // the pitch series (loadPresetData emptied it for the loaded sound), not
+    // the Re-Prompt step (it would listen to the old sound and start the loop
+    // on the new prompts). A render that captured nothing earns no take step.
+    takeStepArmed_ = false;
+    if (onStatusChanged)
+        onStatusChanged("render dropped: a new sound was loaded while it ran", false);
+    return true;
 }
 
 bool PromptPanel::isLroAsyncTakeRecording() const

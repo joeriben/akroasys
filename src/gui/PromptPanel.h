@@ -454,6 +454,11 @@ private:
      *  never consumes a step. */
     void stepOfflineTakeAfterCapture(bool captured);
 
+    /** At a render's landing: true when a sound was loaded (loadPresetData)
+     *  after the render was asked for. The render is then dropped whole, and
+     *  this says so on the status line. */
+    bool renderOutlivedLoad(unsigned long long askedAtLoad);
+
     /** The auto-regen cadence in seconds, from the REGENERATE mode + its BPM: what
      *  one step of an offline take advances the generation-side drift by. ASAP
      *  resolves to the same 1-beat floor cache playback already uses — without a
@@ -879,6 +884,11 @@ private:
     void syncInjectionModeAvailability();
 
     bool generating = false;
+    // Bumped by loadPresetData (a preset, a snapshot, Init). A render takes it
+    // when it is asked for and lands only if it still matches: one still running
+    // when a sound is loaded was asked for the sound before it, and landing it
+    // would replace the loaded audio with a render of the old prompts.
+    unsigned long long presetLoadSeq_ = 0;
     bool translatingPrompts_ = false;  // Union-Jack translate in flight (blocks IPC overlap)
     std::vector<std::pair<int, float>> pendingOffsets_;  // for DimensionExplorer
     std::map<juce::String, float> pendingAxes_;          // for SemanticAxes
