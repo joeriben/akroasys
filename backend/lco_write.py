@@ -512,6 +512,11 @@ AVAILABLE IN SCOPE
    GETS below: they are the library's own parameter lines, kept in your body)
   giSine (sine table)  giCos (cosine table, for gbuzz/buzz)
   giCheb (Chebyshev transfer table)  giImp (short strike impulse table)
+  t5bow  the head's bowed string, a real bow on a waveguide string (Smith 1986):
+         `astr t5bow kfreq, kspeed, kslope, kplace, kcut` — kspeed ~0.10 the bow speed,
+         kslope 1.0 (leaning in) .. 2.5 (a light bow), kplace 0.10 .. 0.20 of the string
+         from the bridge, kcut the string's loss cutoff in Hz (~1400 dark .. ~8000 wire).
+         Raw string, no body — `bowed_string` shows the body and the bow arm that go on it
   sr kr ksmps                      Csound's own globals, usable in an expression —
          `min(sr * 0.45, 20000)` is how the library keeps a rising landmark inside
          the band. Cap it at 20000 as well as at the rate: the plugin may run Csound
@@ -1917,6 +1922,89 @@ def sanitize(raw):
 # with p4 = voice index, six named control channels per voice read via chnget,
 # and 16 always-on score instances.
 
+# The head's bowed string, a substrate idiom beside the ftgens so that a body can bow a
+# string in one line the way it plucks one with `wgpluck2`: `wgbow` is the only bow this
+# Csound ships, and its loss filter is specified relative to the sample rate (pole
+# 0.6 - 0.1 * 22050 / sr), so at the plugin's 4x it is a different, 1.6-1.9 octaves
+# brighter instrument than at 44100 (docs/plans/LRO_BOWED_STRING_ANALYSIS.md). This one
+# puts the same model at orchestra level with the loss filter in Hz.
+#
+# METHOD  digital waveguide bowed string in velocity waves (Smith, "Efficient Simulation
+#         of the Reed-Bore and Bow-String Mechanisms", ICMC 1986; PASP, "Digital Waveguide
+#         Bowed-String" and "The Bow-String Scattering Junction"). Two delay lines meet at
+#         the bow: bow -> bridge -> bow and bow -> nut -> bow. The nut reflects with -1; the
+#         bridge with -1 through a one-pole lowpass that consolidates the string's losses
+#         (Jaffe & Smith, CMJ 7(2) 1983), at a gain of 0.95 per round trip (STK Bowed).
+#         The bow is a memoryless friction junction (McIntyre, Schumacher & Woodhouse,
+#         JASA 74(5) 1983): v_delta = v_bow - (v_from_bridge + v_from_nut), and each
+#         outgoing wave is the OPPOSITE incoming wave plus rho(v_delta) * v_delta, with
+#         Cook's hyperbolic friction curve rho = min(1, (|v_delta| * slope + 0.75)^-4)
+#         exactly as STK's BowTable has it. The loss filter's phase delay at the played
+#         fundamental is taken out of the nut side so the free string lands on kfreq.
+# BLOCKS  Csound closes a delay-line loop once per k-cycle, so the junction runs in a
+#         sub-block of round(sr/44100) samples, taken down to a power of two because the
+#         local ksmps must divide the global 64 (1 at 44100 and 48000, 2 at 88200, 4 at
+#         176400 and 192000; 3 at 132300 or 176224 would refuse to initialise and
+#         silence every voice, measured 2026-11-08): 21-23 us at the common rates. Both
+#         taps are shortened by one sub-block because the write lands a sub-block after
+#         the read, so the loop length is exact. The bridge-side line can be no shorter
+#         than two sub-blocks plus one sample, which bounds the bow position from below at
+#         high pitch: kfreq must stay below kplace * sr / (2 * iK + 1), i.e. about
+#         kplace * 14700 Hz at 44100 and kplace * 19600 Hz at 176400 (1.9 and 2.5 kHz at
+#         place 0.13). Above that the bow walks toward the middle of the string by itself,
+#         and above about 6 kHz both lines are at their floor and the pitch is wrong.
+# MEASURED (tools/lco_ab_bowed_waveguide.py; 2026-11-08) the free string (bow removed) is
+#         on kfreq to 0.01 cents at both rates. The BOWED note sits a few cents SHARP, and
+#         the amount grows with pitch, with force and with darkness: the hair catches the
+#         smeared Helmholtz corner as soon as v_delta enters the stick window (0.25/slope
+#         wide), i.e. before the corner has fully arrived. At speed 0.10, slope 2.0,
+#         place 0.13, cutoff 4000 Hz: +0.9 c at 110 Hz, +4.3 c at 440, +14.5 c at 1320.
+#         That is the model's own behaviour and is left as it is, not tuned out with a
+#         fitted number. The bow holds the fundamental for slope 1.0-2.5 and place
+#         0.10-0.25 to 2500 Hz at both rates (one marginal cell at 44100: slope 2.5,
+#         place 0.25, 220 Hz); nearer the bridge or lighter than that it can catch the
+#         octave or the twelfth instead, exactly as a real bow does below Schelleng's
+#         minimum force. Cost: about 1.1 % of one core per voice at 176400 against 0.6 %
+#         for `string` (16 always-on voices: roughly a fifth of a core at 4x).
+_BOW_UDO = r"""
+opcode t5bow, a, kkkkk
+  kfreq, kspeed, kslope, kplace, kcut xin
+  iK     = int(sr / 44100 + 0.5)                       ; sub-block: a power of two that divides ksmps
+  iK     = (iK >= 8 ? 8 : (iK >= 4 ? 4 : (iK >= 2 ? 2 : 1)))
+  setksmps iK
+  kfreq  limit kfreq, 20, 12000
+  kT     = sr / kfreq                                  ; the period, in samples
+  kw0    = 2 * $M_PI * kfreq / sr                      ; the fundamental, radians per sample
+  kc     = 2 - cos(2 * $M_PI * kcut / sr)
+  kp     = kc - sqrt(kc * kc - 1)                      ; tone's pole, as tone computes it
+  kph    = taninv2(kp * sin(kw0), 1 - kp * cos(kw0)) / kw0   ; its phase delay at the fundamental
+  kdr    = kplace * kT                                 ; bow -> bridge -> bow
+  kdr    limit kdr, 2 * iK + 1, kT * 0.5
+  kdl    = kT - kdr - kph                              ; bow -> nut -> bow, carries the correction
+  kdl    limit kdl, 2 * iK + 1, 0.055 * sr
+  aoutR  init 0
+  aoutL  init 0
+  abR    delayr 0.06
+  ainR   deltapi (kdr - iK) / sr                       ; back from the bridge
+         delayw aoutR
+  abL    delayr 0.06
+  ainL   deltapi (kdl - iK) / sr                       ; back from the nut
+         delayw aoutL
+  arefR  tone ainR, kcut                               ; the bridge: -1, the losses, 0.95
+  arefR  = -0.95 * arefR
+  arefL  = -ainL                                       ; the nut: -1
+  avd    = kspeed - (arefR + arefL)                    ; bow speed minus string speed under the hair
+  ax     = abs(avd) * kslope + 0.75
+  ax2    = ax * ax
+  arho   = 1 / (ax2 * ax2)                             ; (|dv| * slope + 0.75)^-4
+  arho   limit arho, 0, 1                              ; 1 = stuck
+  anew   = arho * avd
+  aoutR  = arefL + anew                                ; toward the bridge
+  aoutL  = arefR + anew                                ; toward the nut
+  xout   aoutR                                         ; the wave on its way to the bridge
+endop
+"""
+
 _HEAD = (
     "<CsoundSynthesizer>\n<CsOptions>\n-n -d\n</CsOptions>\n<CsInstruments>\n"
     "sr = %SR%\n"
@@ -1936,6 +2024,7 @@ _HEAD = (
     # Short decaying harmonic burst: the mallet contact for struck models, which
     # take their strike argument as a TABLE NUMBER, not a scalar.
     "giImp  ftgen 4, 0, 256, 10, 1, 0.5, 0.3, 0.2, 0.1\n"
+    + _BOW_UDO +
     # Starting values for the player's mix/octave knobs. The three `oscNvol`
     # channels ARE driven from the plugin — processBlock writes them every
     # block from the panel's layer levels, alongside the twelve knob channels —
