@@ -42,7 +42,7 @@ in `docs/IPC_PROTOCOL.md`.
 | --- | --- | --- |
 | macOS 14+ on Apple Silicon | MPS (Metal) | Primary development target. |
 | Linux x86_64 (Ubuntu 22.04 / 24.04) | CUDA 12.8 (NVIDIA) | CI target. |
-| Linux x86_64 (Fedora 42) | CUDA 12.8 (NVIDIA) | Not in CI; package list assembled from Ubuntu CI deps plus Fedora package naming conventions, not yet end-to-end verified. |
+| Linux x86_64 (Fedora 42) | CUDA 12.8 (NVIDIA) | Not in CI. Verified end-to-end on one machine 2026-11-08 (plugin build with the Csound bundle gate, backend generate + LRO authoring over the pipe). Fedora packages no Csound: it is built from source, §4.2. |
 | Windows 11 x86_64 | CUDA 12.8 (NVIDIA) | CI target. MSVC 2022. |
 
 CPU-only fallback works on all three platforms but is too slow for interactive
@@ -142,11 +142,12 @@ one breaks the Linux build.
   case upgrade or pin the 4.1 PPA, since JUCE 8 expects the 4.1 ABI.
 - All other packages match.
 
-Fedora 42 reference:
+Fedora 42 reference (verified 2026-11-08 on one machine, GCC 15.2, glibc 2.41;
+not in CI):
 
 ```bash
 sudo dnf install -y \
-  cmake gcc-c++ make git pkgconf-pkg-config \
+  cmake gcc-c++ make git pkgconf-pkg-config patchelf \
   python3.10 python3.10-devel python3-pip \
   alsa-lib-devel libcurl-devel freetype-devel \
   libX11-devel libXrandr-devel libXinerama-devel libXcursor-devel \
@@ -154,10 +155,80 @@ sudo dnf install -y \
   webkit2gtk4.1-devel gtk3-devel
 ```
 
-If your Fedora release does not ship `webkit2gtk4.1-devel` under that exact
-name, search for the closest 4.1 ABI package
-(`dnf search webkit2gtk`). Verify the package list against `apt show` output
-on Ubuntu before reporting bugs.
+`patchelf` is what `tools/bundle_csound_linux.sh` rewrites rpaths with; the
+plugin build's POST_BUILD step fails without it. If your Fedora release does
+not ship `webkit2gtk4.1-devel` under that exact name, search for the closest
+4.1 ABI package (`dnf search webkit2gtk`).
+
+**Csound on Fedora is built from source.** Fedora 42 packages no Csound at all
+(`dnf list csound` finds nothing), and the plugin links `libcsound64` through
+`find_library` (`CMakeLists.txt`, `T5YNTH_CSOUND_LINUX_LIB`). The build that is
+verified here, with the extra development packages it needs:
+
+```bash
+sudo dnf install -y libsndfile-devel libsamplerate-devel portaudio-devel \
+  pulseaudio-libs-devel eigen3-devel gmm-devel stk-devel
+
+git clone --depth 1 --branch 6.18.1 https://github.com/csound/csound.git ~/ai/csound
+cd ~/ai/csound
+# GCC 15 rejects include/plugin.h:1005 — `this->opaddr` names a member that is
+# spelled `opadr` everywhere else; a one-word fix that is not in the 6.18.1 tag:
+sed -i '1005s/this->opaddr/this->opadr/' include/plugin.h
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+  -DUSE_DOUBLE=ON -DUSE_LIB64=OFF -DUSE_CURL=OFF \
+  -DBUILD_TESTS=OFF -DBUILD_JAVA_INTERFACE=OFF -DBUILD_LUA_INTERFACE=OFF
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+echo /usr/local/lib | sudo tee /etc/ld.so.conf.d/csound-local.conf
+sudo ldconfig
+```
+
+Why each option matters:
+
+- `USE_DOUBLE=ON` — the plugin, the backend and the bundler all name
+  `libcsound64`. A float build is `libcsound`, and nothing finds it.
+- `USE_LIB64=OFF` — installs to `/usr/local/lib`, where the drop-in above
+  and the bundler's plugin-directory search (`/usr/local/lib/csound/plugins64-*`)
+  look. ON puts the library under `/usr/local/lib64` instead.
+- `USE_CURL=OFF` — Csound uses curl for two things only, URL `#include`s and
+  the `strfromurl` opcode, neither of which the LRO reaches. With curl ON the
+  library's transitive closure drags libcurl, OpenSSL, krb5, libselinux, libz
+  and pcre2 into the bundle (28 libraries instead of 10), and the bundle gate
+  fails (§11.6): JUCE links the distribution's libcurl directly, so the binary
+  resolves libz and pcre2 from `/lib64` while copies of both sit in `libs/`.
+  Ubuntu's packaged Csound has the same curl-free closure, so OFF matches
+  what CI ships.
+
+The plugin opcodes that live outside the main repository — STK, Chua, linear
+algebra — come from the `plugins` repository's Csound 6 branch. The STK module
+reads its rawwave files from the path compiled in here; Fedora's `stk` package
+installs them under `/usr/share/stk/rawwaves`:
+
+```bash
+git clone --depth 1 https://github.com/csound/plugins.git ~/ai/csound-plugins
+cd ~/ai/csound-plugins      # the default branch is csound6
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+  -DUSE_DOUBLE=ON -DUSE_LIB64=OFF \
+  -DBUILD_STK_OPCODES=ON -DDEFAULT_STK_RAWWAVE_PATH=/usr/share/stk/rawwaves \
+  -DBUILD_CHUA_OPCODES=ON -DBUILD_LINEAR_ALGEBRA_OPCODES=ON \
+  -DBUILD_FAUST_OPCODES=OFF -DBUILD_FLUID_OPCODES=OFF -DBUILD_HDF5_OPCODES=OFF \
+  -DBUILD_IMAGE_OPCODES=OFF -DBUILD_WEBSOCKET_OPCODE=OFF -DUSE_FLTK=OFF \
+  -DBUILD_WIIMOTE_OPCODES=OFF -DBUILD_MP3OUT_OPCODE=OFF -DBUILD_PYTHON_OPCODES=OFF \
+  -DBUILD_P5GLOVE_OPCODES=OFF -DBUILD_JACK_OPCODES=OFF
+cmake --build build -j"$(nproc)"
+sudo cmake --install build   # → /usr/local/lib/csound/plugins64-6.0/lib{stkops,chua,linear_algebra}.so
+```
+
+Check the result the way the backend will see it:
+
+```bash
+timeout 30 csound -z1 2>&1 </dev/null | awk '{print $1}' | sort -u | wc -l   # 1426 unique opcode names
+timeout 30 csound -z1 2>&1 </dev/null | grep -cE '\bSTK[A-Z]'               # 27 STK opcodes
+.venv/bin/python tools/lco_measure.py --selftest                            # 88/88
+```
+
+Faust is deliberately not built: `faustgen` segfaults the host process on an
+`import("stdfaust.lib")` (project `CLAUDE.md`, Instrument Authoring rule 6).
 
 ### 4.3 Windows 11
 
@@ -249,6 +320,22 @@ torchsde
 `torchsde` is the load-bearing dependency that forces the inference path
 through Python — its BrownianTree SDE sampler is what makes Stable Audio
 sound right and has no C++ port.
+
+**llama-cpp-python on a Linux CUDA machine must be built from source.** The
+PyPI wheel is CPU-only, and the LRO author (a 12B GGUF, `n_gpu_layers=-1`) is
+not usable on CPU. With the CUDA toolkit installed (CMake finds `nvcc` on
+`PATH` or at `/usr/local/cuda`; verified with CUDA 13.0 and an RTX PRO 6000,
+compute capability 12.0):
+
+```bash
+CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120" \
+  pip install --force-reinstall --no-cache-dir --no-binary llama-cpp-python llama-cpp-python
+python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"   # True
+```
+
+`CMAKE_CUDA_ARCHITECTURES` is the card's compute capability without the dot
+(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`). The build takes
+several minutes; the wheel it produces is ~270 MB.
 
 ### 5.5 Quick sanity test (no PyInstaller)
 
@@ -504,6 +591,26 @@ if(APPLE)
         VERBATIM)
 endif()
 ```
+
+### 11.6 `Csound bundling incomplete: … still resolves /lib64/libz.so.1` (Linux)
+
+The POST_BUILD bundler (`tools/bundle_csound_linux.sh`) copies `libcsound64`
+and its whole non-system dependency closure into `libs/` and then requires
+that any library of which a copy sits in `libs/` is also what the binary
+resolves. A Csound built with `USE_CURL=ON` pulls libcurl → OpenSSL → krb5 →
+libselinux → libz / pcre2 into that closure, while JUCE links the
+distribution's libcurl directly and freetype resolves `/lib64/libz.so.1`
+before the rpath copy. The gate flags both and `make` deletes the binary.
+Rebuild Csound with `-DUSE_CURL=OFF` (§4.2); the bundle then holds 10
+libraries and the gate passes. The Ubuntu package already has that closure,
+which is why CI never sees this.
+
+### 11.7 `'struct csnd::InPlug<N>' has no member named 'opaddr'` (Csound 6.18.1 with GCC 15)
+
+Not this project's code: `include/plugin.h:1005` in the Csound 6.18.1 tag
+spells the member `opaddr` where the struct defines `opadr`. Older GCCs did not
+instantiate the template there; GCC 15 does. One-word fix before configuring
+Csound (§4.2).
 
 ---
 
