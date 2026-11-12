@@ -761,6 +761,19 @@ struct CsoundEngine::Impl
 CsoundEngine::CsoundEngine() : impl (std::make_unique<Impl>()) {}
 CsoundEngine::~CsoundEngine() = default;
 
+std::string CsoundEngine::loadedLibraryPath()
+{
+   #ifdef _WIN32
+    return {};
+   #else
+    Dl_info info {};
+    if (dladdr (reinterpret_cast<const void*> (&csoundCreate), &info) != 0
+        && info.dli_fname != nullptr && info.dli_fname[0] == '/')
+        return info.dli_fname;
+    return {};
+   #endif
+}
+
 int CsoundEngine::effectiveOversampleFactor (double sampleRate, int requested)
 {
     // Only 1/2/4 are meaningful, and kKsmps must divide by the factor so a single

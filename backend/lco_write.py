@@ -2317,7 +2317,8 @@ def _bundled_csound_libs():
     candidate there and the child inherits the environment. The Linux tarball's
     libs/libcsound64.so.6.0 + libs/Opcodes64 is a host payload, not a vendored
     one, and reaches the backend only via T5YNTH_CSOUND_LIB — which
-    PipeInference.cpp exports on macOS alone today."""
+    PipeInference.cpp exports on macOS and Linux from the library the engine
+    actually mapped (dladdr on csoundCreate)."""
     here = Path(getattr(sys, "_MEIPASS", "") or os.path.abspath(sys.argv[0]))
     ancestors = [here] + list(here.parents)
     for parent in ancestors:

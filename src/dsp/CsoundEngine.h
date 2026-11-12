@@ -88,6 +88,13 @@ public:
      *  mismatch and recompile forever. Static — no instance, no state. */
     static int effectiveOversampleFactor (double sampleRate, int requested);
 
+    /** Absolute path of the Csound library THIS module is bound to (the one
+     *  `&csoundCreate` resolves to in this image, never a lookup across the whole
+     *  process, where a DAW's other Csound could win). Empty on Windows, in a
+     *  build without Csound, or when the loader cannot say. The backend gate
+     *  compiles against exactly this library (T5YNTH_CSOUND_LIB, ticket #25). */
+    static std::string loadedLibraryPath();
+
     /** The factor the currently compiled orchestra was prepared with (1 when
      *  nothing is compiled). Message/compile-thread only, like orchestraText(). */
     int oversampleFactor() const;
@@ -283,6 +290,7 @@ inline CsoundEngine::~CsoundEngine() = default;
 
 inline bool CsoundEngine::prepare (double, int, const char*, int) { return false; }
 inline int  CsoundEngine::effectiveOversampleFactor (double, int) { return 1; }
+inline std::string CsoundEngine::loadedLibraryPath() { return {}; }
 inline int  CsoundEngine::oversampleFactor() const { return 1; }
 inline const std::string& CsoundEngine::orchestraText() const
 {

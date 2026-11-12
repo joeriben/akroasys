@@ -1,4 +1,5 @@
 #include "PipeInference.h"
+#include "../dsp/CsoundEngine.h"
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -84,26 +85,29 @@ void configureInferenceCpuBudget()
 // Tell the backend which Csound the ENGINE is using, so its acceptance gate can
 // compile against the same one.
 //
-// The gate looks for a bundled CsoundLib64 by walking its own path up to a
-// "Contents" directory (lco_write.py, _bundled_csound_libs). That works for the
-// PyInstaller backend inside an installed app and finds nothing in a dev run from
-// backend/pipe_inference.py, which has no bundle above it — so on the machine
-// where the LRO is actually developed the gate would fall back to a system-wide
-// Csound, or to none at all, and judge an orchestra by a vocabulary the engine
-// does not have. The host knows where its own bundle is; one env var settles it
-// for both configurations. Absent in a build without Csound: nothing to point at,
-// and the gate's own search is unchanged.
+// The gate cannot work this out for itself. Its own search walks up from the
+// backend's path to a "Contents" directory (lco_write.py, _bundled_csound_libs),
+// which finds nothing in a dev run from backend/pipe_inference.py, and nothing in
+// the Linux tarball, where the PyInstaller backend sits in backend/_internal
+// beside a libs/ directory no ancestor walk names. The gate would then fall back
+// to a system-wide Csound — or none — and judge an orchestra by a vocabulary the
+// engine does not have (ticket #25).
+//
+// The one thing that cannot be wrong is the library this module is bound to, so
+// ask the engine (CsoundEngine::loadedLibraryPath: dladdr on its own
+// &csoundCreate, the same rule it uses to find the Opcodes64 beside it). Not a
+// symbol search across the process: on macOS a DAW's other Csound (Cabbage,
+// csound~) could answer first. That serves a macOS bundle, the Linux tarball and
+// VST3, and the .deb (where it yields the distro's libcsound64 with no
+// Opcodes64 beside it, which is the correct answer) alike. A build without
+// Csound, and Windows (which keeps its own csound64.dll walk), yield nothing and
+// the gate's own search is unchanged.
 void exportBundledCsoundPath()
 {
-   #if JUCE_MAC
-    const auto lib = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                         .getParentDirectory()      // Contents/MacOS
-                         .getParentDirectory()      // Contents
-                         .getChildFile ("libs/CsoundLib64");
+    const auto lib = CsoundEngine::loadedLibraryPath();
 
-    if (lib.existsAsFile())
-        setEnvValue ("T5YNTH_CSOUND_LIB", lib.getFullPathName());
-   #endif
+    if (! lib.empty())
+        setEnvValue ("T5YNTH_CSOUND_LIB", juce::String::fromUTF8 (lib.c_str()));
 }
 
 #ifdef _WIN32
