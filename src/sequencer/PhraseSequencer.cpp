@@ -207,7 +207,8 @@ void T5ynthPhraseSequencer::flushPendingFor(int note, int strand, std::vector<Vo
     }
 }
 
-void T5ynthPhraseSequencer::addPending(double q, int note, int strand, std::vector<VoiceEvent>& out, int offset)
+void T5ynthPhraseSequencer::addPending(double q, int note, int strand, Line line,
+                                       std::vector<VoiceEvent>& out, int offset)
 {
     if (pendingCount >= kMaxPending)
     {
@@ -219,7 +220,7 @@ void T5ynthPhraseSequencer::addPending(double q, int note, int strand, std::vect
         emitOff(pending[static_cast<size_t>(earliest)].note, pending[static_cast<size_t>(earliest)].strand, out, offset);
         pending[static_cast<size_t>(earliest)] = pending[static_cast<size_t>(--pendingCount)];
     }
-    pending[static_cast<size_t>(pendingCount++)] = { q, note, strand };
+    pending[static_cast<size_t>(pendingCount++)] = { q, note, strand, line };
 }
 
 bool T5ynthPhraseSequencer::sharesOnset(int index) const
@@ -273,7 +274,7 @@ void T5ynthPhraseSequencer::emitOn(int index, std::vector<VoiceEvent>& out, int 
     out.push_back(v);
 
     if (e.held) heldNote[static_cast<size_t>(slot)] = e.note;
-    else        addPending(barStartQ + e.offQ, e.note, e.strand, out, offset);
+    else        addPending(barStartQ + e.offQ, e.note, e.strand, e.line, out, offset);
 }
 
 void T5ynthPhraseSequencer::releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset)
@@ -301,20 +302,21 @@ void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
     // onset in THAT render (finishLine). A re-render in the bar can put its
     // line's next onset sooner — a denser grid, another motif — and the note
     // would sound on under the new render's notes: it ends at that onset
-    // instead. The main line (strand −1, Stab's chord included) and the layer
-    // (its strands ≥ 0) are a line each, as the renderer bounds them.
+    // instead. Its line is the one the renderer bounds it by (Event::line):
+    // the Octave and Chord layers end at the main line's next onset, the
+    // Answer at its own.
     constexpr double inf = std::numeric_limits<double>::infinity();
-    double nextMain = inf, nextLayer = inf;
-    for (int i = fromIndex; i < render.count && (nextMain == inf || nextLayer == inf); ++i)
+    double nextMain = inf, nextAnswer = inf;
+    for (int i = fromIndex; i < render.count && (nextMain == inf || nextAnswer == inf); ++i)
     {
         const Event& e = render.events[static_cast<size_t>(i)];
-        double& next = e.strand < 0 ? nextMain : nextLayer;
+        double& next = e.line == Line::Answer ? nextAnswer : nextMain;
         if (next == inf) next = barStartQ + e.onQ;   // sorted by onset: the first is the next
     }
     for (int i = 0; i < pendingCount; ++i)
     {
         auto& p = pending[static_cast<size_t>(i)];
-        p.q = std::min(p.q, p.strand < 0 ? nextMain : nextLayer);
+        p.q = std::min(p.q, p.line == Line::Answer ? nextAnswer : nextMain);
     }
 }
 
@@ -592,6 +594,13 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         {
             enterBar(bar + 1, true);
             releaseUnusedHeld(0, out, offset);
+            // A note sounding on into this bar (a shuffled step's off past
+            // the bar end) was bounded by its render's view of this bar's
+            // first onset. A re-render after the note started (a change late
+            // in the bar before) bounds it only by the onsets left in that
+            // bar, by none when it came after the last: this bar as rendered
+            // now bounds it.
+            endPendingByNextOnset(0);
             continue;
         }
         if (tBeat <= t)

@@ -1513,6 +1513,110 @@ int main(int argc, char** argv)
         check(errs == 0, "change in play: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 19. A note sounding at a change ends where the renderer ends it: at its line's next onset\n");
+    {
+        // The renderer ends a note at its line's next onset (finishLine): the
+        // main line's for the main line, Stab's chord and the Octave and Chord
+        // layers, which take its lengths; the Answer's own for the Answer. A
+        // note the replaced render started must end at the earlier of the off
+        // that render gave it and its line's next onset as played after the
+        // change. Two changes: a denser grid in the bar (the Chord layer's
+        // hits end at the main line's next onset, not at its next hit), and a
+        // change after the bar's last onset under a shuffled off that reaches
+        // past the bar end (the next bar's first onset ends it).
+        int checked = 0, cut = 0, wrong = 0, errs = 0, runs = 0;
+        std::string why;
+        struct Change { Config from, to; double at; std::string tag; };
+        std::vector<Change> changes;
+        for (Part part : { Part::Bass, Part::Riff, Part::Lead, Part::Stab })
+            for (Layer layer : { Layer::Off, Layer::Octave, Layer::Chord, Layer::Answer })
+            {
+                Config c = base();
+                c.part = part;
+                c.layer = layer;
+                c.form = Form::ABAB;   // bar 3 is a B unit: the Answer plays
+                c.variation = 0.0f;
+                c.slide = 0.0f;
+                c.gate = 1.0f;
+                const std::string pl = "part " + std::to_string(static_cast<int>(part)) + " layer "
+                                     + std::to_string(static_cast<int>(layer));
+                for (int pulses : { 16, 5 })
+                    for (double beat : { 0.5, 1.0, 2.5 })
+                    {
+                        Config a = c;
+                        a.stepsPerBar = 1; a.pulses = 1; a.rotation = 0;
+                        Config d = a;
+                        d.stepsPerBar = 16; d.pulses = pulses;
+                        changes.push_back({ a, d, 3 * B + beat, pl + " denser, pulses " + std::to_string(pulses)
+                                                                     + " beat " + std::to_string(beat).substr(0, 3) });
+                    }
+                for (int rotation : { 0, 1 })
+                {
+                    Config a = c;
+                    a.harm = Harm::Chords;
+                    a.chordDegrees = { 1, 4, 0, 0 };
+                    a.stepsPerBar = 2; a.pulses = 1; a.rotation = rotation;
+                    a.shuffle = 0.75f;
+                    Config d = a;
+                    d.stepsPerBar = 1; d.rotation = 0;
+                    changes.push_back({ a, d, 3 * B + 3.75, pl + " shuffled, rotation " + std::to_string(rotation) });
+                }
+            }
+        auto offAfter = [](const Run& r, size_t i) {
+            for (size_t j = i + 1; j < r.events.size(); ++j)
+                if (r.events[j].ev.type == VoiceEvent::Type::NoteOff && r.events[j].ev.strandId == r.events[i].ev.strandId
+                    && r.events[j].ev.note == r.events[i].ev.note) return r.events[j].q;
+            return std::numeric_limits<double>::infinity();
+        };
+        for (const auto& ch : changes)
+        {
+            // Its line's onsets: the main line plays on strand −1, the Answer
+            // on strand 5; every other layer takes the main line's lengths.
+            const bool answer = ch.from.layer == Layer::Answer;
+            auto lineStrandOf = [&](int strand) { return strand >= 0 && answer ? 5 : -1; };
+            bool changed = false;
+            const Run r = play(ch.from, 0.0, 6 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!changed && q >= ch.at) { s.setConfig(ch.to); changed = true; }
+            });
+            const Run ref = play(ch.from, 0.0, 6 * B);
+            ++runs;
+            errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+            for (size_t i = 0; i < r.events.size(); ++i)
+            {
+                const auto& p = r.events[i];
+                if (p.ev.type != VoiceEvent::Type::NoteOn || p.q >= ch.at) continue;
+                // The off the replaced render gave it: the same note unchanged.
+                double oldOff = -1.0;
+                for (size_t k = 0; k < ref.events.size() && oldOff < 0.0; ++k)
+                    if (ref.events[k].sample == p.sample && ref.events[k].ev.type == VoiceEvent::Type::NoteOn
+                        && ref.events[k].ev.note == p.ev.note && ref.events[k].ev.strandId == p.ev.strandId)
+                        oldOff = offAfter(ref, k);
+                if (!(oldOff > ch.at)) continue;   // ended before the change: nothing to bound
+                const int lineStrand = lineStrandOf(p.ev.strandId);
+                double nextOn = std::numeric_limits<double>::infinity();
+                for (size_t k = i + 1; k < r.events.size(); ++k)
+                    if (r.events[k].ev.type == VoiceEvent::Type::NoteOn && r.events[k].ev.strandId == lineStrand
+                        && r.events[k].q > p.q + 2 * kOneSampleQ)
+                    { nextOn = r.events[k].q; break; }
+                const double want = std::min(oldOff, nextOn);
+                const double got = offAfter(r, i);
+                ++checked;
+                cut += nextOn < oldOff - 2 * kOneSampleQ;
+                if (std::abs(got - want) > 2 * kOneSampleQ && wrong++ == 0)
+                    why = ch.tag + ": note " + std::to_string(p.ev.note) + " strand " + std::to_string(p.ev.strandId)
+                        + " from q " + std::to_string(p.q).substr(0, 6) + " ends at q " + std::to_string(got).substr(0, 6)
+                        + ", its line's next onset q " + std::to_string(nextOn).substr(0, 6) + ", its old off q "
+                        + std::to_string(oldOff).substr(0, 6);
+            }
+        }
+        check(checked > 0 && cut > 0, "note at a change: notes sounding at the change, some ended sooner ("
+                                          + std::to_string(checked) + " notes, " + std::to_string(cut) + " sooner)");
+        check(wrong == 0, "note at a change: it ends at min(its old off, its line's next onset) ("
+                              + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
+        check(errs == 0, "note at a change: no hanging or orphan note, no bad glide (" + std::to_string(errs)
+                             + " over " + std::to_string(runs) + " runs)");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

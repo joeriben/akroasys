@@ -274,6 +274,13 @@ BarVariation variationForBar(const Motif& m, const std::array<bool, kMaxMotifSte
 
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
+/** The line whose next onset ends a note (finishLine): the main line for its
+ *  own notes, Stab's chord, and the Octave and Chord layers, which take the
+ *  main line's lengths; the Answer for the Answer layer, a line of its own.
+ *  The strand cannot tell them apart: the Octave and the Answer both play on
+ *  strand 5. */
+enum class Line : std::uint8_t { Main, Answer };
+
 struct Event
 {
     double onQ   = 0.0;    // quarters from bar start
@@ -281,6 +288,7 @@ struct Event
     int    note  = 60;
     float  vel   = 0.67f;  // 0..1
     int    strand = -1;    // VoiceEvent::strandId
+    Line   line  = Line::Main;
     bool   glide = false;  // continues the strand's held voice (slide target)
     bool   held  = false;  // slide source: no note-off, the next onset glides it
 };

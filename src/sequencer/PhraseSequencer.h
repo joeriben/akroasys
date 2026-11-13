@@ -222,7 +222,7 @@ private:
     int entryVoicingCount = 0;
 
     // Sounding notes
-    struct PendingOff { double q; int note; int strand; };
+    struct PendingOff { double q; int note; int strand; PhraseModel::Line line; };
     static constexpr int kMaxPending = 128;
     std::array<PendingOff, kMaxPending> pending {};
     int pendingCount = 0;
@@ -238,11 +238,14 @@ private:
     void enterBar(int newBar, bool continuous);
     void renderCurrent();
     void releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset);
+    /** Ends each pending off no later than its line's first onset in
+     *  render.events from `fromIndex` on. */
     void endPendingByNextOnset(int fromIndex);
     /** Another event of the same strand starts at render.events[index]'s onset. */
     bool sharesOnset(int index) const;
     void emitOn(int index, std::vector<VoiceEvent>& out, int offset);
     void emitOff(int note, int strand, std::vector<VoiceEvent>& out, int offset);
     void flushPendingFor(int note, int strand, std::vector<VoiceEvent>& out, int offset);
-    void addPending(double q, int note, int strand, std::vector<VoiceEvent>& out, int offset);
+    void addPending(double q, int note, int strand, PhraseModel::Line line,
+                    std::vector<VoiceEvent>& out, int offset);
 };

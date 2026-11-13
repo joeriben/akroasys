@@ -1337,7 +1337,7 @@ void pushEvent(BarRender& out, const Event& e)
     if (out.count < kMaxEvents) out.events[static_cast<size_t>(out.count++)] = e;
 }
 
-void emitLine(BarRender& out, const OnsetList& l, int strand, int transpose, float velScale)
+void emitLine(BarRender& out, const OnsetList& l, int strand, Line line, int transpose, float velScale)
 {
     for (int i = 0; i < l.n; ++i)
     {
@@ -1346,14 +1346,15 @@ void emitLine(BarRender& out, const OnsetList& l, int strand, int transpose, flo
         e.onQ = o.onQ; e.offQ = o.offQ;
         e.note = clampNote(o.note + transpose);
         e.vel = o.vel * velScale;
-        e.strand = strand; e.glide = o.glide; e.held = o.held;
+        e.strand = strand; e.line = line; e.glide = o.glide; e.held = o.held;
         pushEvent(out, e);
     }
 }
 
 /** One event per voice and onset. `oneStrand`: every voice on `strand` (Stab's
  *  chord is the main line, strand −1, so the voice manager treats the whole
- *  chord alike — pan, stereo, pedals); otherwise voice v on `strand` + v. */
+ *  chord alike — pan, stereo, pedals); otherwise voice v on `strand` + v.
+ *  Every chord takes the main line's lengths (Line::Main). */
 void emitChords(BarRender& out, const OnsetList& l, const int* voicing, int nv,
                 int strand, bool oneStrand, int shift, int transpose, float velScale)
 {
@@ -1453,12 +1454,12 @@ void renderBar(const RenderInput& in, BarRender& out)
     }
     else
     {
-        emitLine(out, line, -1, cfg.transpose, 1.0f);
+        emitLine(out, line, -1, Line::Main, cfg.transpose, 1.0f);
         if (cfg.layer == Layer::Octave)
         {
             OnsetList dbl = line;
             for (int i = 0; i < dbl.n; ++i) dbl.a[static_cast<size_t>(i)].note += octaveShift;
-            emitLine(out, dbl, 5, cfg.transpose, kLayerVel);
+            emitLine(out, dbl, 5, Line::Main, cfg.transpose, kLayerVel);
         }
         else if (cfg.layer == Layer::Chord)
         {
@@ -1489,7 +1490,7 @@ void renderBar(const RenderInput& in, BarRender& out)
             collectLine(a, aP, aPP, al, nullptr);
             bool aHeld = false;
             finishLine(al, a, false, false, aHeld);
-            emitLine(out, al, 5, cfg.transpose, kLayerVel);
+            emitLine(out, al, 5, Line::Answer, cfg.transpose, kLayerVel);
         }
     }
 
