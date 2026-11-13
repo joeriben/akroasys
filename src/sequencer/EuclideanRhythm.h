@@ -60,4 +60,26 @@ inline std::array<bool, MAX_STEPS> generate(int steps, int pulses, int rotation)
     return result;
 }
 
+/**
+ * The same Euclidean distribution with the onset FIRST in each group: rotation 0
+ * puts a pulse on step 0 (16/4 → 0 4 8 12, 8/3 → 0 3 6 = tresillo, 16/4
+ * rotated by 2 → 2 6 10 14). generate() above places each onset at the END of
+ * its group (16/4 → 3 7 11 15); the Generative sequencer is voiced on that and
+ * keeps it. The Phrase sequencer needs a downbeat at rotation 0, because its
+ * Bass rule plays the root on the first head (docs/PHRASE_SEQ_CONCEPT.md §3.5).
+ * Rotation shifts right, as in generate().
+ */
+inline std::array<bool, MAX_STEPS> generateOnsetFirst(int steps, int pulses, int rotation)
+{
+    std::array<bool, MAX_STEPS> result{};
+    if (steps <= 0) return result;
+    steps = std::min(steps, MAX_STEPS);
+    pulses = std::max(0, std::min(pulses, steps));
+    rotation = ((rotation % steps) + steps) % steps;
+    for (int i = 0; i < steps; ++i)
+        if ((i * pulses) % steps < pulses)
+            result[static_cast<size_t>((i + rotation) % steps)] = true;
+    return result;
+}
+
 } // namespace EuclideanRhythm

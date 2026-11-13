@@ -566,6 +566,10 @@ target_sources(T5ynth PRIVATE
     src/sequencer/EuclideanRhythm.h
     src/sequencer/ScaleQuantizer.h
     src/sequencer/GenerativeSequencer.h
+    src/sequencer/PhraseModel.cpp
+    src/sequencer/PhraseModel.h
+    src/sequencer/PhraseSequencer.cpp
+    src/sequencer/PhraseSequencer.h
 
     # Inference (Python pipe IPC)
     src/inference/PipeInference.cpp
