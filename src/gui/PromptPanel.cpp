@@ -874,8 +874,12 @@ void PromptPanel::timerCallback()
     // on the switch's word. A flip back within one tick can still be seen with
     // the give-back done and the re-take queued, which reads as "took nothing"
     // for that tick and corrects itself on the next. Two int reads a tick while
-    // a trace is on screen, nothing at all otherwise.
-    if (dcoKnobsKnown_
+    // a trace is on screen, nothing at all otherwise. Not while a session log
+    // replays: the tape's patch has replaced the request, which reads as a
+    // different patch and would close the station for good, yet Stop can give
+    // this very request back with its own generation (stopReplay). The replay
+    // overlay covers the card meanwhile; the station is read once the tape stops.
+    if (dcoKnobsKnown_ && ! processorRef.isReplayActive()
         && (dcoKnobsRev_ != processorRef.getAuthorSettingsRevision()
             || dcoKnobsGen_ != processorRef.getAuthorSettingsGeneration()))
         refreshLcoKnobStation();

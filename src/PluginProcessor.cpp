@@ -1443,7 +1443,16 @@ bool T5ynthProcessor::startReplay(const EventLogReader& reader)
 
     // Play is non-destructive: remember the patch we are about to overwrite, plus the
     // three transport params setStateInformation insists on zeroing.
-    getStateInformation(preReplayPatch_);
+    // ...and the LRO instrument, which that patch holds only in Csound mode. One
+    // read of the mode decides both (see writeState).
+    const bool patchCarriesLro = stateCarriesLro();
+    writeState(preReplayPatch_, patchCarriesLro);
+    if (patchCarriesLro)
+        preReplayLro_.reset();
+    else
+        preReplayLro_ = PreReplayLro { getCsoundOrchestraText(), csoundPrompt_, csoundReading_,
+                                       csoundParamsText_, csoundControls_, authorSettings_,
+                                       authorSettingsGeneration_ };
     preReplaySeqRunning_     = parameters.getRawParameterValue(PID::seqRunning)->load();
     preReplayGenSeqRunning_  = parameters.getRawParameterValue(PID::genSeqRunning)->load();
     preReplayRepromptStance_ = parameters.getRawParameterValue(PID::repromptStance)->load();
@@ -1582,6 +1591,31 @@ void T5ynthProcessor::stopReplay()
         restore(PID::genSeqRunning,   preReplayGenSeqRunning_);
         restore(PID::repromptStance,  preReplayRepromptStance_);
         restore(PID::dcoRepromptStance, preReplayDcoStance_);
+    }
+
+    // The LRO instrument the patch did not carry (see preReplayLro_). After the
+    // patch: restored in a neural mode, it leaves the csound fields as the tape
+    // set them, and this puts the user's back. Knob NAMES only, as
+    // setStateInformation does: the twelve values are parameters and came back
+    // with the patch. The orchestra is requested only where the tape changed
+    // it, so a tape that left it alone does not cost a recompile. The settings
+    // request last, once the restore has forgotten the tape's: in the neural
+    // mode the patch put back it is stored, not taken, exactly as it stood
+    // before Play, and switching back to the LRO takes it. It is the same
+    // request, so it gets its own generation back: the LRO card adopted that
+    // one and would otherwise call it "a different patch".
+    if (preReplayLro_)
+    {
+        const PreReplayLro lro = std::move(*preReplayLro_);
+        preReplayLro_.reset();
+        if (getCsoundOrchestraText() != lro.orchestra)
+            requestCsoundOrchestra(lro.orchestra);
+        setCsoundPrompt(lro.prompt);
+        setCsoundReading(lro.reading);
+        setCsoundParamsText(lro.paramsText);
+        setCsoundControls(lro.controls, /*applyValues=*/false);
+        setAuthorSettings(lro.authorSettings);
+        authorSettingsGeneration_ = lro.authorSettingsGeneration;
     }
 }
 
@@ -9792,15 +9826,19 @@ void T5ynthProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     // Mid-replay, the live APVTS holds the TAPE's patch, not the user's — a host
     // saving its project (or an auto-save) would silently persist the tape over
-    // unsaved work. Hand back the patch we stashed at startReplay() instead. Safe
-    // against recursion: startReplay() takes its snapshot before replayModeActive_
-    // is set, so this branch cannot fire while filling preReplayPatch_ itself.
+    // unsaved work. Hand back the patch we stashed at startReplay() instead.
+    // startReplay() fills preReplayPatch_ through writeState, past this branch.
     if (isReplayActive() && preReplayPatch_.getSize() > 0)
     {
         destData = preReplayPatch_;
         return;
     }
 
+    writeState(destData, stateCarriesLro());
+}
+
+void T5ynthProcessor::writeState(juce::MemoryBlock& destData, bool withLro)
+{
     auto state = parameters.copyState();
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     xml->setAttribute("midiOutputDeviceId", midiOutputDeviceId_);
@@ -9813,7 +9851,7 @@ void T5ynthProcessor::getStateInformation(juce::MemoryBlock& destData)
     // orchestra text. Read pending, not the active engine's, for the same reason
     // exportJsonPreset does (see its fuller comment on the csound_orchestra
     // property) -- absence (non-Csound save) keeps the old-session XML shape.
-    if (static_cast<int>(paramCache.engineMode->load()) == static_cast<int>(EngineMode::Csound))
+    if (withLro)
     {
         juce::String pendingOrchestraText;
         {
@@ -9831,6 +9869,11 @@ void T5ynthProcessor::getStateInformation(juce::MemoryBlock& destData)
         xml->setAttribute("csoundControls", juce::JSON::toString(csoundControls_.toVar(), true));
     }
     copyXmlToBinary(*xml, destData);
+}
+
+bool T5ynthProcessor::stateCarriesLro() const
+{
+    return static_cast<int>(paramCache.engineMode->load()) == static_cast<int>(EngineMode::Csound);
 }
 
 void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
@@ -10692,7 +10735,7 @@ void T5ynthProcessor::dropAuthorSettings()
     authorSettings_ = juce::var();
     authorAppliedLines_.clear();
     ++authorSettingsRevision_;
-    ++authorSettingsGeneration_;
+    issueAuthorSettingsGeneration();
 }
 
 void T5ynthProcessor::reconcileAuthorSettings()
@@ -10721,7 +10764,7 @@ void T5ynthProcessor::setAuthorSettings(const juce::var& settings)
     // the switch on put THAT instrument's filter and envelopes on the patch.
     releaseAuthorSettings();
     authorSettings_ = settings;
-    ++authorSettingsGeneration_;   // a different instrument is asking now
+    issueAuthorSettingsGeneration();   // a different instrument is asking now
 
     // Only the TAKING is gated. A sound authored while the switch is off is
     // written complete — its settings are made, they simply wait — and the
@@ -10806,7 +10849,7 @@ void T5ynthProcessor::forgetAuthorSettings()
     // nothing left able to return them.
     releaseAuthorSettings();
     authorSettings_ = juce::var();
-    ++authorSettingsGeneration_;   // a different patch: this request is nobody's now
+    issueAuthorSettingsGeneration();   // a different patch: this request is nobody's now
 }
 
 juce::StringArray T5ynthProcessor::applyAuthorSettings(const juce::var& settings)
@@ -10836,7 +10879,7 @@ juce::StringArray T5ynthProcessor::applyAuthorSettings(const juce::var& settings
         // itself and never reach this, but the guard exists for the other case,
         // and a replacement that left the generation alone is exactly how a
         // panel comes to report one sound's answer under another's card.
-        ++authorSettingsGeneration_;
+        issueAuthorSettingsGeneration();
     }
 
     auto* arr = settings.getArray();

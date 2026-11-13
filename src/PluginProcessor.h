@@ -6,6 +6,7 @@
 #include <memory>
 #include <limits>
 #include <thread>
+#include <optional>
 #include <unordered_map>
 #include "dsp/VoiceManager.h"
 #include "dsp/VoiceEvent.h"
@@ -598,11 +599,14 @@ public:
      *  hop later, so its value is true before the knobs are actually taken. */
     int getAuthorSettingsRevision() const { return authorSettingsRevision_; }
 
-    /** Bumped only when the REQUEST itself is replaced or dropped — a new
+    /** Changes only when the REQUEST itself is replaced or dropped — a new
      *  authoring, a preset, a restored session. A take and a give-back leave it
      *  alone. It is what lets a panel tell "my sound's settings, wherever they
      *  currently stand" from "a different patch's", which the revision above
-     *  cannot: both look like a change there. */
+     *  cannot: both look like a change there. An identity, not a count: each
+     *  new request gets a value never handed out before, and a request that
+     *  Stop Replay gives back returns with its own (stopReplay), so a panel
+     *  that held it before Play knows it again. Compare with != only. */
     int getAuthorSettingsGeneration() const { return authorSettingsGeneration_; }
 
     /** Give back every knob the last authoring borrowed and still holds — what
@@ -956,6 +960,12 @@ private:
     juce::StringArray authorAppliedLines_;
     int authorSettingsRevision_ = 0;
     int authorSettingsGeneration_ = 0;
+    // Every value authorSettingsGeneration_ has been given so far is at most
+    // this. A new request draws the next one, so no value ever names two
+    // requests, even after an old one has been given back.
+    int authorSettingsGenerationsIssued_ = 0;
+    void issueAuthorSettingsGeneration()
+    { authorSettingsGeneration_ = ++authorSettingsGenerationsIssued_; }
     // May the author's settings stand on the patch right now: the player allows
     // it AND the authored orchestra is the sounding oscillator. Both read live,
     // in ONE place (authorKnobStand), so the take and the report cannot disagree
@@ -1922,8 +1932,39 @@ private:
     // Params only. getStateInformation carries neither the generated audio buffer nor
     // the last seed/embeddings, so after a Stop the SOUND is still the tape's last
     // generation and the seed/DimensionExplorer readouts still show the tape's.
-    // Regenerate to get yours back.
+    // Regenerate to get yours back. The LRO instrument it carries only in Csound
+    // mode (stateCarriesLro); in any other mode preReplayLro_ below holds it.
     juce::MemoryBlock preReplayPatch_;
+
+    // The user's LRO instrument, where preReplayPatch_ cannot carry it: taken in
+    // a neural mode, the patch has no csound* attributes, and a tape recorded in
+    // Csound mode then replaces orchestra, prompt, reading, params text and knob
+    // names with its own, which restoring the patch leaves standing (#21). With
+    // them goes the author's settings request (authorSettings_), which every
+    // state restore forgets and which, in a neural mode, is only waiting to be
+    // taken when the player switches back to the LRO — the same six parts
+    // playCsoundCacheEntry installs as one instrument. Held only in that case,
+    // and put back on stopReplay() after the patch. Message thread only; empty
+    // when no replay is running.
+    struct PreReplayLro
+    {
+        juce::String orchestra, prompt, reading, paramsText;
+        LroControls  controls;
+        juce::var    authorSettings;
+        int          authorSettingsGeneration = 0;
+    };
+    std::optional<PreReplayLro> preReplayLro_;
+
+    // Whether getStateInformation writes the LRO instrument (the csound*
+    // attributes) right now: only in Csound mode, the rule exportJsonPreset
+    // keeps too.
+    bool stateCarriesLro() const;
+
+    // getStateInformation's writing half, with the LRO decision passed in.
+    // startReplay reads stateCarriesLro() ONCE and gives the same answer to this
+    // and to preReplayLro_, so an engine-mode change landing in between (host
+    // automation, any thread) cannot leave the instrument in neither.
+    void writeState (juce::MemoryBlock& destData, bool withLro);
 
     // setStateInformation force-zeroes these three on every restore ("no acoustic
     // surprise on session reopen"). That rule is wrong for Stop Replay, which the
