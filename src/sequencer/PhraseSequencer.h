@@ -215,7 +215,9 @@ private:
     void enterBar(int newBar, bool continuous);
     void renderCurrent();
     void releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset);
-    void emitOn(const PhraseModel::Event& e, std::vector<VoiceEvent>& out, int offset);
+    /** Another event of the same strand starts at render.events[index]'s onset. */
+    bool sharesOnset(int index) const;
+    void emitOn(int index, std::vector<VoiceEvent>& out, int offset);
     void emitOff(int note, int strand, std::vector<VoiceEvent>& out, int offset);
     void flushPendingFor(int note, int strand, std::vector<VoiceEvent>& out, int offset);
     void addPending(double q, int note, int strand, std::vector<VoiceEvent>& out, int offset);

@@ -140,6 +140,22 @@ struct VoiceSim
     }
 };
 
+/** Glide note-ons that share their tick and strand with another note-on. The
+ *  processor's sort keeps no order among note-ons of one tick, so such a glide
+ *  continues the held voice with whichever of them it dispatches first. */
+int sharedGlides(const std::vector<VoiceEvent>& out)
+{
+    int n = 0;
+    for (const auto& g : out)
+    {
+        if (g.type != VoiceEvent::Type::NoteOn || g.artic != VoiceEvent::Articulation::Glide) continue;
+        for (const auto& o : out)
+            if (&o != &g && o.type == VoiceEvent::Type::NoteOn && o.sampleOffset == g.sampleOffset
+                && o.strandId == g.strandId) { ++n; break; }
+    }
+    return n;
+}
+
 /** Called before every block with the block's start position. */
 using Hook = std::function<void(T5ynthPhraseSequencer&, double)>;
 
@@ -570,7 +586,7 @@ int main(int argc, char** argv)
         out.reserve(2048);
         const double dq = kBlock * kBpm / (60.0 * kSr);
         double q = 0.0;
-        int changes = 0, jumps = 0, maxEvents = 0;
+        int changes = 0, jumps = 0, maxEvents = 0, shared = 0;
         for (int blk = 0; blk < 40000; ++blk)
         {
             if (rnd(6) == 0)
@@ -596,6 +612,7 @@ int main(int argc, char** argv)
             out.clear();
             seq.processBlock(kBlock, kBpm, true, q, out);
             maxEvents = std::max(maxEvents, static_cast<int>(out.size()));
+            shared += sharedGlides(out);
             std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& a, const VoiceEvent& b) {
                 if (a.sampleOffset != b.sampleOffset) return a.sampleOffset < b.sampleOffset;
                 return a.type == VoiceEvent::Type::NoteOff && b.type == VoiceEvent::Type::NoteOn;
@@ -613,6 +630,7 @@ int main(int argc, char** argv)
               "live: no hanging voice, no orphan note-off (left " + std::to_string(sim.live.size())
                   + ", orphans " + std::to_string(sim.orphanOffs) + ")");
         check(sim.badGlides == 0, "live: every Glide continues a held note (" + std::to_string(sim.badGlides) + " bad)");
+        check(shared == 0, "live: no Glide shares its tick with another note-on of its strand (" + std::to_string(shared) + ")");
         check(before <= 16, "live: never more than 16 notes sounding at the end (" + std::to_string(before) + ")");
     }
 
@@ -771,6 +789,87 @@ int main(int argc, char** argv)
         check(seq.getStoredMotif().seed == 4242, "keep before the motif was heard: the stored motif stays");
         seq.undo();
         check(seq.getStoredMotif().seed == m0.seed, "keep before the motif was heard: adds no undo level");
+    }
+
+    std::printf("\n== 12. A held slide note meets a Stab chord (Part switched mid-line)\n");
+    {
+        // Lead with slides, then Part turns to Stab inside a bar. A held note
+        // must end at the chord's onset rather than glide into one of its
+        // voices: dispatched here with the note-ons of one tick in reverse
+        // emit order, which the processor's sort is free to do.
+        int shared = 0, endedAtChord = 0, left = 0, orphans = 0, bad = 0;
+        for (int seed = 1; seed <= 64; ++seed)
+        {
+            Config c = base();
+            c.part = Part::Lead;
+            c.harm = Harm::Chords;
+            c.chordDegrees = { 1, 6, 3, 7 };
+            c.stepsPerBar = 8; c.pulses = 6;
+            c.slide = 1.0f;
+            T5ynthPhraseSequencer seq;
+            seq.prepare(kSr);
+            seq.setConfig(c);
+            seq.dice(c, static_cast<std::uint32_t>(seed));
+            seq.start();
+            VoiceSim sim;
+            std::map<std::pair<int, int>, double> startedAt;   // (note, strand) → q of its onset
+            std::vector<VoiceEvent> out;
+            out.reserve(2048);
+            const double dq = kBlock * kBpm / (60.0 * kSr);
+            const double switchQ = 2 * B + (seed % 16) * 0.25 + 0.01;
+            bool switched = false;
+            for (double q = 0.0; q < 6 * B; q += dq)
+            {
+                if (!switched && q >= switchQ) { c.part = Part::Stab; seq.setConfig(c); switched = true; }
+                out.clear();
+                seq.processBlock(kBlock, kBpm, true, q, out);
+                shared += sharedGlides(out);
+                std::reverse(out.begin(), out.end());
+                std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& a, const VoiceEvent& b) {
+                    if (a.sampleOffset != b.sampleOffset) return a.sampleOffset < b.sampleOffset;
+                    return a.type == VoiceEvent::Type::NoteOff && b.type == VoiceEvent::Type::NoteOn;
+                });
+                for (const auto& e : out)
+                {
+                    const double eq = q + e.sampleOffset * kOneSampleQ;
+                    if (e.type == VoiceEvent::Type::NoteOff)
+                    {
+                        // A lead note from before the switch, ended on the tick of a chord onset.
+                        auto it = startedAt.find({ e.note, e.strandId });
+                        int chordOns = 0;
+                        for (const auto& o : out)
+                            chordOns += o.type == VoiceEvent::Type::NoteOn && o.strandId == -1
+                                        && o.sampleOffset == e.sampleOffset;
+                        if (switched && e.strandId == -1 && it != startedAt.end() && it->second < switchQ
+                            && chordOns > 1) ++endedAtChord;
+                        sim.off(e);
+                    }
+                    else
+                    {
+                        // A glide continues a voice: it keeps that voice's onset.
+                        double from = eq;
+                        if (e.artic == VoiceEvent::Articulation::Glide)
+                            for (auto it = sim.live.rbegin(); it != sim.live.rend(); ++it)
+                                if (it->second == e.strandId) { from = startedAt[*it]; break; }
+                        startedAt[{ e.note, e.strandId }] = from;
+                        sim.on(e);
+                    }
+                }
+            }
+            out.clear();
+            seq.allNotesOff(out, 0);
+            for (const auto& e : out) sim.off(e);
+            left += static_cast<int>(sim.live.size());
+            orphans += sim.orphanOffs;
+            bad += sim.badGlides;
+        }
+        std::printf("  64 seeds: %d lead notes ended at a chord onset\n", endedAtChord);
+        check(endedAtChord > 0, "held into stab: the case occurs (" + std::to_string(endedAtChord) + " times)");
+        check(shared == 0, "held into stab: no Glide shares its tick with another note-on of its strand ("
+                               + std::to_string(shared) + ")");
+        check(left == 0 && orphans == 0 && bad == 0,
+              "held into stab: same-tick note-ons reversed, no hanging voice, no orphan off, no bad glide (left "
+                  + std::to_string(left) + ", orphans " + std::to_string(orphans) + ", bad " + std::to_string(bad) + ")");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

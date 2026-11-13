@@ -222,8 +222,20 @@ void T5ynthPhraseSequencer::addPending(double q, int note, int strand, std::vect
     pending[static_cast<size_t>(pendingCount++)] = { q, note, strand };
 }
 
-void T5ynthPhraseSequencer::emitOn(const Event& e, std::vector<VoiceEvent>& out, int offset)
+bool T5ynthPhraseSequencer::sharesOnset(int index) const
 {
+    // The events are sorted by onset, so the voices of one onset are neighbours.
+    const Event& e = render.events[static_cast<size_t>(index)];
+    for (int i = index - 1; i >= 0 && render.events[static_cast<size_t>(i)].onQ == e.onQ; --i)
+        if (render.events[static_cast<size_t>(i)].strand == e.strand) return true;
+    for (int i = index + 1; i < render.count && render.events[static_cast<size_t>(i)].onQ == e.onQ; ++i)
+        if (render.events[static_cast<size_t>(i)].strand == e.strand) return true;
+    return false;
+}
+
+void T5ynthPhraseSequencer::emitOn(int index, std::vector<VoiceEvent>& out, int offset)
+{
+    const Event& e = render.events[static_cast<size_t>(index)];
     const int slot = slotOf(e.strand);
     if (slot < 0 || slot >= kStrandSlots) return;
     flushPendingFor(e.note, e.strand, out, offset);
@@ -235,19 +247,27 @@ void T5ynthPhraseSequencer::emitOn(const Event& e, std::vector<VoiceEvent>& out,
     v.velocity = std::clamp(e.vel, 0.0f, 1.0f);
     v.strandId = e.strand;
     v.pan = 0.0f;   // centre: panning is the musician's mix decision (§3.10)
-    // A held note is always continued by its strand's next onset (TB-303
-    // slide, as the step sequencer): that onset glides the live voice and
-    // its later note-off names the new note.
+    // A held note is continued by its strand's next onset (TB-303 slide, as
+    // the step sequencer): that onset glides the live voice and its later
+    // note-off names the new note. An onset of several voices on the strand
+    // (Stab's chord after a Part switch from a sliding line) has no one voice
+    // to continue: the held note ends there and the chord starts fresh. The
+    // processor's sort keeps no order among note-ons of one tick, and the
+    // voice manager glides the newest voice of the source, so a chord voice
+    // started on the same tick could take the glide and leave the held voice
+    // without a note-off.
     const int held = heldNote[static_cast<size_t>(slot)];
     heldNote[static_cast<size_t>(slot)] = -1;
+    const bool glide = held >= 0 && !sharesOnset(index);
+    if (held >= 0 && !glide) emitOff(held, e.strand, out, offset);
     if (out.size() >= out.capacity())
     {
         // No room: the onset is dropped rather than allocate on the audio
         // thread. A voice it would have continued ends here instead of hanging.
-        if (held >= 0) emitOff(held, e.strand, out, offset);
+        if (glide) emitOff(held, e.strand, out, offset);
         return;
     }
-    v.artic = held >= 0 ? VoiceEvent::Articulation::Glide : VoiceEvent::Articulation::Normal;
+    v.artic = glide ? VoiceEvent::Articulation::Glide : VoiceEvent::Articulation::Normal;
     out.push_back(v);
 
     if (e.held) heldNote[static_cast<size_t>(slot)] = e.note;
@@ -535,7 +555,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             releaseUnusedHeld(nextEvent, out, offset);
             continue;
         }
-        emitOn(render.events[static_cast<size_t>(nextEvent)], out, offset);
+        emitOn(nextEvent, out, offset);
         ++nextEvent;
     }
 
