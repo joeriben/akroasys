@@ -785,6 +785,11 @@ public:
     // JSON preset import/export (compatible with Vue reference format)
     juce::String exportJsonPreset() const;
     bool importJsonPreset(const juce::String& json);
+    /** Init's parameters: every parameter to its layout default, as a load
+     *  (SeqTransferHold). Init sets the engine to Step, and that switch carries
+     *  no pattern over: from Gen or Phrase, the step grid stays as Init from
+     *  Step leaves it. Message thread. */
+    void resetParametersToDefaults();
 
     // Sampler/oscillator access for preset import and UI queries
     SamplePlayer& getSampler() { return masterSampler; }

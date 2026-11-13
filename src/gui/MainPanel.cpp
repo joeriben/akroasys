@@ -4857,9 +4857,7 @@ void MainPanel::loadDefaultPreset()
 
 void MainPanel::loadInitPreset()
 {
-    for (auto* param : processorRef.getParameters())
-        if (param != nullptr)
-            param->setValueNotifyingHost(param->getDefaultValue());
+    processorRef.resetParametersToDefaults();
 
     // Init is a clean MODERN preset: reset the modality epoch to current so a sound
     // built right after loading a legacy preset routes under the v2.5.0 behaviour.

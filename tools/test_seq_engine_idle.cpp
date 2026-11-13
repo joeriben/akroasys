@@ -19,6 +19,8 @@
 // did not copy the pattern into the step grid). Consuming it must not wake
 // the block: a load made while silent that leaves the engine as it is keeps
 // the instrument idle (docs/PERFORMANCE_GUIDE.md, the audioIdle gate).
+// Init (resetParametersToDefaults) is such a load: from Gen or Phrase it sets
+// the engine to Step and leaves the step grid as Init from Step leaves it.
 //
 // Each case runs the same switch awake and in deep idle; the awake run is the
 // control, and `audioIdle` is asserted before an idle switch, so an idle case
@@ -30,6 +32,7 @@
 #include "PluginProcessor.h"
 #include "dsp/BlockParams.h"
 
+#include <array>
 #include <cstdio>
 #include <vector>
 
@@ -206,6 +209,82 @@ bool importedSwitchCarriesNothing(bool idle)
     std::printf("    engine %d, gen steps %d (preset 11, step grid 8)\n", engine, genSteps);
     return engine == SeqEngine::Gen && genSteps == 11;
 }
+/** `from` (Gen or Phrase) plays for a moment and stops, so it has a pattern
+ *  to carry (the phrase view stays filled after a stop); then a step grid
+ *  that differs from that pattern, then Init's parameters
+ *  (resetParametersToDefaults), in deep idle or awake. Init sets the engine
+ *  to Step. Returns whether the step grid kept its notes, i.e. that switch
+ *  carried nothing over; false also when the case could not show a copy. */
+bool initCarriesNothing(int from, bool idle)
+{
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    setPlain(proc, PID::seqEngine, static_cast<float>(from));
+    blocks(proc, 2);
+    setPlain(proc, PID::seqRunning, 1.0f);
+    blocks(proc, 20);
+    setPlain(proc, PID::seqRunning, 0.0f);
+    blocks(proc, 2);
+    {
+        const juce::ScopedLock sl(proc.getCallbackLock());
+        auto& st = proc.getStepSequencer();
+        st.setNumSteps(8);
+        for (int i = 0; i < 8; ++i) { st.setStepNote(i, 50); st.setStepEnabled(i, true); }
+    }
+    setPlain(proc, PID::seqSteps, 8.0f);
+    blocks(proc, 2);
+    if (idle)
+    {
+        blocks(proc, kIdleBlocks);
+        if (! proc.audioIdle.load())
+        {
+            std::printf("    did not reach deep idle before Init\n");
+            return false;
+        }
+    }
+
+    // What a switch to Step would carry: Gen's pattern, or the bar the phrase
+    // view shows; -1 for a rest.
+    std::vector<int> carried;
+    if (from == SeqEngine::Gen)
+    {
+        const auto& gs = proc.getGenerativeSequencer();
+        for (int i = 0; i < gs.numStepsForGui.load(); ++i)
+        {
+            const int note = gs.notePatternForGui[static_cast<size_t>(i)].load();
+            carried.push_back(note > 0 ? note : -1);
+        }
+    }
+    else
+    {
+        std::array<PhraseModel::StepView, PhraseModel::kMaxBarSteps> view {};
+        const int n = proc.getPhraseSequencer().readView(view);
+        for (int i = 0; i < n; ++i)
+            carried.push_back(view[static_cast<size_t>(i)].note);
+    }
+    bool differs = false;
+    for (size_t i = 0; i < carried.size() && i < 8; ++i)
+        differs = differs || carried[i] != 50;
+    if (! differs)
+    {
+        std::printf("    the engine's pattern cannot show a copy (%d steps)\n",
+                    static_cast<int>(carried.size()));
+        return false;
+    }
+
+    proc.resetParametersToDefaults();
+    blocks(proc, 3);
+    const int engine = static_cast<int>(
+        proc.getValueTreeState().getRawParameterValue(PID::seqEngine)->load());
+    auto& st = proc.getStepSequencer();
+    bool kept = engine == SeqEngine::Step;
+    for (int i = 0; i < 8; ++i)
+        kept = kept && st.getStep(i).enabled && st.getStep(i).note == 50;
+    std::printf("    engine %d, step grid kept its notes: %s\n", engine, kept ? "yes" : "no");
+    return kept;
+}
+
 /** A preset import made in deep idle that leaves the engine as it is.
  *  Returns whether the block is still idle after it; false also when the
  *  case did not reach idle before the import. */
@@ -260,6 +339,15 @@ int main()
           importedSwitchCarriesNothing(true));
     check("import in deep idle, engine unchanged: the block stays idle",
           idleImportStaysIdle());
+    const int gen = SeqEngine::Gen;
+    check("Init from Gen, awake: the step grid keeps its notes",
+          initCarriesNothing(gen, false));
+    check("Init from Gen, deep idle: the step grid keeps its notes",
+          initCarriesNothing(gen, true));
+    check("Init from Phrase, awake: the step grid keeps its notes",
+          initCarriesNothing(phrase, false));
+    check("Init from Phrase, deep idle: the step grid keeps its notes",
+          initCarriesNothing(phrase, true));
 
     std::printf("failures=%d\n", failures);
     return failures == 0 ? 0 : 1;

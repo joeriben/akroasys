@@ -12140,6 +12140,16 @@ juce::String T5ynthProcessor::exportJsonPreset() const
     return juce::JSON::toString(root.get(), true);
 }
 
+void T5ynthProcessor::resetParametersToDefaults()
+{
+    // Init is a load like a preset import: the engine switch it causes is not
+    // the user's, so it carries nothing over.
+    SeqTransferHold seqTransferHold(*this);
+    for (auto* param : getParameters())
+        if (param != nullptr)
+            param->setValueNotifyingHost(param->getDefaultValue());
+}
+
 bool T5ynthProcessor::importJsonPreset(const juce::String& json)
 {
     // Suppresses the per-param ParamEvent flood every setParam() call below would
