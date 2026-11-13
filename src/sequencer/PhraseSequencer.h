@@ -81,7 +81,8 @@ public:
     void dice(const PhraseModel::Config& cfg, std::uint32_t newSeed);
     /** Stores the motif heard in the phrase now playing (or last played) as
      *  the new motif, so playback goes on unchanged; after a stop it starts
-     *  from the phrase where playback resumes. A phrase before the stored
+     *  from the phrase where playback resumes, entering it as heard only if
+     *  that is the phrase it was heard in. A phrase before the stored
      *  motif's origin played the motif itself: Keep keeps that origin,
      *  running or stopped. Does nothing while the stored motif has not been
      *  heard yet: it is then itself what would be kept. */
@@ -127,7 +128,7 @@ private:
         /** The sequence number; even when no write is in progress. */
         std::uint32_t sequence() const { return seq.load(std::memory_order_relaxed); }
     private:
-        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 13;
+        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 14;
         std::atomic<std::uint32_t> seq { 0 };
         std::array<std::atomic<std::uint32_t>, kWords> words;
     };

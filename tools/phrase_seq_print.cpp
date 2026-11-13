@@ -949,6 +949,54 @@ int main(int argc, char** argv)
                 check(t.differ == 0, "keep in a phrase's first bar, " + what + " (" + std::to_string(t.differ) + " of "
                                          + std::to_string(runs) + " differ) " + t.why);
             };
+            // Stop and Keep in phrase 2, playback resumes in phrase 3. The
+            // kept entry preceded phrase 2; phrase 3 enters from the phrase
+            // before, as the same motif without the entry does. With a chord
+            // a bar, the loop of four puts both entries (bars 7–8, 11–12) on
+            // the same chords, so the frame matches and only the phrase the
+            // entry names tells them apart.
+            {
+                Tally elsewhere, claimed;
+                int resumeRuns = 0;
+                bool sameFrame = true;
+                const Act stopKeepStay = [&](T5ynthPhraseSequencer& s) { s.stop(); s.keep(); kept = s.getStoredMotif(); };
+                for (Harm h : { Harm::Pedal, Harm::Chords })
+                    for (std::uint32_t seed : { 2293u, 777u, 4242u, 31337u, 182150u, 15851u })
+                    {
+                        Config hc = cc;
+                        hc.harm = h;
+                        sameFrame = sameFrame && entryFrameOf(hc, 12) == entryFrameOf(hc, 8);
+                        const Motif at1 = generateMotif(seed, 1, hc);
+                        auto resumeIn3 = [&](const Motif& m) {
+                            return play(hc, 12 * B, 16 * B, 4, 4, {}, 0,
+                                        acts({ { 0.0, [m](T5ynthPhraseSequencer& s) { s.setStoredMotif(m); } } }));
+                        };
+                        for (double off = 0.0; off < 2 * B; off += 0.5)
+                        {
+                            ++resumeRuns;
+                            play(hc, 0.0, 8 * B + off + 0.01, 4, 4, {}, 0,
+                                 acts({ { 0.0, [at1](T5ynthPhraseSequencer& s) { s.setStoredMotif(at1); } },
+                                        { 8 * B + off, stopKeepStay } }));
+                            const Motif stopped = kept;
+                            Motif noEntry = stopped, forced = stopped;
+                            noEntry.entryKept = false;
+                            forced.entryPhrase = 3;
+                            const Run without = resumeIn3(noEntry);
+                            tally(elsewhere, without, resumeIn3(stopped), 12, 16, 12 * B);
+                            // The same entry claimed for phrase 3 does apply
+                            // there: else the check above proves nothing.
+                            tally(claimed, without, resumeIn3(forced), 12, 16, 12 * B);
+                        }
+                    }
+                check(sameFrame, "stop and keep in phrase 2: phrases 2 and 3 enter in the same frame");
+                check(elsewhere.differ == 0,
+                      "stop and keep in phrase 2, resume in phrase 3: it enters as without the kept entry ("
+                          + std::to_string(elsewhere.differ) + " of " + std::to_string(resumeRuns) + " differ) "
+                          + elsewhere.why);
+                check(claimed.differ > 0,
+                      "stop and keep in phrase 2: the entry claimed for phrase 3 would change it ("
+                          + std::to_string(claimed.differ) + " of " + std::to_string(resumeRuns) + " differ)");
+            }
             report(plain, "the rest of the bar and the phrase play on unchanged");
             report(gate, "then Gate later in the bar: as with Gate alone");
             report(edit, "then a chord-loop edit away from the entry's chords: as with the edit alone");

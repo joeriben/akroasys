@@ -756,6 +756,7 @@ Motif fitMotif(const Motif& stored, const Config& cfg)
     m.entryNote = stored.entryNote;
     m.entryPrevNote = stored.entryPrevNote;
     m.entryFrame = stored.entryFrame;
+    m.entryPhrase = stored.entryPhrase;
     setRhythm(m, sh.len, sh.spb, sh.pulses, sh.rotation);
     assignFunctions(m, cfg, &stored);
     computeAccents(m);
@@ -1501,7 +1502,8 @@ void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
 {
     const int N = phraseBarsOf(cfg);
     if (motif.entryKept && motif.entryFrame == entryFrameOf(cfg, bar)
-        && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin)
+        && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin
+        && motif.entryPhrase == motif.origin)
     {
         p = motif.entryNote;
         pp = motif.entryPrevNote;

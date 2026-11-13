@@ -79,13 +79,15 @@ struct Motif
      *  the motif itself, so the origin phrase's first bar would otherwise
      *  enter from the motif's own last bar rather than from what preceded it
      *  when it was heard. Off: it enters from the phrase before (entryNotes).
-     *  The notes are absolute, so they hold only in the frame they were heard
-     *  in (entryFrame); in another one the phrase before leads in, as for a
+     *  The notes are what preceded one phrase (entryPhrase) in one frame
+     *  (entryFrame); they apply only while that phrase is the origin and the
+     *  config has that frame. Otherwise the phrase before leads in, as for a
      *  motif without a kept entry. */
     bool          entryKept     = false;
     int           entryNote     = -1;   // −1: no note, as entryNotes reports it
     int           entryPrevNote = -1;
     std::uint32_t entryFrame    = 0;    // entryFrameOf() of the config and bar they were heard in
+    int           entryPhrase   = 0;    // the phrase whose first bar entered from them
 
     int numSteps() const { return len * stepsPerBar; }
 };
@@ -333,8 +335,9 @@ std::uint32_t entryFrameOf(const Config& cfg, int bar);
 /** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
  *  of bar − 1 rendered on its own. Keeps continuous play and a locate equal.
  *  `motif` is the motif of bar's phrase: the first bar of its origin phrase
- *  enters from the notes kept with it when it has them (Motif::entryKept) and
- *  `cfg` is the frame they were heard in (Motif::entryFrame). */
+ *  enters from the notes kept with it when it has them (Motif::entryKept),
+ *  they preceded that phrase (Motif::entryPhrase) and `cfg` is the frame
+ *  they were heard in (Motif::entryFrame). */
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp);
 

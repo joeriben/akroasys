@@ -351,6 +351,7 @@ void T5ynthPhraseSequencer::publishHeard()
     h.entryNote = heardEntryNote;
     h.entryPrevNote = heardEntryPrevNote;
     h.entryFrame = heardEntryFrame;
+    h.entryPhrase = evoPhrase;
     heard.write(h, toAudioSeen, static_cast<std::uint32_t>(evoPhrase));
 }
 
@@ -681,6 +682,7 @@ void T5ynthPhraseSequencer::MotifChannel::write(const Motif& m, std::uint32_t ta
     put(10, static_cast<std::uint32_t>(m.entryNote));
     put(11, static_cast<std::uint32_t>(m.entryPrevNote));
     put(12, m.entryFrame);
+    put(13, static_cast<std::uint32_t>(m.entryPhrase));
     seq.store(s + 2, std::memory_order_release);
 }
 
@@ -710,6 +712,7 @@ bool T5ynthPhraseSequencer::MotifChannel::tryRead(Motif& m, std::uint32_t& tagA,
     m.entryNote     = std::clamp(static_cast<int>(get(10)), -1, 127);
     m.entryPrevNote = std::clamp(static_cast<int>(get(11)), -1, 127);
     m.entryFrame    = get(12);
+    m.entryPhrase   = static_cast<int>(get(13));
     seqRead = s1;
     return true;
 }
@@ -798,8 +801,10 @@ void T5ynthPhraseSequencer::keep()
     // resumes.
     // The heard motif carries the notes its phrase was entered from: kept
     // with it, the origin phrase enters as it was heard, although the phrase
-    // before it now plays the kept motif itself. Before the origin the motif
-    // stays as stored, its own entry included.
+    // before it now plays the kept motif itself. The entry names that phrase,
+    // so after a stop it applies only when playback resumes there; anywhere
+    // else the phrase before leads in. Before the origin the motif stays as
+    // stored, its own entry included.
     if (phrase >= m.origin)
     {
         m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry
@@ -812,6 +817,7 @@ void T5ynthPhraseSequencer::keep()
         m.entryNote = stored.entryNote;
         m.entryPrevNote = stored.entryPrevNote;
         m.entryFrame = stored.entryFrame;
+        m.entryPhrase = stored.entryPhrase;
     }
     adoptResolvedOrigin();
     undoMotif = stored;
