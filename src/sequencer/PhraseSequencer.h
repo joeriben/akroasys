@@ -69,7 +69,8 @@ public:
     // ── Message thread: the stored motif ─────────────────────────────────
     /** Publishes `m` as the stored motif (no undo entry; preset / state load). */
     void setStoredMotif(const PhraseModel::Motif& m);
-    /** The stored motif; its origin is kOriginAtNextEntry until it was heard. */
+    /** The stored motif; its origin is kOriginAtNextEntry until it was heard.
+     *  Callable from any thread (state save). */
     PhraseModel::Motif getStoredMotif() const;
 
     /** New seed, new motif from it. Origin: the phrase now playing, or the
@@ -136,8 +137,9 @@ private:
      *  = the toAudio sequence it was derived from, tag B = its phrase. */
     MotifChannel heard;
     void publishHeard();
-    /** Message thread: the heard motif, if it was derived from the stored one. */
-    bool readHeard(PhraseModel::Motif& m, int& phrase) const;
+    /** The heard motif, if it was derived from the stored motif of toAudio
+     *  sequence `storedSeq`. */
+    bool readHeard(PhraseModel::Motif& m, int& phrase, std::uint32_t storedSeq) const;
 
     /** The phrase the motif heard now belongs to (audio thread writes);
      *  kOriginAtNextEntry while stopped. */

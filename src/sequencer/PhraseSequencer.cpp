@@ -669,7 +669,7 @@ void T5ynthPhraseSequencer::publish(const Motif& m, bool barStands)
     toAudio.write(m, barStands ? 1u : 0u, 0);
 }
 
-bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase) const
+bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase, std::uint32_t storedSeq) const
 {
     std::uint32_t source = 0, ph = 0, unusedSeq = 0;
     // The audio thread writes this channel only around a refit or a bar
@@ -677,7 +677,7 @@ bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase) const
     // succeeds on a retry.
     while (!heard.tryRead(m, source, ph, unusedSeq))
         std::this_thread::yield();
-    if (source != toAudio.sequence()) return false;   // from an earlier stored motif
+    if (source != storedSeq) return false;   // from another stored motif
     phrase = static_cast<int>(ph);
     return true;
 }
@@ -689,7 +689,7 @@ int T5ynthPhraseSequencer::resolvedStoredOrigin() const
     if (stored.origin != kOriginAtNextEntry) return stored.origin;
     Motif h;
     int phrase = 0;
-    return readHeard(h, phrase) ? h.origin : kOriginAtNextEntry;
+    return readHeard(h, phrase, toAudio.sequence()) ? h.origin : kOriginAtNextEntry;
 }
 
 void T5ynthPhraseSequencer::adoptResolvedOrigin()
@@ -699,8 +699,19 @@ void T5ynthPhraseSequencer::adoptResolvedOrigin()
 
 Motif T5ynthPhraseSequencer::getStoredMotif() const
 {
-    Motif m = stored;
-    m.origin = resolvedStoredOrigin();
+    // Any thread: a host may save its state off the message thread, so this
+    // reads the published copy rather than `stored`, and resolves the origin
+    // against the very publication it read.
+    Motif m;
+    std::uint32_t unusedA = 0, unusedB = 0, seqRead = 0;
+    while (!toAudio.tryRead(m, unusedA, unusedB, seqRead))
+        std::this_thread::yield();
+    if (m.origin == kOriginAtNextEntry)
+    {
+        Motif h;
+        int phrase = 0;
+        if (readHeard(h, phrase, seqRead)) m.origin = h.origin;
+    }
     return m;
 }
 
@@ -724,7 +735,7 @@ void T5ynthPhraseSequencer::keep()
 {
     Motif m;
     int phrase = 0;
-    if (!readHeard(m, phrase)) return;
+    if (!readHeard(m, phrase, toAudio.sequence())) return;
     // m.origin is the stored motif's origin as the audio thread resolved it
     // (fitMotif carries it). A phrase before it played the motif unevolved:
     // the origin stays, running or stopped, or the phrases up to it would
