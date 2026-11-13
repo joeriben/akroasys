@@ -4228,6 +4228,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // matches and the block idles again on the next cycle.
     bool seqPresetPending =
         static_cast<int>(paramCache.seqPreset->load()) != lastSeqPreset.load(std::memory_order_relaxed);
+    // The sequencer engine the switch further below moves to. A switch made
+    // while silent (the panel button, a preset load) wakes the block the same
+    // way: the computer keyboard routes by the engine in effect
+    // (phraseTakesKeys), and a computer key is no MIDI and wakes nothing, so
+    // until the switch is applied the keys follow the old engine. Self-clearing:
+    // the switch sets activeSeqEngine to it.
+    const int seqEngineWanted = juce::jlimit(0, SeqEngine::kCount - 1,
+                                             static_cast<int>(paramCache.seqEngine->load()));
+    const bool seqEnginePending = seqEngineWanted != activeSeqEngine;
     // Read the arp's enable state HERE, above the idle gate, not down at the arp
     // stage: the deep-idle branch returns before the arp stage ever runs, and
     // arpWasEnabled has to be kept honest across that return (see below).
@@ -4266,6 +4275,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                        || !midiMessages.isEmpty()
                        || seqRunning
                        || seqPresetPending
+                       || seqEnginePending
                        || arpHoldingKeys
                        || csoundSwapOutstanding
                        || replayActive;   // the tape must never idle out mid-playback
@@ -4876,12 +4886,11 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // Gen → Step and Phrase → Step copy into the step grid), then the
     // outgoing engine's sounding notes end and it stops. A switch a preset
     // import or state restore causes carries nothing over (SeqTransferHold):
-    // the load brings its own patterns.
-    const int seqEngineWanted = juce::jlimit(0, SeqEngine::kCount - 1,
-                                             static_cast<int>(paramCache.seqEngine->load()));
+    // the load brings its own patterns. seqEngineWanted is read above the
+    // idle gate.
     int seqDivision = static_cast<int>(paramCache.seqDivision->load());
 
-    if (seqEngineWanted != activeSeqEngine)
+    if (seqEnginePending)
     {
         const int from = activeSeqEngine;
         const int to = seqEngineWanted;
