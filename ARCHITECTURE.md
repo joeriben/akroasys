@@ -23,7 +23,7 @@ t5ynth/
 │   ├── dsp/                    # Voice, oscillators, filters, envelopes, effects
 │   ├── gui/                    # All juce::Component panels + LookAndFeel
 │   ├── inference/              # PipeInference — C++ side of the Python IPC
-│   ├── sequencer/              # Step sequencer, arpeggiator, generative sequencer
+│   ├── sequencer/              # Step, phrase and generative sequencers, arpeggiator
 │   └── presets/                # .t5p binary preset format serialization
 ├── backend/                    # Python inference subprocess
 │   ├── pipe_inference.py       # Script form (dev mode)
@@ -77,8 +77,13 @@ t5ynth/
 - **`src/inference/`** — `PipeInference.{h,cpp}` only. C++ side of the IPC to
   Python. See §7.
 - **`src/sequencer/`** — `StepSequencer`, `Arpeggiator`,
+  `PhraseSequencer` + `PhraseModel` (motif, harmony and form for
+  conventional lines, `docs/PHRASE_SEQ_CONCEPT.md`; the model is pure and
+  runs in `tools/phrase_seq_print.cpp` without JUCE),
   `GenerativeSequencer` (Euclidean + scale-quantized note generator).
-  Driven from `processBlock` and exposed via `PluginProcessor` accessors.
+  The three sequencers share one transport (`seq_running`); `seq_engine`
+  (Step / Phrase / Gen) picks which one plays. Driven from `processBlock`
+  and exposed via `PluginProcessor` accessors.
 - **`src/presets/PresetFormat.{h,cpp}`** — .t5p binary serialization with
   embedded audio. Magic `T5YN`, current version `2`. See
   `src/presets/PresetFormat.h:8` and `docs/PRESET_FORMAT.md` for the
@@ -98,7 +103,8 @@ the plugin instance:
 - the DSP pipeline (`voiceManager`, `masterOsc`, `masterSampler`, two global
   `LFO`s, `driftLfo`, `postFilter`, `delay`, `reverb`, `algoReverb`,
   `limiter`);
-- the three sequencers (`stepSequencer`, `generativeSequencer`, `arpeggiator`);
+- the sequencers (`stepSequencer`, `phraseSequencer`, `generativeSequencer`)
+  and the `arpeggiator`;
 - the `PipeInference pipeInference` client that manages the Python
   subprocess;
 - generated-audio buffers (`generatedAudioFull`, `generatedAudioRaw`) plus
@@ -158,12 +164,19 @@ Resets the master oscillator, sampler, and voice manager.
 ### State (`getStateInformation` / `setStateInformation`)
 
 `src/PluginProcessor.cpp:1516` — APVTS state is serialized as XML via JUCE's
-`copyXmlToBinary`. On load, transport flags `seq_running` and `gen_seq_running`
-are explicitly forced to `0` so sessions never auto-start audio on restore.
+`copyXmlToBinary`. On load, the transport flag `seq_running` is explicitly
+forced to `0` so sessions never auto-start audio on restore. The engine
+choice `seq_engine` is not a transport and stays as saved; a state from
+before it carries the bool `gen_seq_running`, which the restore migrates
+(on → Gen, off → Step). The phrase sequencer's stored motif is not a
+parameter and travels as the XML attribute `phraseMotif` (JSON, the format
+of `docs/PRESET_FORMAT.md` §3.4).
 
-Note that this session serialization only captures APVTS. Prompts, seed,
-generated audio, axes slot state, and prompt embeddings live outside APVTS
-and are persisted separately via the .t5p preset format (§8).
+Beyond APVTS, the session state carries only a few XML attributes like that
+one (MIDI output and clock settings, the phrase motif, the Csound orchestra
+in LRO mode). Prompts, seed, generated audio, axes slot state, and prompt
+embeddings live outside APVTS and are persisted separately via the .t5p
+preset format (§8).
 
 ---
 
@@ -563,8 +576,9 @@ canonical division → factor table lives in `ClockDivision::kFactor[]`
 (`src/dsp/BlockParams.h`); never duplicate it elsewhere.
 
 `T5ynthProcessor::resolveSyncBpm()` is the single source of truth for the
-sync BPM, with priority: live host transport > running in-app sequencer
-(step or generative) > frozen `hostBpmLastSeen` > `seq_bpm` fallback. The
+sync BPM, with priority: MIDI clock (when enabled and valid) > live host
+transport > running in-app sequencer (any engine) > frozen `hostBpmLastSeen`
+> `seq_bpm` fallback. The
 host transport is snapshotted at the top of `processBlock` into the
 `hostBpmLastSeen` / `hostPlayingNow` atomics; both are written and read
 exclusively from the audio thread, so relaxed ordering is sufficient.

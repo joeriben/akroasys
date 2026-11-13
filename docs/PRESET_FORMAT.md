@@ -203,9 +203,10 @@ then patched at `src/presets/PresetFormat.cpp:18-66`:
 | `freeze`        | export        | Granular texture state: `texture` (`"hold"`, `"silk"`, `"air"`, `"cloud"`) and `stereo` (0.0–1.0 width). Key name remains `freeze` for compatibility. |
 | `effects`       | export        | Delay, reverb, limiter. |
 | `filter`        | export        | `enabled`, `type`, `slope`, `cutoff` (normalised 0..1), `resonance`, `mix`, `kbdTrack`. |
-| `sequencer`     | export        | Step sequencer state including scale, steps array, division, glide, gate. |
+| `sequencer`     | export        | Step sequencer state including scale, steps array, division, glide, gate; `engine` (`"step"` / `"phrase"` / `"gen"`, the Step \| Phrase \| Gen switch, see 3.4). |
 | `arpeggiator`   | export        | `enabled`, `pattern`, `rate`, `octaveRange`. |
-| `generativeSeq` | export        | Euclidean generator params + fix-flags + inter-strand coordination (`coordination` key string / `coordinationCap`, both since 2026-07-16; absent → Density Budget, cap 3). |
+| `generativeSeq` | export        | Euclidean generator params + fix-flags + inter-strand coordination (`coordination` key string / `coordinationCap`, both since 2026-07-16; absent → Density Budget, cap 3). `enabled` is still written (`true` exactly when the engine is Gen) and read only when `sequencer.engine` is absent (see 3.4). |
+| `phraseSeq`     | export        | Phrase sequencer parameters and its stored motif (see 3.4). |
 | `semanticAxes`  | patch (t5p)   | Array of exactly 3 objects, GUI-only (see 6). |
 | `audio_meta`    | patch (t5p)   | `sampleRate`, `channels`, `numSamples` for the PCM tail (see 4). |
 | `embeddingA`    | patch (t5p)   | Array of floats, typically 768 entries (see 5). Omitted if not yet generated. |
@@ -270,10 +271,16 @@ missing scalar is not:
   array;
 - the same for envelopes **2..5**. Envelope 1 is the amplitude envelope
   and a file missing it is broken, so it is left alone rather than reset;
-- an absent `modulation.aftertouch` clears every pressure routing.
+- an absent `modulation.aftertouch` clears every pressure routing;
+- an absent `phraseSeq` restores the phrase sequencer's defaults and the
+  empty motif: a preset without the block was saved before the phrase
+  sequencer existed, and is a full patch (3.4).
 
 A `.t5seq` sequence pattern is loaded on top of the live patch, so none
 of these resets apply to it.
+
+The sequencer engine (`seq_engine`) is resolved across two blocks; 3.4
+gives the order.
 
 ### 3.1.2 `filter.enabled` and `filter.type`
 
@@ -384,13 +391,90 @@ preset:
   level parameter. It is stored in the DAW session via
   `getStateInformation` at `src/PluginProcessor.cpp:1516` but has no
   entry in `exportJsonPreset`.
-- `seq_running` and `gen_seq_running` on the load path — to avoid
-  acoustic surprises, the importer deliberately does **not** restart
-  sequencers (see `src/PluginProcessor.cpp:2208-2209` for step seq and
-  `:2319` for the generative sequencer, which is re-enabled).
-  Note: the exporter does write `sequencer.enabled` on save, but the
-  step sequencer import path ignores it. This is an asymmetric design
-  choice, not a bug.
+- `seq_running` on the load path — to avoid acoustic surprises, the
+  importer deliberately does **not** start or stop the sequencer
+  transport. The exporter does write `sequencer.enabled` on save, but
+  the import path ignores it. This is an asymmetric design choice, not
+  a bug. The engine choice (`sequencer.engine`, 3.4) is not a transport
+  and **is** restored.
+
+### 3.4 `sequencer.engine` and the `phraseSeq` block
+
+The sequencer has three engines behind one transport: Step, Phrase and
+Gen (`docs/PHRASE_SEQ_CONCEPT.md`). The choice is the parameter
+`seq_engine`, written as `sequencer.engine`: `"step"`, `"phrase"` or
+`"gen"`. It replaced the bool `gen_seq_running` (Step or Gen), which
+the exporter still writes as `generativeSeq.enabled` (`true` exactly
+when the engine is Gen), so an older reader keeps its reading.
+
+On import the engine is resolved in this order:
+
+1. `sequencer.engine`, when present.
+2. Otherwise `generativeSeq.enabled`: `true` → Gen, `false` → Step (a
+   file from before the Phrase engine).
+3. Otherwise, when the file carries a `sequencer` or a `generativeSeq`
+   block, the layout default, Step (a file from before Gen existed).
+4. A file with neither block leaves the engine where it was, as it
+   leaves every block it does not carry.
+
+A DAW session (`getStateInformation`) migrates the same way: a state
+holding `gen_seq_running` and no `seq_engine` gets Gen for on, Step for
+off.
+
+`phraseSeq` holds the 17 Phrase parameters and the motif:
+
+| Key         | Type   | Values / range | Default |
+| ----------- | ------ | -------------- | ------- |
+| `part`      | string | `"bass"`, `"riff"`, `"lead"`, `"stab"` | `"bass"` |
+| `harmony`   | string | `"pedal"`, `"keys"`, `"chords"` | `"pedal"` |
+| `chord1`..`chord4` | string | `"off"` or a scale degree `"1"`..`"7"` | `"1"`, `"off"`, `"off"`, `"off"` |
+| `chordRate` | string | bars per chord: `"1"`, `"2"`, `"4"` | `"1"` |
+| `ext7`      | bool   | | `false` |
+| `len`       | string | motif length in bars: `"1"`, `"2"` | `"1"` |
+| `pulses`    | int    | 1..32 | 4 |
+| `rotation`  | int    | 0..31 | 0 |
+| `bars`      | string | phrase length in bars: `"4"`, `"8"`, `"16"` | `"8"` |
+| `form`      | string | `"loop"`, `"aaab"`, `"aaba"`, `"abab"` | `"aaab"` |
+| `variation` | float  | 0..1 | 0 |
+| `evolve`    | float  | 0..1 | 0 |
+| `layer`     | string | `"off"`, `"octave"`, `"chord"`, `"answer"` | `"off"` |
+| `slide`     | float  | 0..1 | 0 |
+| `motif`     | object | the stored motif, below | the empty motif |
+
+An absent key restores its default (3.1.1). The block absent from a full
+preset restores all of them and the empty motif; absent from a `.t5seq`
+it leaves the phrase sequencer as it is.
+
+**The motif** is not a parameter. The same JSON is the session state's
+`phraseMotif` attribute. A motif body:
+
+| Key           | Type   | Meaning |
+| ------------- | ------ | ------- |
+| `len`         | int    | bars, 1 or 2 |
+| `stepsPerBar` | int    | 1, 2, 4, 8 or 16 |
+| `pulses`      | int    | pulses the motif was built with, clamped to its steps |
+| `rotation`    | int    | rotation it was built with, clamped to its steps − 1 |
+| `part`        | string | as `phraseSeq.part` |
+| `seed`        | int    | 32-bit unsigned, written as an integer |
+| `slots`       | array  | one object per step: `fn`, `member` (0..3), `octave` (−1..1), `accent`, `slide` |
+
+`fn` names what a step is: `"rest"`, `"chord_tone"`, `"repeat"`,
+`"octave"`, `"passing"`, `"neighbour_up"`, `"neighbour_down"`,
+`"approach_up"`, `"approach_down"`, `"approach_chromatic"`.
+
+The stored motif adds:
+
+- `origin` — the phrase it starts evolving from: an integer, or `"next"`
+  for a motif not heard yet, which starts evolving from the phrase where
+  it is first heard. Absent or not a number reads as `"next"`.
+- `leadIn` (optional) — the kept lead-in: a motif body plus `phrase`, the
+  phrase it leads into. Without `phrase` it names no place to apply and
+  is ignored.
+
+A body with an invalid grid (`stepsPerBar` not one of the five, or `len`
+outside 1..2) keeps only `part` and `seed` and is otherwise empty; the
+empty motif is filled from the seed and the parameters, as a reset fills
+it.
 
 ---
 
@@ -982,9 +1066,8 @@ to lift the bundled DEMO preset to v3.
 ### 12.6 Asymmetric handling of `sequencer.enabled`
 
 The exporter writes `sequencer.enabled` into the JSON, but the
-importer at `src/PluginProcessor.cpp:2207-2209` deliberately does not
-restore it (the lines are commented with "Preserve current seq_running
-state — don't stop playback on preset load"). The generative
-sequencer's `enabled` field **is** restored at `:2319`. This is an
-intentional UX choice for the step sequencer but may be surprising to
-a third-party tool that expects symmetry.
+importer deliberately does not restore it (preset load must not stop or
+start playback). The engine choice, `sequencer.engine`, **is**
+restored, and `generativeSeq.enabled` is read as its fallback (3.4).
+This is an intentional UX choice but may be surprising to a third-party
+tool that expects symmetry.
