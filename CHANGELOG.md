@@ -115,6 +115,20 @@ unbroken.
   played the tape's sound, and a save there stored it. Your instrument, its
   prompt, its knobs and the settings it asked for now come back as they were.
 
+- **A render still running when you stop a session log now lands.** A render
+  or an oscillator instrument asked for before Play that finished after Stop
+  was dropped, and the status line said a new sound had been loaded while it
+  ran. Stop gives back the patch it was asked from, so it now arrives as it
+  would have without the tape. One that finishes while the tape still plays is
+  dropped as before.
+
+- **Re-Prompt switched off and on again while a render runs starts over from
+  your prompts.** The render still running lands, but the loop no longer takes
+  it as its first step: it listened to a sound made from the old loop's words
+  and rewrote your restored prompts from it. Its first step is now the clean
+  render of your prompts that switching off asks for. The same holds across a
+  session log: its Play switches Re-Prompt off, and Stop switches it back on.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
