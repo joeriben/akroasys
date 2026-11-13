@@ -136,6 +136,10 @@ unbroken.
   the dot is off while a tape plays. Record and the Settings tab's Record Event
   Log are the same setting. Export writes a WAV again with one click.
 
+- **Record switched on while a session log replays makes a log that plays.**
+  The new log took no start patch then, and Play refused it ("no usable start
+  patch"). It now starts from your patch, the one Stop gives back.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
