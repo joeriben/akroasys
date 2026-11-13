@@ -479,6 +479,19 @@ int main(int argc, char** argv)
         int minV = 99, maxV = 0;
         for (auto& [s, n] : perOnset) { minV = std::min(minV, n); maxV = std::max(maxV, n); }
         check(minV == 8 && maxV == 8, "stab/octave: 4 voices + 4 octave-layer voices per hit (" + std::to_string(minV) + ".." + std::to_string(maxV) + ")");
+        // The chord is the main line: all four voices on strand −1, so the
+        // voice manager pans, folds and pedals them alike; the layer on 5..8.
+        int mainOn = 0, layerOn = 0, other = 0;
+        for (const auto& p : r.events)
+        {
+            if (p.ev.type != VoiceEvent::Type::NoteOn) continue;
+            if (p.ev.strandId == -1) ++mainOn;
+            else if (p.ev.strandId >= 5 && p.ev.strandId <= 8) ++layerOn;
+            else ++other;
+        }
+        check(other == 0 && mainOn == layerOn && mainOn > 0,
+              "stab/octave: the whole chord on strand -1, the layer on 5..8 (" + std::to_string(mainOn) + " / "
+                  + std::to_string(layerOn) + " / " + std::to_string(other) + " elsewhere)");
     }
 
     std::printf("\n== 6. Riff, Keys: Am, then F at bar 2 beat 2\n");

@@ -29,8 +29,8 @@
  *  - GUI: the *ForGui atomics and readView().
  *
  * Strands: the main line is strand −1 (like the step sequencer, so the
- * arpeggiator and slide handling treat it as the lead). Stab's other chord
- * voices are strands 1..3, the layer is 5..8.
+ * arpeggiator and slide handling treat it as the lead); for Stab that is the
+ * whole chord. The layer is 5..8.
  */
 class T5ynthPhraseSequencer
 {

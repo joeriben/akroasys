@@ -1310,8 +1310,11 @@ void emitLine(BarRender& out, const OnsetList& l, int strand, int transpose, flo
     }
 }
 
+/** One event per voice and onset. `oneStrand`: every voice on `strand` (Stab's
+ *  chord is the main line, strand −1, so the voice manager treats the whole
+ *  chord alike — pan, stereo, pedals); otherwise voice v on `strand` + v. */
 void emitChords(BarRender& out, const OnsetList& l, const int* voicing, int nv,
-                int strandBase, bool mainIsFirst, int shift, int transpose, float velScale)
+                int strand, bool oneStrand, int shift, int transpose, float velScale)
 {
     for (int i = 0; i < l.n; ++i)
     {
@@ -1322,7 +1325,7 @@ void emitChords(BarRender& out, const OnsetList& l, const int* voicing, int nv,
             e.onQ = o.onQ; e.offQ = o.offQ;
             e.note = clampNote(voicing[v] + shift + o.octShift + transpose);
             e.vel = o.vel * velScale;
-            e.strand = (mainIsFirst && v == 0) ? -1 : strandBase + v;
+            e.strand = oneStrand ? strand : strand + v;
             pushEvent(out, e);
         }
     }
@@ -1401,7 +1404,7 @@ void renderBar(const RenderInput& in, BarRender& out)
         nv = in.keys ? voiceChord(in.keysChord, partAnchor(Part::Stab), in.prevVoicing, in.prevVoicingCount, voicing)
                      : voicingForBar(cfg, in.bar, partAnchor(Part::Stab), voicing);
         for (int i = 0; i < line.n; ++i) line.a[static_cast<size_t>(i)].note = voicing[0];
-        emitChords(out, line, voicing, nv, 0, true, 0, cfg.transpose, 1.0f);
+        emitChords(out, line, voicing, nv, -1, true, 0, cfg.transpose, 1.0f);
         if (cfg.layer == Layer::Octave)
             emitChords(out, line, voicing, nv, 5, false, octaveShift, cfg.transpose, kLayerVel);
         for (int k = 0; k < out.viewSteps; ++k)

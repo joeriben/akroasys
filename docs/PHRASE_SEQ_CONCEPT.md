@@ -171,8 +171,10 @@ values for the listening phase, not derived from data.
 - Bass: the first head of the motif is always R (downbeat root).
 - Stab plays the chord on every pulse, close position within an octave
   above the anchor, voice-led across chord changes: common tones stay,
-  the other voices move to the nearest member. The extra voices are
-  emitted like Gen's strands (`VoiceEvent::strandId`), panned centre.
+  the other voices move to the nearest member. The whole chord is the
+  main line (`VoiceEvent::strandId` −1), so the voice manager treats every
+  voice alike: same stereo image, same sustain/sostenuto handling. Under
+  the arp, the lowest note of the latest onset is the lead.
 - The shared Seq Octave (`seqOctave`, already used by Step and Gen)
   transposes all Parts.
 
