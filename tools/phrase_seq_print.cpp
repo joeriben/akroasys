@@ -674,7 +674,6 @@ int main(int argc, char** argv)
             });
         };
         const Act dice777  = [&](T5ynthPhraseSequencer& s) { s.dice(c, 777); };
-        const Act keep     = [](T5ynthPhraseSequencer& s) { s.keep(); };
         const Act stopKeep = [](T5ynthPhraseSequencer& s) { s.stop(); s.keep(); s.start(); };
         const Act evoOff   = [&](T5ynthPhraseSequencer& s) { s.setConfig(c0); };
         const Act diceStop = [&](T5ynthPhraseSequencer& s) { s.stop(); s.dice(c, 4242); s.start(); };
@@ -685,17 +684,49 @@ int main(int argc, char** argv)
             check(ok, what + " " + why);
         };
 
+        // Equal as stored motifs, origin aside.
+        auto sameMotif = [](const Motif& a, const Motif& b) {
+            if (a.len != b.len || a.stepsPerBar != b.stepsPerBar || a.pulses != b.pulses
+                || a.rotation != b.rotation || a.part != b.part || a.seed != b.seed) return false;
+            for (size_t i = 0; i < a.slots.size(); ++i)
+            {
+                const Slot& x = a.slots[i];
+                const Slot& y = b.slots[i];
+                if (x.fn != y.fn || x.member != y.member || x.octave != y.octave
+                    || x.accent != y.accent || x.slide != y.slide) return false;
+            }
+            return true;
+        };
+        // What phrase 5 plays after the dice at bar 4 (origin 1), under Evolve 1.
+        const Motif heard5 = evolvedMotif(fitMotif(generateMotif(777, 1, c), c), c, 5);
+        check(!sameMotif(heard5, generateMotif(777, 1, c)),
+              "keep: phrases 2-5 evolved the diced motif (else the checks below prove nothing)");
+
         const Run cont = play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 } }));
-        same(cont, play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { keepQ, keep } })),
+        Motif kept;
+        const Act keepSeen = [&](T5ynthPhraseSequencer& s) { s.keep(); kept = s.getStoredMotif(); };
+        same(cont, play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { keepQ, keepSeen } })),
              21, 28, keepQ, "keep while running: this phrase and the next play on unchanged");
+        check(sameMotif(kept, heard5) && kept.origin == 5,
+              "keep while running: stores the motif heard in phrase 5, origin 5 (origin "
+                  + std::to_string(kept.origin) + ")");
         same(cont, play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { keepQ, stopKeep } })),
              21, 28, keepQ, "stop, keep, play on from the same bar: unchanged");
 
         // Evolve turned to 0 mid-phrase is latched at the next phrase entry:
         // Keep stores the motif evolved under 1, the one that plays.
+        // From the next phrase on, Evolve 0 plays the stored motif as it is:
+        // the kept one, as a run that stores it from the start plays it.
+        const Run keptEvoOff = play(c, 0.0, end, 4, 4, {}, 0,
+                                    acts({ { 4 * B, dice777 }, { 21 * B, evoOff }, { keepQ, keepSeen } }));
         same(play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { 21 * B, evoOff } })),
-             play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { 21 * B, evoOff }, { keepQ, keep } })),
-             21, 24, keepQ, "keep after Evolve changed mid-phrase: stores the motif heard under the latched Evolve");
+             keptEvoOff, 21, 24, keepQ,
+             "keep after Evolve changed mid-phrase: the rest of the phrase plays on unchanged");
+        check(sameMotif(kept, heard5) && kept.origin == 5,
+              "keep after Evolve changed mid-phrase: stores the motif heard under the latched Evolve");
+        same(play(c0, 0.0, end, 4, 4, {}, 0, acts({ { 0.0, [heard5](T5ynthPhraseSequencer& s) {
+                 s.setStoredMotif(heard5); } } })),
+             keptEvoOff, 24, 28, -1e9, "keep, then Evolve 0 from the next phrase: the kept motif plays on");
 
         // Dice while stopped, playback resumes at bar 20 (phrase 5): the new
         // motif is heard as itself there, so Evolve cannot have touched it yet.
