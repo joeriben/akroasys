@@ -123,15 +123,18 @@ public:
      *  preset's name where it changes that preset (onNewGenerationStarted).
      *  (The LRO cache goes with every preset load all the same: it belongs to
      *  the file, MainPanel::applyLoadedPreset.) An LRO snapshot, prompt-only or
-     *  not, is refused while a pass runs that will still land
+     *  not, is refused while a pass runs that may still land
      *  (MainPanel::activateSnapshot, lroPassWillLand). */
     void dropLroPassInFlight() { ++lroLoadSeq_; }
-    /** Whether the authoring pass or Re-Prompt step now running will land:
-     *  false once a load has overtaken it (dropLroPassInFlight, a state
+    /** Whether the authoring pass or Re-Prompt step now running may still
+     *  land: false once a load has overtaken it (dropLroPassInFlight, a state
      *  restore), because what it publishes is then dropped whole
-     *  (lroPassOutlivedLoad). Meaningful only while a pass runs
-     *  (onLcoBusyChanged). */
-    bool lroPassWillLand() const { return lroPassAskedAtLoad_ == lroLoadEpoch(); }
+     *  (lroPassOutlivedLoad). While a session log replays, a pass asked before
+     *  Play still may: it is dropped if it finishes during the tape and lands
+     *  if it finishes after Stop (LoadEpoch), so it answers true; one asked
+     *  during the tape answers true only for as long as that tape runs.
+     *  Meaningful only while a pass runs (onLcoBusyChanged). */
+    bool lroPassWillLand() const;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -475,23 +478,36 @@ private:
      *  never consumes a step. */
     void stepOfflineTakeAfterCapture(bool captured);
 
-    /** Where the loads stand, taken when a render is asked for: the panel's
-     *  own (loadPresetData: a preset, a snapshot, Init) plus the processor's
-     *  state restores (a host recall, a session log's start and Stop). Both
-     *  only grow, so the sum changes whenever either does. */
-    unsigned long long neuralLoadEpoch() const;
-    /** The LRO's: dropLroPassInFlight plus the same state restores. */
-    unsigned long long lroLoadEpoch() const;
+    /** Where the loads stand, taken when a render or an LRO pass is asked for
+     *  and compared when it lands. `loads`: the panel's own count
+     *  (loadPresetData: a preset, a snapshot, Init; for the LRO
+     *  dropLroPassInFlight) plus the processor's state restores (a host
+     *  recall). Both only grow, so the sum changes whenever either does.
+     *  `replay`: the running session log's epoch, 0 with none running. A
+     *  log's Play and Stop are not counted as restores
+     *  (T5ynthProcessor::getStateRestoreSerial); this field keeps a result
+     *  asked on one side of either from landing on the other. A result asked
+     *  before Play still lands after Stop, which puts back the patch it was
+     *  asked from. */
+    struct LoadEpoch
+    {
+        unsigned long long loads = 0;
+        juce::uint32       replay = 0;
+        bool operator== (const LoadEpoch&) const = default;
+    };
+    LoadEpoch neuralLoadEpoch() const;
+    /** The LRO's: dropLroPassInFlight in place of loadPresetData. */
+    LoadEpoch lroLoadEpoch() const;
 
     /** At a render's landing: true when a sound was loaded after the render
      *  was asked for (neuralLoadEpoch moved). The render is then dropped whole,
      *  and this says so on the status line. */
-    bool renderOutlivedLoad(unsigned long long askedAtLoad);
+    bool renderOutlivedLoad(LoadEpoch askedAtLoad);
 
     /** The same for the LRO: an authoring pass or a Re-Prompt step that a
      *  load overtook (lroLoadEpoch moved). `line` says what was dropped; it
      *  goes on the card unless the load put its own trace there. */
-    bool lroPassOutlivedLoad(unsigned long long askedAtLoad, const juce::String& line);
+    bool lroPassOutlivedLoad(LoadEpoch askedAtLoad, const juce::String& line);
 
     /** The auto-regen cadence in seconds, from the REGENERATE mode + its BPM: what
      *  one step of an offline take advances the generation-side drift by. ASAP
@@ -532,8 +548,10 @@ private:
      *  generation (manual Generate or the Auto-Regen standing trigger) renders the
      *  rewritten prompts. No-op (cheap early-out) unless a stance is active AND the
      *  model is SA3. */
-    /** heard: the render as it plays (pitch-fitted), before any drift join. */
-    void runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate);
+    /** heard: the render as it plays (pitch-fitted), before any drift join.
+     *  askedInLoopRun: loopRestoreSeq_ when that render was asked for. */
+    void runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate,
+                             unsigned int askedInLoopRun);
 
     T5ynthProcessor& processorRef;
 
@@ -927,7 +945,7 @@ private:
     unsigned long long lroLoadSeq_ = 0;
     // The running LRO pass's lroLoadEpoch, taken where it starts (the same
     // value its landing checks), for lroPassWillLand.
-    unsigned long long lroPassAskedAtLoad_ = 0;
+    LoadEpoch lroPassAskedAtLoad_;
     bool translatingPrompts_ = false;  // Union-Jack translate in flight (blocks IPC overlap)
     std::vector<std::pair<int, float>> pendingOffsets_;  // for DimensionExplorer
     std::map<juce::String, float> pendingAxes_;          // for SemanticAxes
@@ -991,6 +1009,13 @@ private:
     // loop never ran, so toggling a stance on/off with no render in between is a no-op).
     bool loopOriginalsValid_ = false;
     int  prevStanceForRestore_ = 0;               // RepromptStance::Off — last seen stance index
+    // Counts those restores. A render takes it when asked for, and one asked
+    // before a restore steps no loop when it lands (runSemanticLoopStep): the
+    // run it was asked in has ended, and the clean re-render of the originals
+    // the restore owes starts the next one. Moves on a stance Off→on flicker
+    // during a render, and on a session log's Play, whose start patch sets the
+    // stance Off while Stop sets it back.
+    unsigned int loopRestoreSeq_ = 0;
     // transcribe + AB-replace anti-collapse: transcribe reads only the shared machine
     // tags, so writing BOTH poles each step makes A==B (collapses the blend → alpha/
     // alpha-drift has nothing to interpolate). Instead write ONE pole per step,

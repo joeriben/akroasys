@@ -1181,8 +1181,8 @@ void T5ynthProcessor::endBulkParamLoad(const juce::String& presetName)
         return;
 
     // A replay's own start/stop restore is not a session event — no start-state
-    // capture, no preset marker into the live log. (See eventLogInReplayRestore_.)
-    if (eventLogInReplayRestore_)
+    // capture, no preset marker into the live log. (See inReplayTransportRestore_.)
+    if (inReplayTransportRestore_)
         return;
 
     // A preset/state load before the first musical event IS this session's start
@@ -1514,12 +1514,13 @@ bool T5ynthProcessor::startReplay(const EventLogReader& reader)
     // Restore the start-state (decoded and validated at the top) so the engine is in
     // the exact configuration the session was recorded with. setStateInformation
     // guards the param flood itself — do NOT wrap it in a second BulkParamLoadGuard;
-    // the suppress flag is a plain bool, not a counter. eventLogInReplayRestore_
-    // keeps this restore out of any live recording (start-state + marker).
-    eventLogInReplayRestore_ = true;
+    // the suppress flag is a plain bool, not a counter. inReplayTransportRestore_
+    // keeps this restore out of any live recording (start-state + marker) and out
+    // of the editor's load count (the replay epoch moved below stands for it).
+    inReplayTransportRestore_ = true;
     stateRestoreMarkerName_ = "replay_start";
     setStateInformation(startStateBytes.getData(), static_cast<int>(startStateBytes.getDataSize()));
-    eventLogInReplayRestore_ = false;
+    inReplayTransportRestore_ = false;
 
     // Publish under the callback lock: processBlock reads replayState_ by
     // reference, so the vectors must not be reseated while a block is in flight.
@@ -1566,8 +1567,9 @@ void T5ynthProcessor::stopReplay()
     requestMidiPanic();
 
     // Hand the user their patch back (see preReplayPatch_). Done after the flag is
-    // cleared so the restore is logged as one preset_loaded marker in a live
-    // recording rather than swallowed as replay traffic.
+    // cleared. inReplayTransportRestore_ keeps the restore out of a live recording
+    // (endBulkParamLoad writes no preset marker for it) and out of the editor's
+    // load count.
     if (preReplayPatch_.getSize() > 0)
     {
         // Move it out first: setStateInformation must not read a member this call
@@ -1575,9 +1577,9 @@ void T5ynthProcessor::stopReplay()
         const juce::MemoryBlock patch = std::move(preReplayPatch_);
         preReplayPatch_.reset();
         stateRestoreMarkerName_ = "replay_end";   // setStateInformation's own guard names the marker
-        eventLogInReplayRestore_ = true;          // keep this restore out of a live recording
+        inReplayTransportRestore_ = true;          // out of a live recording and the editor's load count
         setStateInformation(patch.getData(), static_cast<int>(patch.getSize()));
-        eventLogInReplayRestore_ = false;
+        inReplayTransportRestore_ = false;
 
         // setStateInformation zeroes these unconditionally ("no acoustic surprise on
         // session reopen"). Correct for a host reopening a project; wrong here, where
@@ -9897,8 +9899,12 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
     // The editor's load check (getStateRestoreSerial) counts only a state that
     // is taken on, and counts it at the start and again at the end: a host can
     // call this off the message thread, and a render or an LRO pass the editor
-    // asks for meanwhile is built from a half-restored state.
-    if (takesState)
+    // asks for meanwhile is built from a half-restored state. Not a replay's own
+    // start and stop restores (inReplayTransportRestore_): the editor reads the
+    // replay epoch for those, and Stop's restore puts back the patch a render
+    // asked before Play was built from.
+    const bool countsAsLoad = takesState && ! inReplayTransportRestore_;
+    if (countsAsLoad)
         stateRestoreSerial_.fetch_add(1, std::memory_order_acq_rel);
     if (takesState)
     {
@@ -10218,7 +10224,7 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
     parameters.getParameter(PID::dcoRepromptStance)->setValueNotifyingHost(0.0f);
     // After the stances are Off: a self-running step the restored stance could
     // start before this line is asked within the count, and dropped.
-    if (takesState)
+    if (countsAsLoad)
         stateRestoreSerial_.fetch_add(1, std::memory_order_acq_rel);
 
     // Treat the restored seqPreset as not-yet-applied so the next processBlock

@@ -1872,10 +1872,12 @@ private:
     // True only across the setStateInformation calls inside startReplay()/stopReplay().
     // Those restores are internal transport machinery, not user/host state changes:
     // the log must not stamp the tape's patch as the live session's start-state, nor
-    // emit a replay_start/replay_end preset marker into it. replayModeActive_ can't
-    // gate this — it is flipped AFTER the start restore and cleared BEFORE the stop
-    // restore, so it is provably false at the exact moment endBulkParamLoad runs here.
-    bool eventLogInReplayRestore_ = false;
+    // emit a replay_start/replay_end preset marker into it; and the editor's load
+    // check does not count them (getStateRestoreSerial), since it reads the replay
+    // epoch instead. replayModeActive_ can't gate this — it is flipped AFTER the
+    // start restore and cleared BEFORE the stop restore, so it is provably false at
+    // the exact moment endBulkParamLoad and the counting in setStateInformation run.
+    bool inReplayTransportRestore_ = false;
     // Message thread. Snapshots current APVTS as the replay start state, gated by the
     // flag above. Idempotent; safe to call from any start-of-session hook.
     void captureEventLogStartStateIfPending();
@@ -2058,11 +2060,13 @@ public:
     void stopReplay();
 
     /** Counts the states setStateInformation takes on (a host recalling a
-     *  state, a session log's start patch and the patch its Stop puts back),
-     *  twice each: at the start and at the end of the restore. The editor
-     *  learns of none of them otherwise, and a render or an LRO authoring still
-     *  running across one was asked for the sound it replaced (PromptPanel's
-     *  load check). Any thread. */
+     *  state), twice each: at the start and at the end of the restore. The
+     *  editor learns of them no other way, and a render or an LRO authoring
+     *  still running across one was asked for the sound it replaced
+     *  (PromptPanel's load check). A session log's start patch and the patch
+     *  its Stop puts back are not counted: the load check reads the replay
+     *  epoch for those (PromptPanel::LoadEpoch), so a render asked before Play
+     *  can still land after Stop. Any thread. */
     juce::uint32 getStateRestoreSerial() const noexcept
     { return stateRestoreSerial_.load(std::memory_order_acquire); }
 

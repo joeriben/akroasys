@@ -983,6 +983,7 @@ void PromptPanel::timerCallback()
             processorRef.setHumanPrompts(loopOriginalA_, loopOriginalB_);
             loopOriginalsValid_ = false;
             loopEngaged_ = false;   // re-arm the original-capture edge for the next run
+            ++loopRestoreSeq_;      // a render still running was asked in the run that ends here
             pendingLoopPromptA_.clear();
             pendingLoopPromptB_.clear();
             // Make the SOUND follow the reverted text: re-render the restored original
@@ -4345,6 +4346,7 @@ void PromptPanel::triggerGeneration()
     // Before anything this request is built from is read: a load landing
     // in between then moves the epoch, and the result is dropped.
     const auto askedAtLoad = neuralLoadEpoch();
+    const auto askedInLoopRun = loopRestoreSeq_;
     // A running tape owns the generation pipe and the sample buffer: a manual render
     // would loadGeneratedAudio() over the sound the replay just faded in, dragging
     // every held voice to a timbre the tape never contained. Say so rather than
@@ -4416,13 +4418,13 @@ void PromptPanel::triggerGeneration()
     // the prompts the request carries, as the model gets them.
     auto pitchJob = processorRef.beginPitchFit(req.promptA, req.promptB);
     std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
-                 askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
+                 askedAtLoad, askedInLoopRun, pitchJob = std::move(pitchJob)]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
         if (inferenceResult.success)
             pitchJob.run(inferenceResult.audio, inferenceResult.sampleRate);
         juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth,
-                                         askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
+                                         askedAtLoad, askedInLoopRun, pitchJob = std::move(pitchJob)]() mutable
         {
             if (auto* self = safeThis.getComponent())
             {
@@ -4514,7 +4516,7 @@ void PromptPanel::triggerGeneration()
                     // Semantic loop: listen to this render and rewrite the prompt(s)
                     // for the next generation (no-op unless a stance is active + SA3).
                     // It hears the render on the pitch it plays on.
-                    self->runSemanticLoopStep(fitted.audio, result.sampleRate);
+                    self->runSemanticLoopStep(fitted.audio, result.sampleRate, askedInLoopRun);
                 }
                 else
                 {
@@ -4541,6 +4543,7 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
     // Before anything this request is built from is read: a load landing
     // in between then moves the epoch, and the result is dropped.
     const auto askedAtLoad = neuralLoadEpoch();
+    const auto askedInLoopRun = loopRestoreSeq_;
     if (generating || translatingPrompts_ || loopStepInFlight_) return;
 
     lastGenAlpha_ = effectiveAlpha;
@@ -4597,13 +4600,13 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
     // the prompts the request carries, as the model gets them.
     auto pitchJob = processorRef.beginPitchFit(req.promptA, req.promptB);
     std::thread([safeThis, pipePtr, req, deviceForLabel, modelForLabel, wasInternalResynth,
-                 askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
+                 askedAtLoad, askedInLoopRun, pitchJob = std::move(pitchJob)]() mutable
     {
         auto inferenceResult = pipePtr->generate(req);
         if (inferenceResult.success)
             pitchJob.run(inferenceResult.audio, inferenceResult.sampleRate);
         juce::MessageManager::callAsync([safeThis, result = std::move(inferenceResult), req, deviceForLabel, modelForLabel, wasInternalResynth,
-                                         askedAtLoad, pitchJob = std::move(pitchJob)]() mutable
+                                         askedAtLoad, askedInLoopRun, pitchJob = std::move(pitchJob)]() mutable
         {
             if (auto* self = safeThis.getComponent())
             {
@@ -4698,7 +4701,7 @@ void PromptPanel::triggerDriftRegeneration(float effectiveAlpha,
                     // SA3). Uses the PRISTINE render (what CLAP should hear), not the
                     // boundary-crossfaded newAudio that was loaded for playback, in
                     // on the pitch it plays on.
-                    self->runSemanticLoopStep(fitted.audio, result.sampleRate);
+                    self->runSemanticLoopStep(fitted.audio, result.sampleRate, askedInLoopRun);
                 }
                 else
                 {
@@ -4942,17 +4945,36 @@ void PromptPanel::stepOfflineTakeAfterCapture(bool captured)
     processorRef.requestDriftGenerationStep(static_cast<float>(cadenceIntervalSeconds()));
 }
 
-unsigned long long PromptPanel::neuralLoadEpoch() const
+// LoadEpoch::replay: the running session log's epoch, 0 with none running
+// (getReplayEpoch starts at 0, and each Play moves it on).
+static juce::uint32 runningReplayEpoch(const T5ynthProcessor& processor)
 {
-    return presetLoadSeq_ + processorRef.getStateRestoreSerial();
+    return processor.isReplayActive() ? processor.getReplayEpoch() : 0u;
 }
 
-unsigned long long PromptPanel::lroLoadEpoch() const
+PromptPanel::LoadEpoch PromptPanel::neuralLoadEpoch() const
 {
-    return lroLoadSeq_ + processorRef.getStateRestoreSerial();
+    return { presetLoadSeq_ + processorRef.getStateRestoreSerial(),
+             runningReplayEpoch(processorRef) };
 }
 
-bool PromptPanel::renderOutlivedLoad(unsigned long long askedAtLoad)
+PromptPanel::LoadEpoch PromptPanel::lroLoadEpoch() const
+{
+    return { lroLoadSeq_ + processorRef.getStateRestoreSerial(),
+             runningReplayEpoch(processorRef) };
+}
+
+bool PromptPanel::lroPassWillLand() const
+{
+    // The landing check (lroPassOutlivedLoad) wants both fields equal. A pass
+    // asked outside a tape (replay 0) that only a tape separates from now gets
+    // there again at Stop, so until a load moves `loads` it may still land.
+    const auto now = lroLoadEpoch();
+    return lroPassAskedAtLoad_.loads == now.loads
+        && (lroPassAskedAtLoad_.replay == now.replay || lroPassAskedAtLoad_.replay == 0);
+}
+
+bool PromptPanel::renderOutlivedLoad(LoadEpoch askedAtLoad)
 {
     if (askedAtLoad == neuralLoadEpoch())
         return false;
@@ -4968,7 +4990,7 @@ bool PromptPanel::renderOutlivedLoad(unsigned long long askedAtLoad)
     return true;
 }
 
-bool PromptPanel::lroPassOutlivedLoad(unsigned long long askedAtLoad, const juce::String& line)
+bool PromptPanel::lroPassOutlivedLoad(LoadEpoch askedAtLoad, const juce::String& line)
 {
     if (askedAtLoad == lroLoadEpoch())
         return false;
@@ -5522,7 +5544,8 @@ void PromptPanel::pollLcoRepromptCadence()
 // repromptLoop otherwise). On SA3 with Resynth the init_audio carry is forced to
 // init_noise ~0.9 so the rewritten words dominate it; off-SA3 (or Resynth off) it is
 // a pure word loop that re-renders fresh from the prompt. From BOTH gen-complete cbs.
-void PromptPanel::runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate)
+void PromptPanel::runSemanticLoopStep(const juce::AudioBuffer<float>& heard, double sampleRate,
+                                      unsigned int askedInLoopRun)
 {
     // (1) Off early-out FIRST (cheap), like pollDriftRegen's regenMode==0.
     auto& apvts = processorRef.getValueTreeState();
@@ -5537,6 +5560,13 @@ void PromptPanel::runSemanticLoopStep(const juce::AudioBuffer<float>& heard, dou
         // the next engage capture.
         return;
     }
+    // A render asked in a run that a stance→Off restore has ended since starts
+    // nothing: the editors hold the originals again, and the clean re-render of
+    // them that the restore owes starts the next run. Stepped from here, the new
+    // run would rewrite the originals while listening to the old run's sound.
+    // (The step's own landing guards the same edge with !loopEngaged_.)
+    if (askedInLoopRun != loopRestoreSeq_)
+        return;
     // NO model gate: Re-Prompt is engine-agnostic — it listens to the just-rendered
     // output (any model) and rewrites the prompt(s) for the next render. Only the
     // OPTIONAL init_audio signal carry (Resynth) is SA3-only, layered on top by
