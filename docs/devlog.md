@@ -1,5 +1,42 @@
 # T5ynth Development Log
 
+## 2026-11-14 — the Phrase sequencer: engine, wiring, and what review found
+
+BJ: Step is fine as it is, Gen is deliberately wild; a second generative mode for conventional
+electronic musicians was wanted, as its own use case between the two („zwischen Stepseq und
+Turing-Seq ein Button"). Concept in `docs/PHRASE_SEQ_CONCEPT.md` (5c72cb0b, „ja, und bau das so"),
+since corrected to what was built (676b704a).
+
+**What exists on `feature/phrase-seq`.** `src/sequencer/PhraseModel.{h,cpp}` renders a bar as a pure
+function of (stored motif, params, bar index): Euclid rhythm, time-span heads → chord members,
+embellishments resolved against the previous note and the next head under the chord valid there,
+form letters, variation operators at phrase ends, seeded evolution per phrase.
+`PhraseSequencer.{h,cpp}` schedules it in quarter notes (host PPQ when the host plays) with
+fixed arrays and no locks on the audio thread; the stored motif crosses threads through a seqlock
+both ways, so Keep stores what was heard. In the processor, the bool `gen_seq_running` became the
+Choice `seq_engine` {Step, Phrase, Gen} (migrated on state load, replay tapes and JSON import), the
+`phr_*` params are new, and the motif is saved as the `phraseMotif` state attribute and the
+`phraseSeq` JSON block. Phrase → Step copies the bar the view shows; From Step analyses the grid.
+`GenerativeSequencer` is unchanged. No GUI yet.
+
+**What review found**, fixed one concern per commit, each with a scenario in
+`tools/phrase_seq_print.cpp` or a case in `tools/test_seq_engine_idle.cpp` and a mutant that fails
+it. Most were in one place: a re-render while playing (a knob, a Keys chord, host jitter). It
+repeated onsets already played (ac31b503, 57915e72, 91dfeff6) and ended sounding notes where the
+replaced render would have, not where the new one does (c7f46403, 6563a535, c9bed0c0). The second
+cluster was Keep: what it stores (the heard, evolved motif), from which phrase evolution counts, and
+how the origin phrase is entered (the kept lead-in), 438e8a81 … 1a6bf9b7. The third was the engine
+switch: a switch made in deep idle did not wake the block (f2fa770e), and a switch caused by a load
+copied the outgoing pattern over the user's grid. Every load now holds the transfer (preset import,
+state restore, Init 5d37a06a, legacy XML 5fcbd503). The mark the hold leaves ends with the load
+(7d15772f) and costs no wake (96fc5ef4).
+
+**Open.** The UI (Step | Phrase | Gen switch, rows P1–P3, read-only phrase view, concept §4). The
+Part weights and the non-heptatonic chord rule are decided by ear. Replaying a session log
+that contains an Init made from Gen or Phrase shows the copied pattern in the step grid. The live
+session did not copy it. The event log records Init as single param changes, not as a load. It is
+visible only while the replay runs: the sequencers are stopped and Stop restores the patch.
+
 ## 2026-11-07 — the sampler's loop and ping-pong seams: the editor cascade, measured
 
 BJ: „Engine Sample: die Endpunkterkennung ist wirklich schlecht. Es gibt kaum ein Preset bei dem
