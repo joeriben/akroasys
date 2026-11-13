@@ -594,6 +594,44 @@ int main(int argc, char** argv)
         check(before <= 16, "live: never more than 16 notes sounding at the end (" + std::to_string(before) + ")");
     }
 
+    std::printf("\n== 10. Shuffle moves onsets, never removes one (ratchets, bars cut short)\n");
+    {
+        // A shuffled onset or a ratchet repeat at or past the bar end used to
+        // be lost: the scheduler enters the next bar first. Shuffle must leave
+        // the number of onsets in every bar unchanged.
+        auto countsPerBar = [&](const Config& cfg, int bars, int num, int den) {
+            const double len = 4.0 * num / den;
+            const Run r = play(cfg, 0.0, bars * len, num, den);
+            std::vector<size_t> n;
+            for (int b = 0; b < bars; ++b) n.push_back(onsInBars(r, len, b, b + 1).size());
+            return n;
+        };
+        struct Case { const char* tag; Part part; int spb, pulses, rot, num, den; };
+        const Case cases[] = {
+            { "bass 1/4 2 rot1 4/4 (ratchet on the last step)", Part::Bass, 4, 2, 1, 4, 4 },
+            { "riff 1/16 4 rot3 4/4 (ratchet on step 15)",      Part::Riff, 16, 4, 3, 4, 4 },
+            { "bass 1/2 2 3/4 (last slot cut to one quarter)",  Part::Bass, 2, 2, 0, 3, 4 },
+            { "riff 1/8 5 7/8",                                 Part::Riff, 8, 5, 0, 7, 8 },
+        };
+        for (const Case& k : cases)
+        {
+            Config c = base();
+            c.part = k.part;
+            c.stepsPerBar = k.spb; c.pulses = k.pulses; c.rotation = k.rot;
+            c.variation = 0.8f;
+            c.phraseBars = 4; c.form = Form::Loop;
+            c.slide = 0.0f;
+            const auto straight = countsPerBar(c, 16, k.num, k.den);
+            bool same = true;
+            for (float sh : { 0.5f, 0.75f })
+            {
+                c.shuffle = sh;
+                same = same && countsPerBar(c, 16, k.num, k.den) == straight;
+            }
+            check(same, std::string("shuffle: ") + k.tag + ": onsets per bar unchanged at Shuffle 0.5 / 0.75");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

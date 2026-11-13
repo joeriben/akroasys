@@ -987,9 +987,22 @@ int barStepsFor(int spb, double barLenQ)
     return n;
 }
 
-double shuffled(int k, double stepQ, float shuffle)
+/** End of a grid slot: the next grid position or the bar end, whichever comes
+ *  first. A bar that is not a whole number of steps cuts its last slot short. */
+double slotEnd(double posQ, double lenQ, double barLenQ)
 {
-    return static_cast<double>(k) * stepQ + ((k & 1) ? static_cast<double>(shuffle) * stepQ : 0.0);
+    return std::min(posQ + lenQ, barLenQ);
+}
+
+/** Onset of grid step k: an odd step is delayed by `shuffle` of its slot.
+ *  Taken of the slot rather than of a full step, so a slot the bar cuts short
+ *  keeps its onset inside the bar (the scheduler plays a bar's events before
+ *  it enters the next one; an onset at or past the bar end would be lost). */
+double shuffled(int k, double stepQ, float shuffle, double barLenQ)
+{
+    const double posQ = static_cast<double>(k) * stepQ;
+    if ((k & 1) == 0) return posQ;
+    return posQ + static_cast<double>(shuffle) * (slotEnd(posQ, stepQ, barLenQ) - posQ);
 }
 
 Chord chordAt(const LineCtx& x, int bar)
@@ -1111,7 +1124,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     {
         const int s = mb * spb + k;
         const double posQ = static_cast<double>(k) * stepQ;
-        const double onQ = shuffled(k, stepQ, cfg.shuffle);
+        const double onQ = shuffled(k, stepQ, cfg.shuffle, x.barLenQ);
         Slot sl = m.slots[static_cast<size_t>(s)];
         const bool head = x.heads[static_cast<size_t>(s)];
         const bool inLast = inLastBeat(k);
@@ -1162,15 +1175,21 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
 
         if (var.ratchet && k == ratchetK)
         {
+            // The repeats divide what is left of the step's slot after its
+            // (shuffled) onset: they stay inside the slot, so none lands on
+            // the next step's onset or past the bar end.
             const int hits = std::clamp(var.ratchetHits, 2, 3);
-            o.durQ = stepQ / hits;
+            const double endQ = slotEnd(posQ, stepQ, x.barLenQ);
+            const double hitQ = (endQ - onQ) / hits;
+            const double gridHitQ = (endQ - posQ) / hits;
+            o.durQ = hitQ;
             o.slideWanted = o.forcedSlide = false;
             out.push(o);
             for (int h = 1; h < hits; ++h)
             {
                 Onset t = o;
-                t.onQ = onQ + h * stepQ / hits;
-                t.gridQ = posQ + h * stepQ / hits;
+                t.onQ = onQ + h * hitQ;
+                t.gridQ = posQ + h * gridHitQ;
                 t.vel = kVelNormal * 0.9f;
                 t.ratchetTail = true;
                 out.push(t);
@@ -1197,8 +1216,8 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         for (int j = 0; j < 4; ++j)
         {
             const double q = lastBeatQ + 0.25 * j;
-            const double onQ = q + ((j & 1) ? static_cast<double>(cfg.shuffle) * 0.25 : 0.0);
             if (q >= x.barLenQ - kEps) continue;
+            const double onQ = q + ((j & 1) ? static_cast<double>(cfg.shuffle) * (slotEnd(q, 0.25, x.barLenQ) - q) : 0.0);
             bool taken = false;
             for (int i = 0; i < out.n; ++i)
                 taken = taken || std::abs(out.a[static_cast<size_t>(i)].gridQ - q) < 0.125 - kEps;
@@ -1234,7 +1253,7 @@ void nextBarOnset(const LineCtx& x, double& onQ, bool& head)
     {
         const int s = mb * spb + k;
         if (nm.slots[static_cast<size_t>(s)].fn == Fn::Rest) continue;
-        onQ = x.barLenQ + shuffled(k, 4.0 / spb, x.cfg->shuffle);
+        onQ = x.barLenQ + shuffled(k, 4.0 / spb, x.cfg->shuffle, x.barLenQ);
         head = x.nextHeads[static_cast<size_t>(s)];
         return;
     }
