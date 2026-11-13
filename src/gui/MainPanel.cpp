@@ -1141,7 +1141,10 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
             {
                 currentPresetFile = fork;
                 processorRef.setLastTags(newTags);
-                processorRef.setLastPresetName(fork.getFileNameWithoutExtension());
+                // The fork has the same content, so whether it holds an LRO
+                // instrument is what was known of the original.
+                processorRef.setLastPresetName(fork.getFileNameWithoutExtension(),
+                                               processorRef.getLastPresetHoldsLro());
             }
             presetManager.refreshLibrary();
             // Keep the "currently loaded" marker on whatever is actually
@@ -1346,13 +1349,14 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
             mainGenerateBtn.setEnabled(!busy);
     };
 
-    // A fresh bake makes the current audio a new, unsaved sound — detach it from
-    // whatever preset was last loaded/saved so Save's "Replace" warning (and its
-    // pre-filled name) stops pointing at an unrelated old file (prompts/tags/seed
-    // stay untouched; only the saved-file identity is stale here, unlike Init).
+    // A new sound (a render, or an LRO pass that changes the preset: see
+    // PromptPanel::onNewGenerationStarted) is not the last loaded/saved preset —
+    // detach it so Save's "Replace" warning (and its pre-filled name) stops
+    // pointing at an unrelated old file (prompts/tags/seed stay untouched; only
+    // the saved-file identity is stale here, unlike Init).
     promptPanel.onNewGenerationStarted = [this] {
         currentPresetFile = juce::File();
-        processorRef.setLastPresetName({});
+        processorRef.setLastPresetName({}, false);
         statusBar.setPresetName({});
         presetManager.setCurrentPreset(currentPresetFile, {});
     };
@@ -2674,6 +2678,7 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
     // Sampler/Wavetable/Freeze are the neural T5osc. persist=false: loading a
     // preset must not rewrite the user's global default mode. Guarded so an
     // already-correct mode does not trigger a redundant relayout.
+    bool fileHoldsLro = false;   // the restored engine mode is Csound (see below)
     {
         const int em = static_cast<int>(
             processorRef.getValueTreeState().getRawParameterValue(PID::engineMode)->load());
@@ -2682,6 +2687,7 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
         const bool wantNeural = ! presetIsLco;
         if (oscEasyMode != wantNeural)
             setOscEasyMode(wantNeural, /*persist=*/false);
+        fileHoldsLro = (em == static_cast<int>(EngineMode::Csound));
     }
 
     // The standalone's session restore ("_buffer.t5p") carries a real preset
@@ -2691,10 +2697,18 @@ void MainPanel::applyLoadedPreset(const PresetFormat::LoadResult& result, const 
     // pre-filled as the Save name (it is not a recognised placeholder, so the
     // drawer's auto-title never kicks in) — one Return away from writing
     // _buffer.t5p into the preset library. Drop only that literal.
-    const auto restoredName = (sourceFile.getFileName() == "_buffer.t5p"
-                               && result.presetName.trim() == "_buffer")
+    const bool sessionBuffer = (sourceFile.getFileName() == "_buffer.t5p");
+    const auto restoredName = (sessionBuffer && result.presetName.trim() == "_buffer")
                                   ? juce::String() : result.presetName;
-    processorRef.setLastPresetName(restoredName);
+    // Whether the file that name names holds an LRO instrument. A loaded file
+    // answers itself: it does where it was saved in Csound mode, the only mode
+    // exportJsonPreset writes one in. The session buffer names a file it is
+    // not, and records nothing about that file: its own engine mode is the
+    // session's at quit, which a panel switch after the load can have moved
+    // either way. Unknown there, so taken as true — an LRO pass landing under
+    // the T5 panel then drops the name, rather than keep one that may no longer
+    // describe the preset (PromptPanel::triggerDcoBake).
+    processorRef.setLastPresetName(restoredName, sessionBuffer || fileHoldsLro);
     processorRef.setLastTags(result.tags);
     statusBar.setPresetName(restoredName);
 
@@ -2735,7 +2749,12 @@ bool MainPanel::savePresetToFile(const juce::File& file, bool includeInferenceCa
     syncGuiStateForPresetSave();
 
     auto target = file.withFileExtension("t5p");
-    processorRef.setLastPresetName(target.getFileNameWithoutExtension());
+    // The file about to be written holds an LRO instrument exactly where
+    // exportJsonPreset writes one: in Csound mode.
+    processorRef.setLastPresetName(target.getFileNameWithoutExtension(),
+                                   static_cast<int>(processorRef.getValueTreeState()
+                                       .getRawParameterValue(PID::engineMode)->load())
+                                   == static_cast<int>(EngineMode::Csound));
 
     const auto snaps = buildSnapshotsForSave();
     if (!PresetFormat::saveToFile(target, processorRef, includeInferenceCache,
@@ -4862,7 +4881,7 @@ void MainPanel::loadInitPreset()
     promptPanel.disarmLroTakeStep();
     promptPanel.dropLroPassInFlight();
     processorRef.setLastPrompts({}, {});
-    processorRef.setLastPresetName({});
+    processorRef.setLastPresetName({}, false);
     processorRef.setLastTags({});
     processorRef.setLastEmbeddings({}, {});
     processorRef.setLastSeed(static_cast<int>(

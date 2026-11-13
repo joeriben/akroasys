@@ -119,7 +119,8 @@ public:
      *  sound before, and is dropped when it lands (lroPassOutlivedLoad). Not
      *  for a preset without either, nor a T5 oscillator snapshot: those leave
      *  the LRO's sound, prompt and card as they were, and a pass landing after
-     *  them only detaches the current preset's name, as it does without a load.
+     *  them is treated as it is without a load: it detaches the current
+     *  preset's name where it changes that preset (onNewGenerationStarted).
      *  (The LRO cache goes with every preset load all the same: it belongs to
      *  the file, MainPanel::applyLoadedPreset.) An LRO snapshot, prompt-only or
      *  not, is refused while a pass runs that will still land
@@ -355,9 +356,12 @@ public:
      *  sound is not the loaded/last-saved preset any more, so MainPanel drops
      *  the stale currentPresetFile/lastPresetName identity here — otherwise the
      *  Save dialog keeps defaulting to that old name and shows a "Replace"
-     *  warning for a file the new sound has nothing to do with. Four paths
-     *  deliberately do NOT fire it: LCO re-prompt corrections (they end in
-     *  triggerDcoBake, which publishes and fires), the cache-replay
+     *  warning for a file the new sound has nothing to do with. An LCO bake
+     *  that lands under the T5 panel only parks its instrument and fires only
+     *  where that changes the preset (T5ynthProcessor::getLastPresetHoldsLro,
+     *  or an LRO cache entry). Four paths deliberately do NOT fire it: LCO re-prompt
+     *  corrections (they end in triggerDcoBake, which publishes and fires as
+     *  above), the cache-replay
      *  short-circuit (a preset saved with its cache is auditioning its OWN
      *  stored variants), the drift auto-regen (an unattended background refresh
      *  of the preset the user is still sitting on), and replay playback

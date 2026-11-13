@@ -2975,6 +2975,7 @@ void PromptPanel::triggerDcoBake()
             // landed render. A Re-Prompt run is what makes this worth having:
             // it leaves its whole series behind, and the CACHE row then travels
             // it without asking the model for any of it a second time.
+            bool cacheTookEntry = false;
             {
                 T5ynthProcessor::CsoundCacheEntry slot;
                 slot.orchestra   = authored.orchestra;
@@ -2996,6 +2997,7 @@ void PromptPanel::triggerDcoBake()
                 self->lroTakeStepArmed_ = false;
                 if (self->processorRef.addCsoundCacheEntry(slot))
                 {
+                    cacheTookEntry = true;
                     // A recording is a recording only while EVERY entry in it is
                     // one. The first sets the flag; each further one can keep it
                     // where it stands but never raise it again - so a live entry
@@ -3021,14 +3023,29 @@ void PromptPanel::triggerDcoBake()
             self->adoptAuthorSettingsStation(authored.settings);
             self->dcoTraceView.setBody(authored.paramsText);   // the back of the card
 
-            // The engine now holds a new, unsaved sound — drop the loaded/
-            // last-saved preset identity (same reason and same siting as the
-            // neural render). Sited at the PUBLISH, not at the trigger where it
-            // used to sit: authoring fails asynchronously (dead subprocess,
-            // backend error, timeout) and that failure branch deliberately
-            // leaves the previously authored orchestra playing — a preset that
-            // is still sounding must keep its name.
-            if (self->onNewGenerationStarted) self->onNewGenerationStarted();
+            // The loaded/last-saved preset identity names a FILE, and goes when
+            // this landing changes the preset that file holds. Sited at the
+            // PUBLISH, not at the trigger where it used to sit: authoring fails
+            // asynchronously (dead subprocess, backend error, timeout) and that
+            // failure branch deliberately leaves the previously authored
+            // orchestra playing — a preset that is still sounding must keep its
+            // name. Under the LRO panel the engine has just been forced to
+            // Csound and the new instrument sounds: always a change. Under the
+            // T5 panel it is only parked, as what switching back to the LRO
+            // then sounds, so it changes the preset only where that preset has
+            // an LRO instrument of its own, which it replaces
+            // (getLastPresetHoldsLro); or where the LRO cache took an entry,
+            // which a Save that includes the cache writes in any mode. A neural
+            // preset keeps its name. (The neural render drops the identity
+            // unconditionally: its audio is always in the file.)
+            const bool csoundEngine =
+                static_cast<int>(self->processorRef.getValueTreeState()
+                                     .getRawParameterValue(PID::engineMode)->load())
+                == EngineMode::Csound;
+            const bool presetHasLro = self->processorRef.getLastPresetHoldsLro();
+            if ((csoundEngine || cacheTookEntry || presetHasLro)
+                && self->onNewGenerationStarted)
+                self->onNewGenerationStarted();
 
             // Open the compile-window poll: pollCsoundCompile (called every
             // tick from the panel's existing 10Hz timerCallback) reports
@@ -4426,7 +4443,8 @@ void PromptPanel::triggerGeneration()
                     // The sound in the engine is now a new, unsaved one — drop the
                     // loaded/last-saved preset identity so Save stops pre-filling
                     // that name and warning it will "Replace" a file this sound has
-                    // nothing to do with (the LCO bake detaches for the same reason).
+                    // nothing to do with (an LRO pass that changes the preset
+                    // detaches for the same reason).
                     // Sited HERE, not at the request, because the neural path's
                     // dominant failure mode is asynchronous: a backend error returns
                     // through result.errorMessage with the loaded preset still

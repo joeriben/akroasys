@@ -431,8 +431,19 @@ public:
     bool hasHumanPrompts() const { return humanPromptsValid; }
     const juce::String& getHumanPromptA() const { return humanPromptA; }
     const juce::String& getHumanPromptB() const { return humanPromptB; }
-    void setLastPresetName(const juce::String& name) { lastPresetName = name; }
+    /** The loaded/last-saved preset's name, and whether the FILE it names holds
+     *  an LRO instrument of its own (saved in Csound mode, the only mode
+     *  exportJsonPreset writes one in). Set together, so the flag describes the
+     *  file the name names and nothing else; no name, no flag. Asked where an
+     *  LRO pass lands under the T5 panel: its parked instrument replaces that
+     *  file's, so the name has to go (PromptPanel::triggerDcoBake). */
+    void setLastPresetName(const juce::String& name, bool holdsLro)
+    {
+        lastPresetName = name;
+        lastPresetHoldsLro = holdsLro && name.isNotEmpty();
+    }
     const juce::String& getLastPresetName() const { return lastPresetName; }
+    bool getLastPresetHoldsLro() const { return lastPresetHoldsLro; }
     void setLastTags(const juce::StringArray& tags) { lastTags = tags; }
     const juce::StringArray& getLastTags() const { return lastTags; }
     void setLastGenerationTimeMs(float ms) { lastGenerationTimeMs = ms; }
@@ -1650,6 +1661,7 @@ private:
 
     // Preset metadata (stored here so preset save can access them)
     juce::String lastPresetName;
+    bool lastPresetHoldsLro = false;   // see setLastPresetName
     juce::StringArray lastTags;
     juce::String lastPromptA, lastPromptB;
     juce::String humanPromptA, humanPromptB;   // durable human-authored prompts (never the loop's rewrites)
