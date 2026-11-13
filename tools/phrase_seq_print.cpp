@@ -757,6 +757,59 @@ int main(int argc, char** argv)
              9, 28, earlyQ, "keep before the origin: every phrase plays on unchanged");
         check(kept.origin == 4, "keep before the origin: the origin stays 4, got " + std::to_string(kept.origin));
 
+        // Keep in the first bar of a phrase after the origin. The bar's entry
+        // is led from the phrase before; under the kept motif (origin = this
+        // phrase) that phrase plays the kept motif itself, not what was heard
+        // there, so a re-render would re-voice the rest of the bar.
+        {
+            Config cc = base();
+            cc.part = Part::Lead;
+            cc.harm = Harm::Chords;
+            cc.chordDegrees = { 1, 6, 3, 7 };
+            cc.layer = Layer::Off;
+            cc.len = 1;
+            cc.stepsPerBar = 16;
+            cc.pulses = 6;
+            cc.rotation = 2;
+            cc.phraseBars = 4;
+            cc.form = Form::AAAB;
+            cc.evolve = 1.0f;
+            cc.variation = 0.0f;
+            const Motif f = fitMotif(generateMotif(2293, 1, cc), cc);
+            const Motif h1 = evolvedMotif(f, cc, 1), h2 = evolvedMotif(f, cc, 2);
+            BarRender scratch;
+            int p1 = -1, pp1 = -1, p2 = -1, pp2 = -1;
+            entryNotes(cc, h1, h2, 8, B, scratch, p1, pp1);
+            entryNotes(cc, h2, h2, 8, B, scratch, p2, pp2);
+            check(p1 != p2 || pp1 != pp2,
+                  "keep in a phrase's first bar: its entry differs when led from the kept motif "
+                  "(else the checks below prove nothing)");
+
+            int differ = 0, runs = 0;
+            std::string firstWhy;
+            for (Harm h : { Harm::Pedal, Harm::Chords })
+                for (std::uint32_t seed : { 2293u, 777u, 4242u, 31337u })
+                {
+                    Config hc = cc;
+                    hc.harm = h;
+                    const Motif at1 = generateMotif(seed, 1, hc);
+                    const Act load1 = [at1](T5ynthPhraseSequencer& s) { s.setStoredMotif(at1); };
+                    const Run ref = play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 } }));
+                    for (double off = 0.0; off < B; off += 0.25)
+                    {
+                        const double kq = 8 * B + off;   // bar 8 = first bar of phrase 2
+                        const Run k = play(hc, 0.0, 12 * B, 4, 4, {}, 0,
+                                           acts({ { 0.0, load1 }, { kq, keepSeen } }));
+                        std::string why;
+                        ++runs;
+                        if (!sameOns(onsInBars(ref, B, 8, 12, kq), onsInBars(k, B, 8, 12, kq), why))
+                            if (differ++ == 0) firstWhy = why;
+                    }
+                }
+            check(differ == 0, "keep in a phrase's first bar: the rest of the bar and the phrase play on unchanged ("
+                                   + std::to_string(differ) + " of " + std::to_string(runs) + " differ) " + firstWhy);
+        }
+
         // Dice while stopped, playback resumes at bar 20 (phrase 5): the new
         // motif is heard as itself there, so Evolve cannot have touched it yet.
         Motif resolved;

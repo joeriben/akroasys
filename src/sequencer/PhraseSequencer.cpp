@@ -435,12 +435,13 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
     if (toAudio.sequence() != toAudioSeen)
     {
         Motif m;
-        std::uint32_t unusedA = 0, unusedB = 0, seqRead = 0;
-        if (toAudio.tryRead(m, unusedA, unusedB, seqRead))
+        std::uint32_t barStands = 0, unusedB = 0, seqRead = 0;
+        if (toAudio.tryRead(m, barStands, unusedB, seqRead))
         {
             liveMotif = m;
             toAudioSeen = seqRead;
-            motifDirty = renderDirty = true;
+            motifDirty = true;
+            if (barStands == 0) renderDirty = true;
         }
     }
 
@@ -485,13 +486,16 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         nextEvent = firstEventFrom(q0);
         positioned = true;
     }
-    else if (renderDirty)
+    else
     {
-        // A change inside the bar: re-render it and play on from here.
         if (motifDirty) rebuildEvolution(floorDiv(bar, phraseBarsOf(cfg)));
-        renderCurrent();
-        nextEvent = firstEventFrom(q0);
-        releaseUnusedHeld(nextEvent, out, 0);
+        if (renderDirty)
+        {
+            // A change inside the bar: re-render it and play on from here.
+            renderCurrent();
+            nextEvent = firstEventFrom(q0);
+            releaseUnusedHeld(nextEvent, out, 0);
+        }
     }
     motifDirty = renderDirty = false;
 
@@ -660,9 +664,9 @@ bool T5ynthPhraseSequencer::MotifChannel::tryRead(Motif& m, std::uint32_t& tagA,
     return true;
 }
 
-void T5ynthPhraseSequencer::publish(const Motif& m)
+void T5ynthPhraseSequencer::publish(const Motif& m, bool barStands)
 {
-    toAudio.write(m, 0, 0);
+    toAudio.write(m, barStands ? 1u : 0u, 0);
 }
 
 bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase) const
@@ -734,7 +738,12 @@ void T5ynthPhraseSequencer::keep()
     undoMotif = stored;
     hasUndo = true;
     stored = m;
-    publish(stored);
+    // The bar playing stands. In the first bar of a phrase a re-render would
+    // lead its entry from the phrase before as the kept motif plays it — the
+    // kept motif itself — instead of from what was heard there, and re-voice
+    // the rest of the bar; from the next bar on the kept motif renders as
+    // what was heard.
+    publish(stored, true);
 }
 
 void T5ynthPhraseSequencer::fromSteps(const StepInput* steps, int count, const Config& c)

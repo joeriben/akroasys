@@ -124,10 +124,12 @@ private:
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
     static_assert(std::atomic<int>::is_always_lock_free);
 
-    /** Message → audio: the stored motif. Tags unused. */
+    /** Message → audio: the stored motif. Tag A: 1 when the bar playing
+     *  stands (Keep): the audio thread adopts the motif without re-rendering
+     *  it. Tag B unused. */
     MotifChannel toAudio;
     std::uint32_t toAudioSeen = 0;       // audio thread: toAudio sequence of liveMotif
-    void publish(const PhraseModel::Motif& m);
+    void publish(const PhraseModel::Motif& m, bool barStands = false);
 
     /** Audio → message: the motif heard in the current phrase (evoCur). Tag A
      *  = the toAudio sequence it was derived from, tag B = its phrase. */
