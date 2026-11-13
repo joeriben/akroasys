@@ -296,12 +296,6 @@ void SynthPanel::initLfo(LfoSection& lfo, const juce::String& name,
         }, kLfoCol);
     lfo.divisionRow->getSlider().setRange(
         0.0, static_cast<double>(ClockDivision::kCount - 1), 1.0);
-    // Lock the value column to a fixed pixel width so the slider track's
-    // RIGHT edge stays put when ClockMode swaps "1.5 Hz" ↔ "1/16T". The
-    // label column is forced from SynthPanel::resized() to the
-    // modulation-section-wide left column width — do NOT force it here.
-    lfo.rateRow->setForcedValueWidth(56);
-    lfo.divisionRow->setForcedValueWidth(56);
     addAndMakeVisible(*lfo.rateRow);
     addAndMakeVisible(*lfo.depthRow);
     addAndMakeVisible(*lfo.divisionRow);
@@ -413,14 +407,6 @@ void SynthPanel::initDrift(DriftSection& drift, const juce::String& name,
         }, kDriftCol);
     drift.divisionRow->getSlider().setRange(
         0.0, static_cast<double>(DriftDivision::kCount - 1), 1.0);
-    // Lock the value column to a fixed pixel width so the slider track's
-    // RIGHT edge stays put when ClockMode swaps. Free mode now shows the period
-    // (e.g. "128 s/cyc" at the floor, "0.50 s/cyc" fast), wider than "Hz", hence 84.
-    // BOTH rows share the width so the track edge is stable across the swap. The
-    // label column is forced from SynthPanel::resized() to the
-    // modulation-section-wide left column width — do NOT force it here.
-    drift.rateRow->setForcedValueWidth(84);
-    drift.divisionRow->setForcedValueWidth(84);
     addAndMakeVisible(*drift.rateRow);
     addAndMakeVisible(*drift.depthRow);
     addAndMakeVisible(*drift.divisionRow);
@@ -2258,11 +2244,7 @@ void SynthPanel::layoutFilterEasy(juce::Rectangle<int> area, float f, int rowH, 
     for (auto* r : { cutoffRow.get(), resoRow.get(), filterDriveRow.get(),
                      kbdTrackRow.get(), filterMixRow.get() })
         if (r)
-        {
-            r->clearForcedLabelWidth();
-            r->clearForcedValueWidth();
             r->setKnobMode(true);
-        }
 
     cutoffRow->getLabel().setText("Cutoff", juce::dontSendNotification);
     resoRow->getLabel().setText("Reso", juce::dontSendNotification);
@@ -2434,11 +2416,7 @@ void SynthPanel::layoutLfoEasy(LfoSection& lfo, juce::Rectangle<int> area, float
 {
     for (auto* r : { lfo.rateRow.get(), lfo.depthRow.get(), lfo.divisionRow.get() })
         if (r)
-        {
-            r->clearForcedLabelWidth();
-            r->clearForcedValueWidth();
             r->setKnobMode(true);
-        }
 
     lfo.rateRow->getLabel().setText("Rate", juce::dontSendNotification);
     lfo.divisionRow->getLabel().setText("Rate", juce::dontSendNotification);
@@ -2505,11 +2483,7 @@ void SynthPanel::layoutDriftEasy(DriftSection& drift, juce::Rectangle<int> area,
 {
     for (auto* r : { drift.rateRow.get(), drift.depthRow.get(), drift.divisionRow.get() })
         if (r)
-        {
-            r->clearForcedLabelWidth();
-            r->clearForcedValueWidth();
             r->setKnobMode(true);
-        }
 
     drift.rateRow->getLabel().setText("Rate", juce::dontSendNotification);
     drift.divisionRow->getLabel().setText("Rate", juce::dontSendNotification);
@@ -2657,8 +2631,6 @@ void SynthPanel::layoutGenerateEasy(juce::Rectangle<int> area, float f, int rowH
     // Vertical XFade slider fills the remaining column height.
     if (crossfadeRegenRow)
     {
-        crossfadeRegenRow->clearForcedLabelWidth();
-        crossfadeRegenRow->clearForcedValueWidth();
         crossfadeRegenRow->setVerticalMode(true);
         crossfadeRegenRow->getLabel().setText("XFade", juce::dontSendNotification);
         crossfadeRegenRow->setBounds(area);
