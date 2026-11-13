@@ -85,7 +85,7 @@ struct Motif
     bool          entryKept     = false;
     int           entryNote     = -1;   // −1: no note, as entryNotes reports it
     int           entryPrevNote = -1;
-    std::uint32_t entryFrame    = 0;    // entryFrameOf() of the config they were heard in
+    std::uint32_t entryFrame    = 0;    // entryFrameOf() of the config and bar they were heard in
 
     int numSteps() const { return len * stepsPerBar; }
 };
@@ -175,6 +175,11 @@ Chord chordFromKeys(int lowestNote, std::uint16_t pcMask);
 
 /** The chord-loop slots in play, in order; returns their count (0 → Pedal). */
 int activeChordSlots(const Config& cfg, std::array<int, 4>& degrees0);
+
+/** Scale degree (0-based) of the chord sounding in `bar` for the Pedal and
+ *  Chords sources: the loop's slot for the bar, 0 (the tonic) for Pedal and
+ *  for a loop with no slot in play. */
+int chordDegreeForBar(const Config& cfg, int bar);
 
 /** Chord sounding in `bar` for the Pedal and Chords sources. */
 Chord chordForBar(const Config& cfg, int bar);
@@ -314,11 +319,16 @@ struct RenderInput
  *  bar and the scheduler plays the events from the current position on. */
 void renderBar(const RenderInput& in, BarRender& out);
 
-/** The frame a kept entry belongs to: the fields that decide which notes the
- *  main line can sound and where phrases begin — Part, Harm, the chord loop,
- *  chord rate, 7ths, scale and phrase length. An exact packing, not a hash:
- *  two configs the processor can build share a word iff these fields agree. */
-std::uint32_t entryFrameOf(const Config& cfg);
+/** The frame of a kept entry into `bar`: what entryNotes reads from the
+ *  config besides the motifs — the chords of bar − 1 and of bar (the line
+ *  looks ahead into the next bar) as chordDegreeForBar plays them, the Harm
+ *  source (a cadence in bar − 1 differs for Pedal and Chords), 7ths, scale,
+ *  Part and phrase length. So a chord-loop edit that leaves those two chords
+ *  alone keeps the frame: under Pedal any loop edit, under Chords the chord
+ *  rate of a one-chord loop, the place of empty slots, the slots the two
+ *  bars do not play. An exact packing, not a hash: two configs the
+ *  processor can build share a word iff these agree. */
+std::uint32_t entryFrameOf(const Config& cfg, int bar);
 
 /** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
  *  of bar − 1 rendered on its own. Keeps continuous play and a locate equal.

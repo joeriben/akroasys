@@ -330,7 +330,7 @@ void T5ynthPhraseSequencer::refreshHeardEntry()
     const Config L = latchedConfig();
     heardEntryKept = cfg.harm != Harm::Keys;
     heardEntryNote = heardEntryPrevNote = -1;
-    heardEntryFrame = entryFrameOf(L);
+    heardEntryFrame = entryFrameOf(L, evoPhrase * phraseBarsOf(cfg));
     if (heardEntryKept)
         entryNotes(L, evoPrev, evoCur, evoPhrase * phraseBarsOf(cfg), barLenQ, scratch,
                    heardEntryNote, heardEntryPrevNote);
@@ -388,7 +388,7 @@ void T5ynthPhraseSequencer::renderCurrent()
         in.prevPrevNote = epp;
         // The phrase's first bar is heard entering from these notes: Keep
         // stores them, so the kept motif enters its origin phrase the same way.
-        const std::uint32_t frame = entryFrameOf(L);
+        const std::uint32_t frame = entryFrameOf(L, bar);
         if (floorMod(bar, N) == 0
             && (!heardEntryKept || ep != heardEntryNote || epp != heardEntryPrevNote
                 || frame != heardEntryFrame))

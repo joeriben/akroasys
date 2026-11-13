@@ -241,20 +241,18 @@ int activeChordSlots(const Config& cfg, std::array<int, 4>& degrees0)
     return count;
 }
 
+int chordDegreeForBar(const Config& cfg, int bar)
+{
+    if (cfg.harm != Harm::Chords) return 0;
+    std::array<int, 4> deg {};
+    const int n = activeChordSlots(cfg, deg);
+    if (n == 0) return 0;
+    return deg[static_cast<size_t>(floorMod(floorDiv(bar, std::max(1, cfg.chordRateBars)), n))];
+}
+
 Chord chordForBar(const Config& cfg, int bar)
 {
-    if (cfg.harm == Harm::Chords)
-    {
-        std::array<int, 4> deg {};
-        const int n = activeChordSlots(cfg, deg);
-        if (n > 0)
-        {
-            const int idx = floorMod(floorDiv(bar, std::max(1, cfg.chordRateBars)), n);
-            return chordForDegree(deg[static_cast<size_t>(idx)], cfg.scaleType,
-                                  cfg.scaleRoot, cfg.ext7);
-        }
-    }
-    return chordForDegree(0, cfg.scaleType, cfg.scaleRoot, cfg.ext7);
+    return chordForDegree(chordDegreeForBar(cfg, bar), cfg.scaleType, cfg.scaleRoot, cfg.ext7);
 }
 
 ChordLabel chordLabel(int degree0, int scaleType, bool ext7)
@@ -1477,7 +1475,7 @@ void renderBar(const RenderInput& in, BarRender& out)
     out.lastVoicingCount = nv;
 }
 
-std::uint32_t entryFrameOf(const Config& cfg)
+std::uint32_t entryFrameOf(const Config& cfg, int bar)
 {
     // Every field in its valid range fits its bits, so the packing is exact.
     static_assert(ScaleQuantizer::COUNT <= 32, "scale type needs 5 bits");
@@ -1488,9 +1486,9 @@ std::uint32_t entryFrameOf(const Config& cfg)
         shift += bits;
     };
     put(static_cast<int>(cfg.part), 2);
-    put(static_cast<int>(cfg.harm), 2);
-    for (int d : cfg.chordDegrees) put(d, 3);   // 0 = empty, 1..7
-    put(cfg.chordRateBars, 3);                  // 1 | 2 | 4
+    put(static_cast<int>(cfg.harm), 2);         // the cadence reads it too
+    put(chordDegreeForBar(cfg, bar - 1), 3);    // 0..6
+    put(chordDegreeForBar(cfg, bar), 3);
     put(cfg.ext7 ? 1 : 0, 1);
     put(phraseBarsOf(cfg) / 8, 2);              // 4 | 8 | 16
     put(cfg.scaleType, 5);
@@ -1502,7 +1500,7 @@ void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp)
 {
     const int N = phraseBarsOf(cfg);
-    if (motif.entryKept && motif.entryFrame == entryFrameOf(cfg)
+    if (motif.entryKept && motif.entryFrame == entryFrameOf(cfg, bar)
         && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin)
     {
         p = motif.entryNote;

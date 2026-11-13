@@ -802,8 +802,9 @@ int main(int argc, char** argv)
                   "(else the checks below prove nothing)");
 
             struct Tally { int differ = 0; std::string why; };
-            Tally plain, gate, redo, spot, locate, frameOff, frameForced;
-            int runs = 0;
+            Tally plain, gate, edit, redo, spot, locate, frameOff, frameForced, neutral, neutralOff;
+            int runs = 0, frameRuns = 0, neutralRuns = 0;
+            bool frameMoves = true, frameStays = true;
             auto tally = [&](Tally& t, const Run& a, const Run& b, int from, int to, double fromQ) {
                 std::string why;
                 if (!sameOns(onsInBars(a, B, from, to, fromQ), onsInBars(b, B, from, to, fromQ), why))
@@ -812,13 +813,21 @@ int main(int argc, char** argv)
             const Act undo = [](T5ynthPhraseSequencer& s) { s.undo(); };
             const Act stopStart = [](T5ynthPhraseSequencer& s) { s.stop(); s.start(); };
             for (Harm h : { Harm::Pedal, Harm::Chords })
-                for (std::uint32_t seed : { 2293u, 777u, 4242u, 31337u })
+                for (std::uint32_t seed : { 2293u, 777u, 4242u, 31337u, 182150u })
                 {
                     Config hc = cc;
                     hc.harm = h;
                     Config gc = hc;
                     gc.gate = 0.5f;   // renders the bar again, moves no pitch
                     const Act gateHalf = [gc](T5ynthPhraseSequencer& s) { s.setConfig(gc); };
+                    // A chord-loop edit that leaves the chords around the
+                    // entry (bars 7 and 8) alone: Pedal ignores the loop;
+                    // under Chords only slot 1, which bar 9 plays, changes.
+                    Config ec = hc;
+                    ec.chordDegrees = h == Harm::Pedal ? std::array<int, 4> { 1, 4, 5, 1 }
+                                                       : std::array<int, 4> { 1, 2, 3, 7 };
+                    const Act loopEdit = [ec](T5ynthPhraseSequencer& s) { s.setConfig(ec); };
+                    frameStays = frameStays && entryFrameOf(ec, 8) == entryFrameOf(hc, 8);
                     const Motif at1 = generateMotif(seed, 1, hc);
                     const Act load1 = [at1](T5ynthPhraseSequencer& s) { s.setStoredMotif(at1); };
                     const Run ref = play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 } }));
@@ -834,6 +843,11 @@ int main(int argc, char** argv)
                               play(hc, 0.0, 12 * B, 4, 4, {}, 0,
                                    acts({ { 0.0, load1 }, { kq, keepSeen }, { kq + 1.0, gateHalf } })),
                               8, 12, kq);
+                        tally(edit,
+                              play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 }, { kq + 1.0, loopEdit } })),
+                              play(hc, 0.0, 12 * B, 4, 4, {}, 0,
+                                   acts({ { 0.0, load1 }, { kq, keepSeen }, { kq + 1.0, loopEdit } })),
+                              8, 12, kq);
                         tally(redo, ref,
                               play(hc, 0.0, 12 * B, 4, 4, {}, 0,
                                    acts({ { 0.0, load1 }, { kq, keepSeen }, { kq + 0.25, undo }, { kq + 0.5, undo } })),
@@ -846,29 +860,48 @@ int main(int argc, char** argv)
                               8, 12, 8 * B);
 
                         // The entry is absolute notes heard in hc's frame. In
-                        // another key, Part, chord loop or Harm the origin
-                        // phrase enters from the phrase before, exactly as
-                        // the same motif without a kept entry does.
+                        // another key, Part or Harm, or with other chords
+                        // around the entry, the origin phrase enters from the
+                        // phrase before, exactly as the same motif without a
+                        // kept entry does.
                         Motif noEntry = keptHere;
                         noEntry.entryKept = false;
-                        Config key = hc, part = hc, loop = hc, harm = hc;
+                        auto from = [&](const Config& vc, const Motif& m) {
+                            return play(vc, 8 * B, 12 * B, 4, 4, {}, 0,
+                                        acts({ { 0.0, [m](T5ynthPhraseSequencer& s) { s.setStoredMotif(m); } } }));
+                        };
+                        Config key = hc, part = hc, harm = hc, loop = hc;
                         key.scaleRoot = 0;
                         part.part = Part::Bass;
-                        loop.chordDegrees = { 1, 4, 5, 1 };
                         harm.harm = h == Harm::Pedal ? Harm::Chords : Harm::Pedal;
-                        for (const Config& vc : { key, part, loop, harm })
+                        loop.chordDegrees = { 1, 4, 5, 1 };   // bar 7 plays I, not vii
+                        std::vector<Config> moved { key, part, harm };
+                        if (h == Harm::Chords) moved.push_back(loop);
+                        for (const Config& vc : moved)
                         {
-                            auto from = [&](const Motif& m) {
-                                return play(vc, 8 * B, 12 * B, 4, 4, {}, 0,
-                                            acts({ { 0.0, [m](T5ynthPhraseSequencer& s) { s.setStoredMotif(m); } } }));
-                            };
-                            const Run without = from(noEntry);
-                            tally(frameOff, without, from(keptHere), 8, 12, 8 * B);
+                            ++frameRuns;
+                            frameMoves = frameMoves && entryFrameOf(vc, 8) != entryFrameOf(hc, 8);
+                            const Run without = from(vc, noEntry);
+                            tally(frameOff, without, from(vc, keptHere), 8, 12, 8 * B);
                             // The same entry claimed for vc's frame does apply
                             // there: else the check above proves nothing.
                             Motif forced = keptHere;
-                            forced.entryFrame = entryFrameOf(vc);
-                            tally(frameForced, without, from(forced), 8, 12, 8 * B);
+                            forced.entryFrame = entryFrameOf(vc, 8);
+                            tally(frameForced, without, from(vc, forced), 8, 12, 8 * B);
+                        }
+                        // Pedal under another chord loop and chord rate is
+                        // the same pedal: the entry still applies, and the
+                        // phrase plays as heard.
+                        if (h == Harm::Pedal)
+                        {
+                            Config pedalAlike = hc;
+                            pedalAlike.chordDegrees = { 1, 4, 5, 1 };
+                            pedalAlike.chordRateBars = 2;
+                            ++neutralRuns;
+                            frameStays = frameStays && entryFrameOf(pedalAlike, 8) == entryFrameOf(hc, 8);
+                            tally(neutral, from(hc, keptHere), from(pedalAlike, keptHere), 8, 12, 8 * B);
+                            // Dropping the entry there would have changed it.
+                            tally(neutralOff, from(hc, keptHere), from(pedalAlike, noEntry), 8, 12, 8 * B);
                         }
                     }
                 }
@@ -878,16 +911,26 @@ int main(int argc, char** argv)
             };
             report(plain, "the rest of the bar and the phrase play on unchanged");
             report(gate, "then Gate later in the bar: as with Gate alone");
+            report(edit, "then a chord-loop edit away from the entry's chords: as with the edit alone");
             report(redo, "then Undo, Redo: unchanged");
             report(spot, "stop, keep, start on the spot: as a stop and start");
             report(locate, "a locate back into the phrase plays it as heard");
+            check(frameMoves, "entry frame: another key / Part / Harm / chord around the entry changes it");
+            check(frameStays, "entry frame: a chord-loop edit away from the entry's chords keeps it");
             check(frameOff.differ == 0,
-                  "keep in a phrase's first bar, then another key / Part / chord loop / Harm: it enters as without "
-                  "the kept entry (" + std::to_string(frameOff.differ) + " of " + std::to_string(4 * runs)
+                  "keep in a phrase's first bar, then another key / Part / Harm / chord around the entry: it enters "
+                  "as without the kept entry (" + std::to_string(frameOff.differ) + " of " + std::to_string(frameRuns)
                       + " differ) " + frameOff.why);
             check(frameForced.differ > 0,
                   "keep in a phrase's first bar: the kept entry, claimed for the changed frame, would change it ("
-                      + std::to_string(frameForced.differ) + " of " + std::to_string(4 * runs) + " differ)");
+                      + std::to_string(frameForced.differ) + " of " + std::to_string(frameRuns) + " differ)");
+            check(neutral.differ == 0,
+                  "keep in a phrase's first bar, Pedal, then another chord loop and rate: it plays as heard ("
+                      + std::to_string(neutral.differ) + " of " + std::to_string(neutralRuns) + " differ) "
+                      + neutral.why);
+            check(neutralOff.differ > 0,
+                  "keep in a phrase's first bar, Pedal: without the kept entry the phrase would change ("
+                      + std::to_string(neutralOff.differ) + " of " + std::to_string(neutralRuns) + " differ)");
         }
 
         // Dice while stopped, playback resumes at bar 20 (phrase 5): the new
