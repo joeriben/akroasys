@@ -1313,6 +1313,102 @@ int main(int argc, char** argv)
                              + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 17. A step longer than its bar ends with the bar, not under the bars after it\n");
+    {
+        // One or two steps per bar in a meter shorter than a step: the step
+        // is cut at the bar end. The bar after it may be silent — Drop (the
+        // B bar of AAAB at Variation 1; below 4 steps per bar there is no
+        // Fill, so the variation is a Drop) or an empty bar of a Len 2 motif
+        // — and the note before must still end before the bar beyond starts.
+        int poly = 0, errs = 0, silent = 0, runs = 0, lenErr = 0;
+        std::string why;
+        auto tally = [&](const Run& r, double bl, int bars, const std::string& tag) {
+            ++runs;
+            poly += r.polyMain;
+            errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+            std::vector<bool> plays(static_cast<size_t>(bars), false);
+            for (const auto& p : r.events)
+                if (p.ev.strandId == -1 && p.ev.type == VoiceEvent::Type::NoteOn)
+                {
+                    const int b = static_cast<int>(std::floor(p.q / bl + 1.0e-9));
+                    if (b >= 0 && b < bars) plays[static_cast<size_t>(b)] = true;
+                }
+            for (bool b : plays) silent += !b;
+            if (r.polyMain && why.empty())
+            {
+                why = tag + ":";
+                for (const auto& p : r.events)
+                    if (p.ev.strandId == -1 && p.q < 6 * bl)
+                        why += std::string(" ") + (p.ev.type == VoiceEvent::Type::NoteOn ? "on" : "off")
+                             + std::to_string(p.ev.note) + "@" + std::to_string(p.q).substr(0, 5);
+            }
+        };
+        const std::pair<int, int> metres[] = { { 1, 4 }, { 1, 8 }, { 2, 8 }, { 3, 16 }, { 5, 16 }, { 3, 8 } };
+        for (Part part : { Part::Bass, Part::Lead })
+            for (int spb : { 1, 2 })
+                for (const auto& ts : metres)
+                    for (float gate : { 0.8f, 1.0f })
+                    {
+                        const double bl = 4.0 * ts.first / ts.second;
+                        const std::string tag = "part " + std::to_string(static_cast<int>(part)) + " spb "
+                                              + std::to_string(spb) + " " + std::to_string(ts.first) + "/"
+                                              + std::to_string(ts.second) + " gate " + std::to_string(gate).substr(0, 3);
+                        Config c = base();
+                        c.part = part;
+                        c.stepsPerBar = spb;
+                        c.rotation = 0;
+                        c.slide = 0.0f;
+                        c.gate = gate;
+                        c.layer = Layer::Off;
+                        c.harm = Harm::Chords;
+                        c.chordDegrees = { 1, 4, 5, 6 };
+                        c.phraseBars = 4;
+                        // Drop in the B bar.
+                        for (std::uint32_t seed : { 1u, 7u, 99u })
+                        {
+                            Config d = c;
+                            d.len = 1; d.pulses = 1;
+                            d.form = Form::AAAB;
+                            d.variation = 1.0f;
+                            tally(play(d, 0.0, 16 * bl, ts.first, ts.second, {}, seed), bl, 16,
+                                  tag + " drop seed " + std::to_string(seed));
+                        }
+                        // A Len 2 motif whose second bar is empty.
+                        Config e = c;
+                        e.len = 2; e.pulses = 1;
+                        e.form = Form::Loop;
+                        e.variation = 0.0f;
+                        std::array<StepInput, 4> steps {};
+                        for (int i = 0; i < 2 * spb; ++i) steps[static_cast<size_t>(i)] = { 57, i == 0, false, 0.8f };
+                        const Motif m = motifFromSteps(steps.data(), 2 * spb, e, 5, 0);
+                        bool loaded = false;
+                        const Run r = play(e, 0.0, 12 * bl, ts.first, ts.second, {}, 0, [&](T5ynthPhraseSequencer& s, double) {
+                            if (!loaded) { s.setStoredMotif(m); loaded = true; }
+                        });
+                        tally(r, bl, 12, tag + " len 2");
+                        // The first step: gate × what the bar leaves of it.
+                        double onQ = -1.0;
+                        for (const auto& p : r.events)
+                        {
+                            if (p.ev.strandId != -1) continue;
+                            if (p.ev.type == VoiceEvent::Type::NoteOn) { onQ = p.q; continue; }
+                            if (onQ < 0.0) continue;
+                            const double want = gate * std::min(4.0 / spb, bl);
+                            if (std::abs((p.q - onQ) - want) > 2.0e-3 && lenErr++ == 0)
+                                why += " | " + tag + " len 2: note " + std::to_string(p.q - onQ).substr(0, 5)
+                                     + " q, want " + std::to_string(want).substr(0, 5);
+                            break;
+                        }
+                    }
+        check(silent > 0, "step longer than its bar: the runs meet silent bars (" + std::to_string(silent) + ")");
+        check(poly == 0, "step longer than its bar: main line monophonic (" + std::to_string(poly)
+                             + " overlaps over " + std::to_string(runs) + " runs) " + why);
+        check(lenErr == 0, "step longer than its bar: it sounds gate x the bar (" + std::to_string(lenErr)
+                               + " off) " + why);
+        check(errs == 0, "step longer than its bar: no hanging or orphan note, no bad glide ("
+                             + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

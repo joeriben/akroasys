@@ -1173,8 +1173,14 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             }
         }
 
+        // A step lasts its slot: a step longer than what is left of the bar
+        // (one or two steps per bar in a short meter, the last slot of an odd
+        // one) is cut at the bar end, as shuffle and ratchet cut it. Gate is
+        // a share of that. Uncut, a note before a silent bar (Drop, an empty
+        // motif bar) rang on into the bar beyond and under its notes.
         Onset o;
-        o.onQ = onQ; o.gridQ = posQ; o.durQ = stepQ; o.note = note; o.octShift = octShift;
+        o.onQ = onQ; o.gridQ = posQ; o.durQ = slotEnd(posQ, stepQ, x.barLenQ) - posQ;
+        o.note = note; o.octShift = octShift;
         o.vel = sl.accent ? kVelAccent : kVelNormal;
         o.step = s; o.barStep = k; o.fn = sl.fn; o.head = head; o.accent = sl.accent;
         o.forcedSlide = sl.slide;
