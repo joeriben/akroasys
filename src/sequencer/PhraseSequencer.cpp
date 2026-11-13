@@ -220,7 +220,7 @@ void T5ynthPhraseSequencer::addPending(double q, int note, int strand, Line line
         emitOff(pending[static_cast<size_t>(earliest)].note, pending[static_cast<size_t>(earliest)].strand, out, offset);
         pending[static_cast<size_t>(earliest)] = pending[static_cast<size_t>(--pendingCount)];
     }
-    pending[static_cast<size_t>(pendingCount++)] = { q, note, strand, line };
+    pending[static_cast<size_t>(pendingCount++)] = { q, q, note, strand, line };
 }
 
 bool T5ynthPhraseSequencer::sharesOnset(int index) const
@@ -305,6 +305,12 @@ void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
     // instead. Its line is the one the renderer bounds it by (Event::line):
     // the Octave and Chord layers end at the main line's next onset, the
     // Answer at its own.
+    //
+    // The bound starts from the note's own off each time, not from the last
+    // bound: a note still pending has not reached any earlier bound, so the
+    // onset that set it has not played, and the render now playing may no
+    // longer have it (a second change before that onset, a knob dragged
+    // across values). Only the render now playing says where the note ends.
     constexpr double inf = std::numeric_limits<double>::infinity();
     double nextMain = inf, nextAnswer = inf;
     for (int i = fromIndex; i < render.count && (nextMain == inf || nextAnswer == inf); ++i)
@@ -316,7 +322,7 @@ void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
     for (int i = 0; i < pendingCount; ++i)
     {
         auto& p = pending[static_cast<size_t>(i)];
-        p.q = std::min(p.q, p.line == Line::Answer ? nextAnswer : nextMain);
+        p.q = std::min(p.ownQ, p.line == Line::Answer ? nextAnswer : nextMain);
     }
 }
 

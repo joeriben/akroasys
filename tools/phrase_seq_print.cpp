@@ -1730,6 +1730,150 @@ int main(int argc, char** argv)
                              + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 21. Several changes before a note's bound onset: the render now playing bounds it\n");
+    {
+        // A change bounds a sounding note by its line's next onset (19). A
+        // second change before that onset may take the onset away; the note
+        // must then end where the render now playing ends it, not at the onset
+        // that never played. Two changes in a bar (a denser grid and back, or
+        // on to a third grid) and a knob dragged across grid sizes, one value
+        // per block. Oracle, as 19 for every note: it ends at the earlier of
+        // the off its own render gave it (a run in the config it started
+        // under, same note on the same sample) and its line's next onset as
+        // played.
+        struct Schedule { Config from; std::vector<std::pair<double, Config>> changes; std::string tag; };
+        std::vector<Schedule> schedules;
+        static const int sweep[] = { 1, 2, 3, 4, 6, 8, 12, 16, 12, 8, 6, 4, 3, 2, 1 };
+        for (Part part : { Part::Bass, Part::Riff, Part::Lead, Part::Stab })
+            for (Layer layer : { Layer::Off, Layer::Octave, Layer::Chord, Layer::Answer })
+                for (float gate : { 1.0f, 0.5f })
+                {
+                    Config a = base();
+                    a.part = part;
+                    a.layer = layer;
+                    a.form = Form::ABAB;   // bar 3 is a B unit: the Answer plays
+                    a.variation = 0.0f;
+                    a.slide = 0.0f;
+                    a.gate = gate;
+                    a.stepsPerBar = 1; a.pulses = 1; a.rotation = 0;
+                    const std::string pl = "part " + std::to_string(static_cast<int>(part)) + " layer "
+                                         + std::to_string(static_cast<int>(layer)) + " gate "
+                                         + std::to_string(gate).substr(0, 3);
+                    for (int pulses : { 16, 5 })
+                        for (int back : { 1, 2 })
+                        {
+                            // Denser (next onset 0.75), then back to one step
+                            // or on to two (next onset 2.0) before 0.75.
+                            Config d = a, e = a;
+                            d.stepsPerBar = 16; d.pulses = pulses;
+                            e.stepsPerBar = back; e.pulses = back;
+                            schedules.push_back({ a, { { 3 * B + 0.552, d }, { 3 * B + 0.6507, e } },
+                                                  pl + " 1 -> 16/" + std::to_string(pulses) + " -> "
+                                                      + std::to_string(back) });
+                        }
+                    Schedule s { a, {}, pl + " knob drag 1..16..1" };
+                    const double dq = kBlock * kBpm / (60.0 * kSr);
+                    for (int k = 0; k < static_cast<int>(std::size(sweep)); ++k)
+                    {
+                        Config d = a;
+                        d.stepsPerBar = d.pulses = sweep[k];
+                        s.changes.push_back({ 3 * B + 0.30 + k * dq, d });
+                    }
+                    schedules.push_back(s);
+                }
+        auto offAfter = [](const Run& r, size_t i) {
+            for (size_t j = i + 1; j < r.events.size(); ++j)
+                if (r.events[j].ev.type == VoiceEvent::Type::NoteOff && r.events[j].ev.strandId == r.events[i].ev.strandId
+                    && r.events[j].ev.note == r.events[i].ev.note) return r.events[j].q;
+            return std::numeric_limits<double>::infinity();
+        };
+        int checked = 0, wrong = 0, unmatched = 0, errs = 0, longer = 0;
+        std::string why;
+        for (const auto& sc : schedules)
+        {
+            const bool answer = sc.from.layer == Layer::Answer;
+            auto lineStrandOf = [&](int strand) { return strand >= 0 && answer ? 5 : -1; };
+            // The configs in turn, each with the position it took effect at.
+            std::vector<std::pair<double, Config>> applied { { -1.0, sc.from } };
+            size_t next = 0;
+            const Run r = play(sc.from, 0.0, 6 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                while (next < sc.changes.size() && q >= sc.changes[next].first)
+                {
+                    s.setConfig(sc.changes[next].second);
+                    applied.push_back({ q, sc.changes[next].second });
+                    ++next;
+                }
+            });
+            std::vector<Run> refs;
+            for (const auto& ap : applied) refs.push_back(play(ap.second, 0.0, 6 * B));
+            errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+            const double from = sc.changes.front().first;
+            for (size_t i = 0; i < r.events.size(); ++i)
+            {
+                const auto& p = r.events[i];
+                if (p.ev.type != VoiceEvent::Type::NoteOn) continue;
+                const double got = offAfter(r, i);
+                if (!(got > from)) continue;   // ended before the first change
+                size_t k = 0;
+                while (k + 1 < applied.size() && applied[k + 1].first <= p.q + 0.5 * kOneSampleQ) ++k;
+                const Run& ref = refs[k];
+                double ownOff = -1.0;
+                for (size_t j = 0; j < ref.events.size() && ownOff < 0.0; ++j)
+                    if (ref.events[j].sample == p.sample && ref.events[j].ev.type == VoiceEvent::Type::NoteOn
+                        && ref.events[j].ev.note == p.ev.note && ref.events[j].ev.strandId == p.ev.strandId)
+                        ownOff = offAfter(ref, j);
+                if (ownOff < 0.0) { ++unmatched; continue; }
+                const int lineStrand = lineStrandOf(p.ev.strandId);
+                double nextOn = std::numeric_limits<double>::infinity();
+                for (size_t j = i + 1; j < r.events.size(); ++j)
+                    if (r.events[j].ev.type == VoiceEvent::Type::NoteOn && r.events[j].ev.strandId == lineStrand
+                        && r.events[j].q > p.q + 2 * kOneSampleQ)
+                    { nextOn = r.events[j].q; break; }
+                const double want = std::min(ownOff, nextOn);
+                ++checked;
+                // A note the second change lets sound past the first change's bound.
+                longer += want > 3 * B + 0.75 + 2 * kOneSampleQ && p.q < from;
+                if (std::abs(got - want) > 2 * kOneSampleQ && wrong++ == 0)
+                    why = sc.tag + ": note " + std::to_string(p.ev.note) + " strand " + std::to_string(p.ev.strandId)
+                        + " from q " + std::to_string(p.q).substr(0, 6) + " ends at q " + std::to_string(got).substr(0, 6)
+                        + ", its line's next onset q " + std::to_string(nextOn).substr(0, 6) + ", its own off q "
+                        + std::to_string(ownOff).substr(0, 6);
+            }
+        }
+        // The plain case: Bass, one step, 16 steps at 0.552, one step again at
+        // 0.6507. The bar's note ends at the next bar's onset, 4.0 into it.
+        {
+            Config a = base();
+            a.form = Form::Loop;
+            a.variation = 0.0f;
+            a.slide = 0.0f;
+            a.gate = 1.0f;
+            a.layer = Layer::Off;
+            a.stepsPerBar = 1; a.pulses = 1; a.rotation = 0;
+            Config d = a;
+            d.stepsPerBar = 16; d.pulses = 16;
+            int step = 0;
+            const Run r = play(a, 0.0, 2 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                if (step == 0 && q >= 0.552) { s.setConfig(d); ++step; }
+                else if (step == 1 && q >= 0.6507) { s.setConfig(a); ++step; }
+            });
+            double firstOff = -1.0;
+            for (const auto& e : r.events)
+                if (e.ev.type == VoiceEvent::Type::NoteOff) { firstOff = e.q; break; }
+            check(std::abs(firstOff - B) <= 2 * kOneSampleQ,
+                  "several changes: 1 -> 16 -> 1 step before the 16-grid's onset, the bar's note ends at the next bar (q "
+                      + std::to_string(firstOff).substr(0, 6) + ")");
+            errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+        }
+        check(checked > 0 && longer > 0, "several changes: notes sounding across the changes, some past the first bound ("
+                                             + std::to_string(checked) + " notes, " + std::to_string(longer) + " past it)");
+        check(unmatched == 0, "several changes: every note found in a run of the config it started under ("
+                                  + std::to_string(unmatched) + " not)");
+        check(wrong == 0, "several changes: a note ends at min(its own off, its line's next onset as played) ("
+                              + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
+        check(errs == 0, "several changes: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
