@@ -1218,11 +1218,22 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         {
             const double q = lastBeatQ + 0.25 * j;
             if (q >= x.barLenQ - kEps) continue;
-            const double onQ = q + ((j & 1) ? static_cast<double>(cfg.shuffle) * (slotEnd(q, 0.25, x.barLenQ) - q) : 0.0);
+            // Taken on the straight grid, so Shuffle never removes a run note.
             bool taken = false;
             for (int i = 0; i < out.n; ++i)
                 taken = taken || std::abs(out.a[static_cast<size_t>(i)].gridQ - q) < 0.125 - kEps;
             if (taken) continue;
+            // The run swings with the line: inside the slot of the step it
+            // falls in, it divides what follows that step's (shuffled) onset,
+            // as the ratchet repeats do. Shuffling it on the 16th grid instead
+            // put it on the onset of a coarser odd step that shuffle had moved
+            // into this 16th: two notes of the line on one tick. At 1/16 the
+            // two coincide.
+            const int k = static_cast<int>(std::floor((q + kEps) / stepQ));
+            const double slotQ = static_cast<double>(k) * stepQ;
+            const double slotOnQ = shuffled(k, stepQ, cfg.shuffle, x.barLenQ);
+            const double slotEndQ = slotEnd(slotQ, stepQ, x.barLenQ);
+            const double onQ = slotOnQ + (q - slotQ) * (slotEndQ - slotOnQ) / (slotEndQ - slotQ);
             Onset f;
             f.onQ = onQ; f.gridQ = q;
             f.durQ = 0.25;

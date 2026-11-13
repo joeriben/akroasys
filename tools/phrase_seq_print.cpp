@@ -938,6 +938,47 @@ int main(int argc, char** argv)
                   + std::to_string(left) + ", orphans " + std::to_string(orphans) + ", bad " + std::to_string(bad) + ")");
     }
 
+    std::printf("\n== 13. A Fill note never starts on a step's onset (shuffle, odd meters)\n");
+    {
+        // Shuffle moves an odd step into a later 16th, which may be one the
+        // Fill runs on: a Fill note there started on (or a hair beside) the
+        // step's onset, two note-ons of a monophonic line on one tick.
+        const int meters[][2] = { { 4, 4 }, { 3, 4 }, { 7, 8 }, { 9, 16 }, { 5, 8 } };
+        const int spbs[] = { 4, 8, 16 };
+        const float shuffles[] = { 0.2f, 0.25f, 0.5f, 0.75f };
+        const Part parts[] = { Part::Bass, Part::Lead };
+        int runs = 0, sameTick = 0, hangs = 0;
+        for (const auto& mt : meters)
+            for (int spb : spbs)
+                for (float sh : shuffles)
+                    for (Part part : parts)
+                        for (int pulses : { std::max(1, spb / 2), spb * 3 / 4, spb })
+                        for (int rot : { 0, 1 })
+                        for (std::uint32_t seed = 1; seed <= 2; ++seed)
+                        {
+                            Config c = base();
+                            c.part = part;
+                            c.stepsPerBar = spb;
+                            c.pulses = pulses;
+                            c.rotation = rot;
+                            c.shuffle = sh;
+                            c.variation = 1.0f;
+                            c.slide = 1.0f;
+                            c.phraseBars = 4;
+                            const double barLenQ = mt[0] * 4.0 / mt[1];
+                            const Run r = play(c, 0.0, 16 * barLenQ, mt[0], mt[1], {}, seed);
+                            ++runs;
+                            hangs += r.sounding + r.orphanOffs + r.badGlides;
+                            std::map<int, int> onsAt;   // sample → main-line note-ons
+                            for (const auto& pl : r.events)
+                                if (pl.ev.type == VoiceEvent::Type::NoteOn && pl.ev.strandId == -1)
+                                    sameTick += onsAt[pl.sample]++ > 0;
+                        }
+        check(sameTick == 0, "fill vs shuffle: no two main-line note-ons on one tick over "
+                                 + std::to_string(runs) + " runs (" + std::to_string(sameTick) + ")");
+        check(hangs == 0, "fill vs shuffle: no hanging voice, orphan off or bad glide (" + std::to_string(hangs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

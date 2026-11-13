@@ -250,8 +250,10 @@ void T5ynthPhraseSequencer::emitOn(int index, std::vector<VoiceEvent>& out, int 
     // A held note is continued by its strand's next onset (TB-303 slide, as
     // the step sequencer): that onset glides the live voice and its later
     // note-off names the new note. An onset of several voices on the strand
-    // (Stab's chord after a Part switch from a sliding line) has no one voice
-    // to continue: the held note ends there and the chord starts fresh. The
+    // has no one voice to continue: the held note ends there and the voices
+    // start fresh. Only Stab's chord is such an onset (met after a Part switch
+    // from a sliding line); a monophonic line never puts two notes on one
+    // tick, and a layer plays on strands of its own. The
     // processor's sort keeps no order among note-ons of one tick, and the
     // voice manager glides the newest voice of the source, so a chord voice
     // started on the same tick could take the glide and leave the held voice
