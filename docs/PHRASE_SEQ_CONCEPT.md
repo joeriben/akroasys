@@ -1,7 +1,10 @@
 # Phrase Sequencer — Concept
 
-Status: concept, 2026-11-13. Nothing implemented. The Gen sequencer is not
-touched by anything in here.
+Status: concept 2026-11-13; engine, params, persistence and transfers
+implemented 2026-11-14 on `feature/phrase-seq`; the Phrase UI (§4) is not
+built yet. Where the implementation settled a point differently from the
+first draft, this text says what was built. `GenerativeSequencer` is
+unchanged.
 
 ## 1. Purpose
 
@@ -190,10 +193,22 @@ values for the listening phase, not derived from data.
 - Pitch: heads draw a member from the Part's preferences; non-heads draw an
   embellishment kind from the Part's set, constrained by context (Passing
   only if P and T are at least two scale steps apart, and so on).
-- Slides: only on Approach and Passing steps into a head (gliding into the
-  target), with probability = Slide.
-- Generation is seeded. Dice draws a new seed and generates a new motif;
-  Undo returns to the previous one (one level).
+- Slides: drawn at render time, not stored by Dice: a Passing or Approach
+  step that leads into a head slides into it with probability = Slide
+  (seeded per step). A slide stored in the motif (From Step takes the
+  step's Glide bind) is forced and slides into whatever step comes next.
+  No slide ever goes into a Fill note or a ratchet repeat, and Stab never
+  slides.
+- **Step length.** A step sounds for its slot × Gate, counted from its
+  shuffled onset, and never past the next onset of its line; a shuffled
+  step can end up to 3/4 of a slot after its slot. When the bar is
+  re-rendered while a note sounds (a knob change, a chord from Keys), the
+  note ends at the earlier of its own end and its line's next onset in the
+  new render; bar entry bounds it the same way.
+- Generation is seeded; the seed is stored in the motif, not as a param.
+  Dice draws a new seed and generates a new motif. Undo is one level over
+  Dice, Keep and From Step: it returns to the motif before the last of
+  them, and a second Undo goes forward again.
 
 ### 3.7 Phrase grammar and variation
 
@@ -211,10 +226,13 @@ values for the listening phase, not derived from data.
   2. **Register lift**: the last beat goes up an octave (Bass: an Octave
      embellishment instead).
   3. **Fill**: extra 16th pulses in the last beat, as a passing/approach run
-     into the next downbeat.
+     into the next downbeat. Needs at least 4 steps per bar. The free 16ths
+     are found on the straight grid; the fill notes then swing with the
+     line.
   4. **Ratchet**: one head in the last beat repeats as 2 or 3 sub-steps.
   5. **Drop**: the last beat is silent (the gap before the next phrase).
-     Excludes Fill.
+     Drop and Fill exclude each other; when both would apply, a seeded coin
+     picks one.
 - Variation = 0 is a literal loop (ABAB keeps only its cadences, which
   belong to the form).
 - Mechanically this is what Elektron's conditional trigs (A:B, FILL) do by
@@ -222,8 +240,9 @@ values for the listening phase, not derived from data.
 
 **Phrase position** comes from the host when the host plays (bar index from
 the PPQ position and the time-signature numerator, 4/4 if the host reports
-none), from MIDI clock Song Position Pointer when that is the sync source,
-otherwise from bars counted since Play. The chord loop and the phrase
+none), otherwise from bars counted since Play. MIDI clock Song Position
+Pointer is not implemented (the plugin reads no SPP anywhere). The chord
+loop and the phrase
 grammar both run off this one bar index, so they are aligned at bar 1 and
 stay aligned.
 
@@ -234,8 +253,17 @@ stay aligned.
   (within the Part's preferences), embellishment kind, or head octave.
   The rhythm never evolves; Bass keeps R on its first head.
 - Evolve = 0 is a locked loop (the locked end of Marbles' Déjà vu).
-- **Keep** stores the currently heard (evolved) motif as the new stored
-  motif.
+- Evolve is latched at phrase entry: turning it changes the evolution from
+  the next phrase boundary on, not the phrase now playing.
+- **Keep** stores the motif heard in the phrase now playing (evolved, as
+  the audio thread played it) as the new stored motif, so playback goes on
+  unchanged. It keeps the motif the phrase entered from as its lead-in and
+  takes the phrase it was heard in as its origin; evolution counts from
+  there. After a stop, playback resumes from the phrase where it starts,
+  and enters it as heard only if that is the phrase it was heard in. A
+  motif stored while stopped (Dice, From Step, preset load) gets its
+  origin at the phrase where it is first heard. Keep does nothing while
+  the stored motif has not been heard yet.
 
 ### 3.9 Determinism
 
@@ -298,38 +326,47 @@ harmony → which rhythm → how it unfolds over the phrase.
   so "Phrase" never drops below the 11 px minimum
   (`INTERFACE_DESIGN_POLICY.md`).
 - Phrase view, v1: read-only. Hand editing happens in Step.
-- Transfers between modes:
-  - Phrase → Step: the rendered current bar(s) go into the step grid, as
-    Gen → Step does today.
+- Transfers between modes (implemented; the buttons that call them are
+  part of the pending UI):
+  - Phrase → Step: the rendered current bar (the bar the phrase view
+    shows) goes into the step grid. A slide becomes a Glide bind, an
+    accent velocity 1.0, every other step the Step default velocity.
   - Step → Phrase: an explicit "From Step" action that analyses the step
     notes against the current chord (heads → nearest member, other steps →
     classified embellishment). Not automatic on mode switch, because
     Phrase's motif is a stored asset and a switch must not overwrite it.
+    It refuses and changes nothing when no step in the bars it reads (at
+    most two) is enabled; otherwise it writes Len, Pulses and Rotation
+    back to the params so they describe the analysed motif.
   - Gen ↔ Phrase: no transfer.
+  - An engine switch caused by a preset load or Init carries no pattern
+    over; only a switch by the musician transfers.
+- Launchpad/XL: the two buttons that toggled Step ↔ Gen now cycle
+  Step → Phrase → Gen.
 
 ## 5. Architecture
 
 - New class `T5ynthPhraseSequencer` in `src/sequencer/PhraseSequencer.{h,cpp}`,
   beside Step and Gen. Reuses `EuclideanRhythm.h` and `ScaleQuantizer.h`;
   shares no code with Gen's strand pipeline, so Gen stays byte-identical.
-- **Mode parameter.** The bool `gen_seq_running` (`PID::genSeqRunning`,
-  a Step↔Gen toggle) becomes a Choice `seq_mode` {Step, Phrase, Gen}.
-  Migration on state load and JSON preset import: if `seq_mode` is
-  absent, `gen_seq_running` true → Gen, else Step. Host automation recorded
-  on the old bool is not carried over. Current readers of the old param
-  (grep, 2026-11-13):
-  - `ParamCache.h` (`X(genSeqRunning)`)
-  - `PluginProcessor.cpp`: mode-switch block with the Step↔Gen pattern
-    transfer (~4692), `seqRunningNow()` (~7245), replay save/restore
-    (~1448 / ~1582), ~10160, JSON export/import (~11352 / ~12322),
-    preset-load mode sync (~12472), XL mode button (~12589, becomes a
-    cycle Step → Phrase → Gen)
-  - `SequencerPanel.cpp` (~635, ~1145, ~1546), `MainPanel.cpp` (~2118)
-- **Params** `phr_*`: part, harmSource, chord slots ×4, chordRate, ext, len,
-  pulses, rotation, bars, form, variation, evolve, layer, slide, seed.
-  The motif (function slots) is not an APVTS param; it is persisted in
-  the state XML and in a `phraseSeq` block of the JSON preset
-  (`PRESET_FORMAT.md` to be extended).
+- **Engine parameter.** The bool `gen_seq_running` (a Step↔Gen toggle)
+  became the Choice `seq_engine` (`PID::seqEngine`) {Step, Phrase, Gen}.
+  Migration on state load, replay tapes and JSON preset import: if
+  `seq_engine` is absent, `gen_seq_running` true → Gen, else Step. Host
+  automation recorded on the old bool is not carried over.
+- **Params** `phr_*`: `phr_part`, `phr_harm`, `phr_chord1`…`phr_chord4`,
+  `phr_chord_rate`, `phr_ext7`, `phr_len`, `phr_pulses`, `phr_rotation`,
+  `phr_bars`, `phr_form`, `phr_variation`, `phr_evolve`, `phr_layer`,
+  `phr_slide`. There is no seed param: the seed belongs to the motif. The
+  motif (function slots, seed, origin, kept lead-in) is not an APVTS
+  param; it is persisted as the `phraseMotif` attribute of the state XML
+  and in the `phraseSeq` block of the JSON preset (`PRESET_FORMAT.md`).
+- **Threads.** The stored-motif writers (Dice, Keep, From Step, Undo,
+  state/preset load) take a mutex, since a host may restore state off the
+  message thread; the audio thread never does. The motif reaches the
+  audio thread through a seqlock of relaxed atomic words, and the motif
+  the audio thread plays comes back the same way, so Keep stores what was
+  heard.
 - **Host bar position.** Phrase is the first sequencer to read the PPQ
   position; it is taken once per block in the existing host-transport
   snapshot in `processBlock`, where only the BPM is read today.
@@ -340,9 +377,10 @@ harmony → which rhythm → how it unfolds over the phrase.
 
 ## 6. Open points
 
-- **Arp + Keys source.** The arp also takes held keys as its source. With
-  Keys as harmony source, the held keys are harmony input; whether the arp
-  then arpeggiates the sequencer's output or is disabled has to be decided.
+- **Arp + Keys source** (settled in the implementation). With Phrase and
+  Keys harmony, a held key only sets the chord: it starts no voice, feeds
+  no arp key and records no step. The arp follows the sequencer's main
+  line as its source.
 - **Non-4/4 host time signatures.** The bar index follows the numerator;
   the weight table is 4/4. 3/4, 6/8 and 7/8 need their own grids.
 - **Non-heptatonic chord building** (§3.3) and the **Part weights** (§3.5)
