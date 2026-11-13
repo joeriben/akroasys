@@ -488,17 +488,15 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         const double f = (q - q0) / dq * static_cast<double>(numSamples);
         return std::clamp(static_cast<int>(f), 0, numSamples - 1);
     };
-    // A locate: the first event at or after q, where an onset within
-    // rounding before q counts as at q, so a locate onto a step plays it.
-    auto firstEventFrom = [&](double q) {
-        int i = 0;
-        while (i < render.count && barStartQ + render.events[static_cast<size_t>(i)].onQ < q - kEpsQ) ++i;
-        return i;
-    };
-    // A re-render in play: the first event not yet emitted once playback has
-    // reached q. The loop below emits every onset before the time it reaches
-    // (t < q1), so the same strict test resumes exactly behind the last onset
-    // played and never repeats one that lies just before q.
+    // Where this block takes over playback: every onset before it lies
+    // behind, played by the blocks before or before the point a start or
+    // locate enters at. A locate counts an onset within rounding before its
+    // point as at it, so a locate onto a step plays it.
+    double resumeQ = expectedQ;
+    // The first event not yet emitted once playback has reached q. The loop
+    // below emits every onset before the time it reaches (t < q1), so the
+    // same strict test resumes exactly behind the last onset played and never
+    // repeats one that lies just before q.
     auto firstEventNotPlayed = [&](double q) {
         int i = 0;
         while (i < render.count && barStartQ + render.events[static_cast<size_t>(i)].onQ < q) ++i;
@@ -531,7 +529,8 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         // Start or locate: silence what sounds and enter the bar at q0.
         allNotesOff(out, 0);
         enterBar(static_cast<int>(std::floor(q0 / barLenQ)), false);
-        nextEvent = firstEventFrom(q0);
+        resumeQ = q0 - kEpsQ;
+        nextEvent = firstEventNotPlayed(resumeQ);
         positioned = true;
     }
     else if (renderDirty)
@@ -540,7 +539,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         // last block stopped (a host may jitter q0 around that by < kJumpQ).
         if (motifDirty) rebuildEvolution(floorDiv(bar, phraseBarsOf(cfg)));
         renderCurrent();
-        nextEvent = firstEventNotPlayed(expectedQ);
+        nextEvent = firstEventNotPlayed(resumeQ);
         releaseUnusedHeld(nextEvent, out, 0);
         endPendingByNextOnset(nextEvent);
     }
@@ -609,7 +608,11 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             keysEverSet = true;
             keysChanged = false;
             renderCurrent();
-            nextEvent = firstEventNotPlayed(t);
+            // The chord takes effect at the beat. A beat that lies before
+            // resumeQ (this block starts a hair past it, inside the beat
+            // rounding above, or a host reports it a little before where the
+            // last one ended) brings back no onset the blocks before played.
+            nextEvent = firstEventNotPlayed(std::max(t, resumeQ));
             releaseUnusedHeld(nextEvent, out, offset);
             endPendingByNextOnset(nextEvent);
             continue;

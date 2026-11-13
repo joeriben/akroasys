@@ -1617,6 +1617,119 @@ int main(int argc, char** argv)
                              + " over " + std::to_string(runs) + " runs)");
     }
 
+    std::printf("\n== 20. A Keys chord taking effect at a beat a hair before the block replays no onset\n");
+    {
+        // A Keys chord takes effect at the next beat, found with a rounding
+        // tolerance, so a block that starts a hair past a beat re-renders the
+        // bar at that beat, before the block. The onset on the beat was played
+        // by the block before; the re-render must not play it again. Same for
+        // a host that reports a block a little before where the last one
+        // ended (jitter under the locate threshold): the onsets in between
+        // were played. Every run is compared with the same block positions
+        // and no chord change: the onsets must be the same. Each run goes on
+        // past the next beat after it (8.0 when the block starts beyond the
+        // rounding), where the new chord must sound.
+        const double dq = kBlock * kBpm / (60.0 * kSr);
+        const double beatQ = 7.0;
+        struct Case { std::vector<double> starts; size_t changeAt; std::string tag; };
+        std::vector<Case> cases;
+        for (double past : { 0.0, 5.0e-7, 2.0e-6, 0.1 })
+        {
+            Case k;
+            for (int b = 40; b >= 1; --b) k.starts.push_back(beatQ + past - b * dq);
+            k.changeAt = k.starts.size();
+            for (int b = 0; b < 64; ++b) k.starts.push_back(beatQ + past + b * dq);
+            char tag[64];
+            std::snprintf(tag, sizeof tag, "block %g q past the beat", past);
+            k.tag = tag;
+            cases.push_back(k);
+        }
+        for (double back : { 0.005, 0.009 })
+        {
+            // The block before ends 0.004 q past the beat; the host reports the
+            // next one `back` earlier, then runs on from there.
+            Case k;
+            const double end = beatQ + 0.004;
+            for (int b = 40; b >= 1; --b) k.starts.push_back(end - b * dq);
+            k.changeAt = k.starts.size();
+            for (int b = 0; b < 64; ++b) k.starts.push_back(end - back + b * dq);
+            char tag[64];
+            std::snprintf(tag, sizeof tag, "host reports the block %g q back", back);
+            k.tag = tag;
+            cases.push_back(k);
+        }
+        // Main-line onsets (quarters) and their notes.
+        auto run = [&](const Case& k, bool change, std::vector<std::pair<double, int>>& ons) {
+            Config c = base();
+            c.harm = Harm::Keys;
+            c.form = Form::Loop;
+            c.pulses = 16;
+            c.variation = 0.0f;
+            c.slide = 0.0f;
+            c.layer = Layer::Off;
+            T5ynthPhraseSequencer seq;
+            seq.prepare(kSr);
+            seq.setTimeSignature(4, 4);
+            seq.setConfig(c);
+            seq.start();
+            auto latch = [&](std::initializer_list<int> notes) {
+                seq.clearKeys();
+                for (int n : notes) seq.keyOn(n);
+                for (int n : notes) seq.keyOff(n);
+            };
+            latch({ 45, 48, 52 });   // A minor
+            std::vector<VoiceEvent> out;
+            out.reserve(1024);
+            int errs = 0;
+            VoiceSim sim;
+            for (size_t b = 0; b < k.starts.size(); ++b)
+            {
+                if (change && b == k.changeAt) latch({ 50, 53, 57 });   // D minor
+                out.clear();
+                seq.processBlock(kBlock, kBpm, true, k.starts[b], out);
+                std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& x, const VoiceEvent& y) {
+                    if (x.sampleOffset != y.sampleOffset) return x.sampleOffset < y.sampleOffset;
+                    return x.type == VoiceEvent::Type::NoteOff && y.type == VoiceEvent::Type::NoteOn;
+                });
+                for (const auto& e : out)
+                {
+                    if (e.type == VoiceEvent::Type::NoteOn) sim.on(e); else sim.off(e);
+                    if (e.type == VoiceEvent::Type::NoteOn && e.strandId == -1)
+                        ons.push_back({ k.starts[b] + e.sampleOffset * kOneSampleQ, e.note });
+                }
+            }
+            out.clear();
+            seq.allNotesOff(out, 0);
+            for (const auto& e : out) sim.off(e);
+            errs += static_cast<int>(sim.live.size()) + sim.orphanOffs + sim.badGlides;
+            return errs;
+        };
+        int differ = 0, unchanged = 0, errs = 0;
+        std::string why;
+        for (const auto& k : cases)
+        {
+            std::vector<std::pair<double, int>> got, ref;
+            errs += run(k, true, got) + run(k, false, ref);
+            bool same = got.size() == ref.size();
+            for (size_t i = 0; same && i < got.size(); ++i)
+                same = std::abs(got[i].first - ref[i].first) <= 2 * kOneSampleQ;
+            if (!same)
+                why += std::string(differ++ ? "; " : "") + k.tag + ": " + std::to_string(got.size()) + " onsets, "
+                     + std::to_string(ref.size()) + " without the chord change";
+            // The chord did take effect: a note after the beat differs.
+            bool took = false;
+            for (size_t i = 0; same && i < got.size(); ++i)
+                took = took || (got[i].first > beatQ + 2 * kOneSampleQ && got[i].second != ref[i].second);
+            unchanged += same && !took;
+        }
+        check(differ == 0, "Keys beat a hair before the block: the onsets of the run without the change ("
+                               + std::to_string(differ) + " of " + std::to_string(cases.size()) + " differ) " + why);
+        check(unchanged == 0, "Keys beat a hair before the block: the new chord sounds after the beat ("
+                                  + std::to_string(unchanged) + " runs without it)");
+        check(errs == 0, "Keys beat a hair before the block: no hanging or orphan note, no bad glide ("
+                             + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
