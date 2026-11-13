@@ -41,7 +41,7 @@ juce::String fitTextToWidth(const juce::Font& font, juce::String text, int maxWi
 
 StatusBar::StatusBar()
 {
-    for (auto* btn : { &newBtn, &saveBtn, &loadBtn, &exportBtn, &settingsBtn, &manualBtn, &panicBtn, &keyboardBtn })
+    for (auto* btn : { &newBtn, &saveBtn, &loadBtn, &exportBtn, &sessionBtn, &settingsBtn, &manualBtn, &panicBtn, &keyboardBtn })
     {
         btn->setColour(juce::TextButton::buttonColourId, kSurface);
         btn->setColour(juce::TextButton::textColourOffId, kDim);
@@ -60,31 +60,33 @@ StatusBar::StatusBar()
     newBtn.onClick      = [this] { if (onNewPreset) onNewPreset(); };
     saveBtn.onClick     = [this] { if (onSavePreset) onSavePreset(); };
     loadBtn.onClick     = [this] { if (onLoadPreset) onLoadPreset(); };
-    exportBtn.onClick   = [this]
+    exportBtn.onClick   = [this] { if (onExportWav) onExportWav(); };
+    sessionBtn.onClick  = [this]
     {
-        // Export is now a small menu: WAV (existing) + Session Log (.t5evt).
-        // MIDI export will join here later. Each item ends in the standard async
-        // FileChooser handled by the callbacks' owners (MainPanel). The separator
-        // divides "writes a file" from "plays one back" — both are about the same
-        // .t5evt, which is why replay lives here rather than under Library.
+        // The session log in one place: recording it, saving it, playing one
+        // back. Each file item ends in the standard async FileChooser handled by
+        // the callbacks' owner (MainPanel). The separator divides the running
+        // recording from a tape played back.
         juce::PopupMenu m;
-        m.addItem(1, juce::String::fromUTF8("Export WAV\xe2\x80\xa6"), onExportWav != nullptr);
+        const bool wasRecording = sessionRecording_;
+        m.addItem(1, "Record", onSessionRecordingChanged != nullptr, wasRecording);
         const bool hasLog = sessionLogAvailable && sessionLogAvailable();
         m.addItem(2, juce::String::fromUTF8("Save Session Log\xe2\x80\xa6"), hasLog && onSaveSessionLog != nullptr);
         m.addSeparator();
         const bool replaying = replayActive && replayActive();
         m.addItem(3, juce::String::fromUTF8("Play Session Log\xe2\x80\xa6"), onPlaySessionLog != nullptr && ! replaying);
         // SafePointer, not raw `this`: the callback fires later off the message
-        // loop (matches the SafePointer idiom elsewhere in the GUI).
+        // loop (matches the SafePointer idiom elsewhere in the GUI). Record flips
+        // the state the menu SHOWED, not whatever it is when the choice lands.
         juce::Component::SafePointer<StatusBar> safeThis(this);
-        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&exportBtn),
-            [safeThis](int r)
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&sessionBtn),
+            [safeThis, wasRecording](int r)
             {
                 auto* self = safeThis.getComponent();
                 if (self == nullptr) return;
-                if      (r == 1) { if (self->onExportWav)      self->onExportWav(); }
-                else if (r == 2) { if (self->onSaveSessionLog) self->onSaveSessionLog(); }
-                else if (r == 3) { if (self->onPlaySessionLog) self->onPlaySessionLog(); }
+                if      (r == 1) { if (self->onSessionRecordingChanged) self->onSessionRecordingChanged(! wasRecording); }
+                else if (r == 2) { if (self->onSaveSessionLog)          self->onSaveSessionLog(); }
+                else if (r == 3) { if (self->onPlaySessionLog)          self->onPlaySessionLog(); }
             });
     };
     settingsBtn.onClick = [this] { if (onSettings) onSettings(); };
@@ -217,11 +219,12 @@ void StatusBar::resized()
     int y = 1;
     int gap = 4;
 
-    // Right to left: Manual, Settings, Export, Library, Save, Init, Kbd, Panic.
+    // Right to left: Manual, Settings, Session, Export, Library, Save, Init, Kbd, Panic.
     // Plugin only, further left: Ext. Clock, MIDI out combo (standalone moves these
     // into the MIDI/Audio dialog, so Panic is the leftmost control there).
     int manualW   = 60;
     int settingsW = 60;
+    int sessionW  = 60;
     int exportW   = 54;
     int libraryW  = 64;
     int saveW     = 50;
@@ -233,7 +236,8 @@ void StatusBar::resized()
 
     manualBtn.setBounds(b.getRight() - manualW - gap, y, manualW, btnH);
     settingsBtn.setBounds(manualBtn.getX() - settingsW - gap, y, settingsW, btnH);
-    exportBtn.setBounds(settingsBtn.getX() - exportW - gap, y, exportW, btnH);
+    sessionBtn.setBounds(settingsBtn.getX() - sessionW - gap, y, sessionW, btnH);
+    exportBtn.setBounds(sessionBtn.getX() - exportW - gap, y, exportW, btnH);
     loadBtn.setBounds(exportBtn.getX() - libraryW - gap, y, libraryW, btnH);
     saveBtn.setBounds(loadBtn.getX() - saveW - gap, y, saveW, btnH);
     newBtn.setBounds(saveBtn.getX() - newW - gap, y, newW, btnH);
@@ -269,6 +273,8 @@ void StatusBar::setReplayActive(bool active)
 {
     for (auto* btn : { &newBtn, &saveBtn, &loadBtn })
         btn->setEnabled(! active);
+    replayActive_ = active;
+    refreshSessionIndicator();
 }
 
 void StatusBar::setUpdateBadge(bool available, const juce::String& version)
@@ -282,22 +288,44 @@ void StatusBar::setUpdateBadge(bool available, const juce::String& version)
     repaint();
 }
 
+void StatusBar::setSessionRecording(bool recording)
+{
+    if (sessionRecording_ == recording)
+        return;
+    sessionRecording_ = recording;
+    refreshSessionIndicator();
+}
+
+void StatusBar::refreshSessionIndicator()
+{
+    const bool recordingNow = sessionRecording_ && ! replayActive_;
+    sessionBtn.setTooltip(recordingNow ? "Recording the session log" : juce::String());
+    repaint();
+}
+
 void StatusBar::paintOverChildren(juce::Graphics& g)
 {
-    // Update indicator: a small accent dot on the Settings button's top-right
-    // corner (Chrome/VS Code convention). Painted over the child button so it
-    // sits on top, and only while an update is pending — zero layout cost, no
-    // reserved slot. Detail + Download live in the General Settings page.
-    if (! updateBadge_)
-        return;
-    const float d = 7.0f;
-    const auto r = settingsBtn.getBounds().toFloat();
-    const float cx = r.getRight() - d * 0.5f - 2.0f;
-    const float cy = r.getY() + d * 0.5f + 2.0f;
-    g.setColour(kCard);
-    g.fillEllipse(cx - d * 0.5f - 1.0f, cy - d * 0.5f - 1.0f, d + 2.0f, d + 2.0f);
-    g.setColour(kAccent);
-    g.fillEllipse(cx - d * 0.5f, cy - d * 0.5f, d, d);
+    // A small accent dot on a button's top-right corner (Chrome/VS Code
+    // convention): on Settings while an update is pending (detail + Download
+    // live in the General Settings page), on Session while the session log
+    // records (Record on and no replay running). Painted over the child button
+    // so it sits on top, and only while its state holds — zero layout cost, no
+    // reserved slot.
+    const auto paintDot = [&g](const juce::Component& btn)
+    {
+        const float d = 7.0f;
+        const auto r = btn.getBounds().toFloat();
+        const float cx = r.getRight() - d * 0.5f - 2.0f;
+        const float cy = r.getY() + d * 0.5f + 2.0f;
+        g.setColour(kCard);
+        g.fillEllipse(cx - d * 0.5f - 1.0f, cy - d * 0.5f - 1.0f, d + 2.0f, d + 2.0f);
+        g.setColour(kAccent);
+        g.fillEllipse(cx - d * 0.5f, cy - d * 0.5f, d, d);
+    };
+    if (updateBadge_)
+        paintDot(settingsBtn);
+    if (sessionRecording_ && ! replayActive_)
+        paintDot(sessionBtn);
 }
 
 void StatusBar::setKeyboardInputEnabled(bool enabled)

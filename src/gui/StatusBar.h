@@ -29,10 +29,17 @@ public:
     std::function<void()> onSavePreset;
     std::function<void()> onLoadPreset;
     std::function<void()> onExportWav;
-    std::function<void()> onSaveSessionLog;          // Export menu → save the current .t5evt
+    std::function<void(bool)> onSessionRecordingChanged; // Session menu → Record (un)ticked; the argument is the new state
+    std::function<void()> onSaveSessionLog;          // Session menu → save the current .t5evt
     std::function<bool()> sessionLogAvailable;       // enables the menu item iff a session has been recorded
-    std::function<void()> onPlaySessionLog;          // Export menu → pick a .t5evt and replay it
+    std::function<void()> onPlaySessionLog;          // Session menu → pick a .t5evt and replay it
     std::function<bool()> replayActive;              // gates the menu item while a tape runs (transport = ReplayOverlay)
+    /** Ticks the Session menu's Record item. Record is the same setting as
+     *  "Record Event Log" on the Settings tab: MainPanel calls this at start-up
+     *  and on every change, whichever of the two controls made it. The accent
+     *  dot on the Session button shows the log actually recording, so it is off
+     *  while a replay runs (setReplayActive): the processor records no replay. */
+    void setSessionRecording(bool recording);
     /** While a session-log replay runs, Init, Save and Library are off. The
      *  live patch is then the TAPE's: Save would store it as the user's preset,
      *  and Init or a load would change state under the tape that Stop puts back
@@ -77,11 +84,15 @@ private:
     juce::TextButton saveBtn   { "Save" };
     juce::TextButton loadBtn   { "Library" };
     juce::TextButton exportBtn { "Export" };
+    juce::TextButton sessionBtn { "Session" };
     juce::TextButton settingsBtn { "Settings" };
     juce::TextButton manualBtn { "Manual" };
     juce::TextButton panicBtn { "Panic" };
     juce::TextButton keyboardBtn { "Kbd" };
     bool updateBadge_ = false;   // accent dot on Settings when an update is available
+    bool sessionRecording_ = false;   // the Record setting: ticks the menu item
+    bool replayActive_ = false;       // setReplayActive; a replay is never recorded
+    void refreshSessionIndicator();   // dot + tooltip: recording now = setting on and no replay
 
     // In the standalone app these two controls live in JUCE's "MIDI/Audio Settings"
     // dialog (see MidiOutputSettingsPanel), so the bottom row is left clean — nothing

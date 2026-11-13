@@ -416,7 +416,7 @@ Open the <strong>Settings</strong> panel from the status bar. It has four tabs. 
   <li><strong>Filter Oversampling</strong> (Off / 2× / 4×, default 2×) — applies to the Ladder and Warp nonlinear filter stages; does not affect SVF.</li>
   <li><strong>LRO Oversampling</strong> (Off / 2× / 4×, default 4×) — the rate the authored Csound runs at, relative to the host. Changing it recompiles the running orchestra.</li>
   <li><strong>Check for updates on startup</strong> — when a newer release exists, a banner with a Download button appears.</li>
-  <li><strong>Record Event Log (.t5evt)</strong> — off by default; see <a href="#sessionlog">Session Log</a>.</li>
+  <li><strong>Record Event Log (.t5evt)</strong> — off by default; the same switch as <em>Record</em> in the status bar's Session menu; see <a href="#sessionlog">Session Log</a>.</li>
 </ul>
 <p>
 <strong>MPE</strong> is the fourth tab, and it describes the <em>controller</em> rather
@@ -2350,7 +2350,8 @@ and the current preset's name, and carries the controls that belong to no panel:
   <tr><td><strong>Init</strong></td><td>Returns every parameter to its default and clears the generated audio, the impulses, the embeddings, the axes and the inference cache. <strong>There is no confirmation dialog</strong> &mdash; save first if the patch matters.</td></tr>
   <tr><td><strong>Save</strong></td><td>Opens the Library in save mode (also <strong>Ctrl/Cmd+S</strong>).</td></tr>
   <tr><td><strong>Library</strong></td><td>The preset browser: load, import, tag-filter, rename, duplicate, delete, and <em>Update Library</em>.</td></tr>
-  <tr><td><strong>Export</strong></td><td><em>Save Session Log</em> is greyed out until a log exists, and <em>Play Session Log</em> while a replay is already running. Three items: <strong>Export WAV…</strong> writes the current sound to a file (the item always reads that; only the file-chooser's own title says <em>Export Wavetable</em> in Wavetable mode); <strong>Save Session Log…</strong> and <strong>Play Session Log…</strong> are the two ends of the <a href="#sessionlog">session log</a>.</td></tr>
+  <tr><td><strong>Export</strong></td><td>Writes the current sound to a WAV file. In Wavetable mode the file chooser's title says <em>Export Wavetable</em>.</td></tr>
+  <tr><td><strong>Session</strong></td><td>The <a href="#sessionlog">session log</a>. <strong>Record</strong> switches recording on and off &mdash; the same setting as <em>Record Event Log</em> on the Settings tab &mdash; and while it records the button carries an accent dot (a replay is not recorded). <strong>Save Session Log…</strong> writes the recording so far to a file and is greyed out until a log exists; <strong>Play Session Log…</strong> plays one back and is greyed out while a replay is already running.</td></tr>
   <tr><td><strong>Settings</strong></td><td>The four-tab panel described in <a href="#setup">Setup</a>. It carries an accent dot when an update is available.</td></tr>
   <tr><td><strong>Manual</strong></td><td>This document.</td></tr>
   <tr><td><strong>Panic</strong></td><td>All notes off, immediately.</td></tr>
@@ -2518,15 +2519,19 @@ refreshes the curated <em>UCDCAE AI Lab</em> bank in place from
 
 <p>
 akróasys can keep a <strong>session log</strong> of what you do — never of the
-rendered audio. It is <strong>off by default</strong>: switch on
-<strong>Record Event Log (.t5evt)</strong> on the Settings tab, and from then on
-it records every note with its source (MIDI keyboard, computer keyboard, Step
+rendered audio. It is <strong>off by default</strong>: choose
+<strong>Record</strong> in the <strong>Session</strong> menu of the status bar
+(the same switch as <strong>Record Event Log (.t5evt)</strong> on the Settings
+tab), and from then on, while the Session button carries an accent dot, it
+records every note with its source (MIDI keyboard, computer keyboard, Step
 Sequencer, Generative Sequencer, Arpeggiator), every parameter move (and whether
 it came from your hand, from a learned CC, or from host automation), and every
-generation call with its prompts, settings and realized seed.
+generation call with its prompts, settings and realized seed. A replay is not
+recorded: while a tape plays the dot is off, and recording goes on when you stop
+it.
 </p>
 <p>
-The <strong>Export</strong> menu in the status bar holds both ends of it.
+The same menu holds both ends of it.
 <strong>Save Session Log&hellip;</strong> writes the session so far as a
 <code>.t5evt</code> file — newline-delimited JSON, one event per line, readable
 in any text editor; the entry is enabled once something has actually happened.

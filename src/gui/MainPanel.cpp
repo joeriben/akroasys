@@ -657,6 +657,7 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     statusBar.onSavePreset   = [this] { savePreset(); };
     statusBar.onLoadPreset   = [this] { loadPreset(); };
     statusBar.onExportWav    = [this] { exportWav(); };
+    statusBar.onSessionRecordingChanged = [this](bool on) { setSessionRecording(on); };
     statusBar.onSaveSessionLog   = [this] { saveSessionLog(); };
     statusBar.sessionLogAvailable = [this] { return processorRef.getEventLogCurrentFile().existsAsFile(); };
     statusBar.onPlaySessionLog   = [this] { loadReplaySession(); };
@@ -789,8 +790,9 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     generalSettingsPage.onCheckForUpdatesChanged = [this](bool enabled) { processorRef.setCheckForUpdatesEnabled(enabled); };
     generalSettingsPage.setCheckForUpdatesEnabled(processorRef.getCheckForUpdatesEnabled());
 
-    generalSettingsPage.onEventLogEnabledChanged = [this](bool enabled) { processorRef.setEventLogEnabled(enabled); };
+    generalSettingsPage.onEventLogEnabledChanged = [this](bool enabled) { setSessionRecording(enabled); };
     generalSettingsPage.setEventLogEnabled(processorRef.getEventLogEnabled());
+    statusBar.setSessionRecording(processorRef.getEventLogEnabled());
 
     // ── MPE tab ──
     // Machine-wide device calibration, plus a live read-out of what the
@@ -5012,10 +5014,9 @@ juce::String MainPanel::suggestedExportBaseName() const
     return base.isNotEmpty() ? base : juce::String(kProductNameAscii);
 }
 
-// Copy the current session's .t5evt (the continuously-recorded event log) to a
-// user-chosen location. The live file keeps recording; this exports a snapshot
-// of everything up to the last flush. Loading/replaying one needs the replay
-// Player, which is a separate future piece — this is the "save" half only.
+// Session menu → Play Session Log…: read a chosen .t5evt and hand it to the
+// replay transport (processorRef.startReplay), which puts the tape's start patch
+// in place for the length of the tape and gives the user's back on Stop.
 void MainPanel::loadReplaySession()
 {
     auto chooser = std::make_shared<juce::FileChooser>(
@@ -5072,13 +5073,26 @@ void MainPanel::endReplayUi(const juce::String& status)
     statusBar.setStatusText(status);
 }
 
+// Recording the session log has two controls, Record in the status bar's
+// Session menu and "Record Event Log" on the Settings tab. Both land here, so
+// the processor's setting and both displays change together.
+void MainPanel::setSessionRecording(bool on)
+{
+    processorRef.setEventLogEnabled(on);
+    generalSettingsPage.setEventLogEnabled(on);
+    statusBar.setSessionRecording(on);
+}
+
+// Session menu → Save Session Log…: copy the current session's .t5evt to a
+// chosen location. The live file keeps recording; this exports everything up to
+// the last flush. The menu offers the item only once the file exists, so the
+// two checks below catch only a file removed in between.
 void MainPanel::saveSessionLog()
 {
     const auto src = processorRef.getEventLogCurrentFile();
     if (! src.existsAsFile())
     {
-        statusBar.setStatusText(juce::String::fromUTF8(
-            "No session log yet \xe2\x80\x94 enable \"Record Event Log\" in Settings"));
+        statusBar.setStatusText("Session log no longer available");
         return;
     }
 
@@ -5101,8 +5115,8 @@ void MainPanel::saveSessionLog()
             if (! dest.hasFileExtension("t5evt"))
                 dest = dest.getParentDirectory().getChildFile(dest.getFileName() + ".t5evt");
 
-            // Re-check existence at write time; recording may have produced the
-            // file between the menu opening and the chooser returning.
+            // Re-check at write time: the file may have gone while the chooser
+            // was open.
             if (! src.existsAsFile())
             {
                 self->statusBar.setStatusText("Session log no longer available");
