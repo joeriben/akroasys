@@ -986,6 +986,9 @@ struct LineCtx
     std::uint16_t mask = 0x0FFF;
     bool   lead = false, bass = false;
     const BarVariation* var = nullptr;
+    /** The line plays in the next bar. The Answer plays only in B units, so
+     *  before an A unit it has no next-bar onset to end its last note. */
+    bool   nextBarPlays = true;
 };
 
 int barStepsFor(int spb, double barLenQ)
@@ -1278,9 +1281,16 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
  *  Onset times and kinds follow from that bar's motif and variation alone;
  *  the pitches, which also read the bar after it (taken here from the same
  *  motif, as renderBar does without a next motif), are not used. A line
- *  rendered without variation (the Answer) has none in the next bar either. */
+ *  rendered without variation (the Answer) has none in the next bar either.
+ *  A line that does not play in the next bar has no onset there. */
 void nextBarOnset(const LineCtx& x, double& onQ, bool& step, bool& head)
 {
+    if (!x.nextBarPlays)
+    {
+        onQ = std::numeric_limits<double>::infinity();
+        step = head = false;
+        return;
+    }
     LineCtx n = x;
     n.motif = x.nextMotif;
     n.heads = x.nextHeads;
@@ -1485,6 +1495,7 @@ void renderBar(const RenderInput& in, BarRender& out)
             a.tonic = tonicNote(partAnchor(m.part) + octaveShift, cfg.scaleRoot);
             a.center = a.tonic + 6;
             a.var = nullptr;
+            a.nextBarPlays = isBUnit(cfg, in.bar + 1);
             int aP = chordRootNote(out.chord, a.tonic), aPP = aP;
             OnsetList al;
             collectLine(a, aP, aPP, al, nullptr);

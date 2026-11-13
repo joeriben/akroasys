@@ -1982,6 +1982,96 @@ int main(int argc, char** argv)
                              + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 23. The Answer's last note before an A unit is not cut at an onset the Answer never plays\n");
+    {
+        // The Answer plays only in B units. Its note ends at its next onset
+        // or at its own length (gate x its step); before an A unit it has no
+        // next onset, so a note reaching past the bar end sounds its length.
+        // Two steps a bar, the second shuffled to 3.5: it reaches past the
+        // bar unless the next bar's onset at 4.0 cuts it. Oracle, every Answer
+        // note: it ends at the earlier of its next Answer onset as played and
+        // its onset + gate x 2 q.
+        auto offAfter = [](const Run& r, size_t i) {
+            for (size_t j = i + 1; j < r.events.size(); ++j)
+                if (r.events[j].ev.type == VoiceEvent::Type::NoteOff && r.events[j].ev.strandId == r.events[i].ev.strandId
+                    && r.events[j].ev.note == r.events[i].ev.note) return r.events[j].q;
+            return std::numeric_limits<double>::infinity();
+        };
+        auto answerConfig = [&](Part part, Form form, int bars, float gate) {
+            Config c = base();
+            c.part = part;
+            c.form = form;
+            c.phraseBars = bars;
+            c.layer = Layer::Answer;
+            c.stepsPerBar = 2; c.pulses = 2; c.rotation = 0;
+            c.gate = gate;
+            c.shuffle = 0.75f;
+            c.variation = 0.0f;
+            c.slide = 0.0f;
+            return c;
+        };
+        int checked = 0, wrong = 0, intoA = 0, errs = 0;
+        std::string why;
+        for (Part part : { Part::Bass, Part::Riff, Part::Lead })
+            for (Form form : { Form::ABAB, Form::AABA, Form::AAAB })
+                for (int bars : { 4, 8 })
+                    for (float gate : { 1.0f, 0.6f })
+                    {
+                        const Config c = answerConfig(part, form, bars, gate);
+                        const Run r = play(c, 0.0, 2 * bars * B);
+                        errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+                        for (size_t i = 0; i < r.events.size(); ++i)
+                        {
+                            const auto& p = r.events[i];
+                            if (p.ev.type != VoiceEvent::Type::NoteOn || p.ev.strandId != 5) continue;
+                            const double got = offAfter(r, i);
+                            double nextOn = std::numeric_limits<double>::infinity();
+                            for (size_t j = i + 1; j < r.events.size(); ++j)
+                                if (r.events[j].ev.type == VoiceEvent::Type::NoteOn && r.events[j].ev.strandId == 5
+                                    && r.events[j].q > p.q + 2 * kOneSampleQ)
+                                { nextOn = r.events[j].q; break; }
+                            const double own = p.q + gate * 2.0;
+                            if (!std::isfinite(nextOn) && own > 2 * bars * B - B) continue;   // the run's end
+                            const double want = std::min(own, nextOn);
+                            ++checked;
+                            const int bar = barOf(p.q, B);
+                            intoA += want > (bar + 1) * B + 2 * kOneSampleQ && !isBUnit(c, bar + 1);
+                            if (std::abs(got - want) > 2 * kOneSampleQ && wrong++ == 0)
+                                why = "part " + std::to_string(static_cast<int>(part)) + " form "
+                                    + std::to_string(static_cast<int>(form)) + " " + std::to_string(bars)
+                                    + " bars gate " + std::to_string(gate).substr(0, 3) + ": note "
+                                    + std::to_string(p.ev.note) + " from q " + std::to_string(p.q).substr(0, 6)
+                                    + " ends at q " + std::to_string(got).substr(0, 6) + ", want q "
+                                    + std::to_string(want).substr(0, 6);
+                        }
+                    }
+        // The plain case: Bass, ABAB, 8 bars (B units bars 2-3, 6-7), gate 1.
+        // The note at 11.5 meets bar 3's onset at 12.0; the one at 15.5 sounds
+        // its two quarters into bar 4, an A unit.
+        {
+            const Config c = answerConfig(Part::Bass, Form::ABAB, 8, 1.0f);
+            const Run r = play(c, 0.0, 6 * B);
+            double off115 = -1.0, off155 = -1.0;
+            for (size_t i = 0; i < r.events.size(); ++i)
+            {
+                const auto& p = r.events[i];
+                if (p.ev.type != VoiceEvent::Type::NoteOn || p.ev.strandId != 5) continue;
+                if (std::abs(p.q - 11.5) <= 2 * kOneSampleQ) off115 = offAfter(r, i);
+                if (std::abs(p.q - 15.5) <= 2 * kOneSampleQ) off155 = offAfter(r, i);
+            }
+            check(std::abs(off115 - 12.0) <= 2 * kOneSampleQ && std::abs(off155 - 17.5) <= 2 * kOneSampleQ,
+                  "answer: Bass ABAB, the note at 11.5 ends at the next bar's onset 12.0 (q "
+                      + std::to_string(off115).substr(0, 6) + "), the one at 15.5 before an A unit at 17.5 (q "
+                      + std::to_string(off155).substr(0, 6) + ")");
+            errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+        }
+        check(checked > 0 && intoA > 0, "answer: notes checked, some reaching into an A unit ("
+                                            + std::to_string(checked) + " notes, " + std::to_string(intoA) + " into A)");
+        check(wrong == 0, "answer: a note ends at min(its next Answer onset, onset + gate x step) ("
+                              + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
+        check(errs == 0, "answer: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
