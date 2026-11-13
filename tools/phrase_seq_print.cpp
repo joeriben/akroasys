@@ -802,8 +802,8 @@ int main(int argc, char** argv)
                   "(else the checks below prove nothing)");
 
             struct Tally { int differ = 0; std::string why; };
-            Tally plain, gate, edit, redo, spot, locate, frameOff, frameForced, neutral, neutralOff;
-            int runs = 0, frameRuns = 0, neutralRuns = 0;
+            Tally plain, gate, edit, redo, spot, locate, frameOff, frameForced, neutral, neutralOff, mid, midStale;
+            int runs = 0, frameRuns = 0, neutralRuns = 0, midRuns = 0;
             bool frameMoves = true, frameStays = true;
             auto tally = [&](Tally& t, const Run& a, const Run& b, int from, int to, double fromQ) {
                 std::string why;
@@ -904,6 +904,46 @@ int main(int argc, char** argv)
                             tally(neutralOff, from(hc, keptHere), from(pedalAlike, noEntry), 8, 12, 8 * B);
                         }
                     }
+
+                    // A change inside phrase 2 after its first bar, a Keep
+                    // later in the phrase: a locate back to bar 8 in that
+                    // config plays as it does without the Keep. The entry
+                    // heard before the change, claimed for this config,
+                    // would not (else the check proves nothing).
+                    Config harmSwap = hc, varied = hc, loopMoved = hc, keyMoved = hc;
+                    harmSwap.harm = h == Harm::Pedal ? Harm::Chords : Harm::Pedal;
+                    varied.variation = 0.8f;
+                    loopMoved.chordDegrees = { 1, 4, 5, 1 };   // Chords: bar 7 plays I, not vii
+                    keyMoved.scaleRoot = 0;
+                    std::vector<Config> changes { harmSwap, varied, keyMoved };
+                    if (h == Harm::Chords) changes.push_back(loopMoved);
+                    auto locate8 = [&](const Config& vc, const Motif& m) {
+                        return play(vc, 8 * B, 12 * B, 4, 4, {}, 0,
+                                    acts({ { 0.0, [m](T5ynthPhraseSequencer& s) { s.setStoredMotif(m); } } }));
+                    };
+                    for (const Config& vc : changes)
+                    {
+                        const Act change = [vc](T5ynthPhraseSequencer& s) { s.setConfig(vc); };
+                        const Run without = locate8(vc, at1);
+                        for (double changeQ : { 8 * B + 1.0, 9 * B + 0.5 })
+                            for (double keepAt : { 10 * B + 1.0, 11 * B + 1.5 })
+                            {
+                                ++midRuns;
+                                play(hc, 0.0, 12 * B, 4, 4, {}, 0,
+                                     acts({ { 0.0, load1 }, { keepAt, keepSeen } }));
+                                const Motif keptBefore = kept;
+                                play(hc, 0.0, 12 * B, 4, 4, {}, 0,
+                                     acts({ { 0.0, load1 }, { changeQ, change }, { keepAt, keepSeen } }));
+                                const Motif keptAfter = kept;
+                                tally(mid, without, locate8(vc, keptAfter), 8, 12, 8 * B);
+                                Motif stale = keptAfter;
+                                stale.entryKept = keptBefore.entryKept;
+                                stale.entryNote = keptBefore.entryNote;
+                                stale.entryPrevNote = keptBefore.entryPrevNote;
+                                stale.entryFrame = entryFrameOf(vc, 8);
+                                tally(midStale, without, locate8(vc, stale), 8, 12, 8 * B);
+                            }
+                    }
                 }
             auto report = [&](const Tally& t, const std::string& what) {
                 check(t.differ == 0, "keep in a phrase's first bar, " + what + " (" + std::to_string(t.differ) + " of "
@@ -928,6 +968,13 @@ int main(int argc, char** argv)
                   "keep in a phrase's first bar, Pedal, then another chord loop and rate: it plays as heard ("
                       + std::to_string(neutral.differ) + " of " + std::to_string(neutralRuns) + " differ) "
                       + neutral.why);
+            check(mid.differ == 0,
+                  "a Harm / Variation / key / chord-loop change inside a phrase, Keep later in it: a locate back "
+                  "to its first bar plays as without the Keep (" + std::to_string(mid.differ) + " of "
+                      + std::to_string(midRuns) + " differ) " + mid.why);
+            check(midStale.differ > 0,
+                  "a change inside a phrase, Keep later in it: the entry heard before the change would not ("
+                      + std::to_string(midStale.differ) + " of " + std::to_string(midRuns) + " differ)");
             check(neutralOff.differ > 0,
                   "keep in a phrase's first bar, Pedal: without the kept entry the phrase would change ("
                       + std::to_string(neutralOff.differ) + " of " + std::to_string(neutralRuns) + " differ)");

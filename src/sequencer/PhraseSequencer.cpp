@@ -325,15 +325,23 @@ void T5ynthPhraseSequencer::advanceEvolution(int phrase)
     publishHeard();
 }
 
-void T5ynthPhraseSequencer::refreshHeardEntry()
+bool T5ynthPhraseSequencer::refreshHeardEntry()
 {
     const Config L = latchedConfig();
-    heardEntryKept = cfg.harm != Harm::Keys;
-    heardEntryNote = heardEntryPrevNote = -1;
-    heardEntryFrame = entryFrameOf(L, evoPhrase * phraseBarsOf(cfg));
-    if (heardEntryKept)
-        entryNotes(L, evoPrev, evoCur, evoPhrase * phraseBarsOf(cfg), barLenQ, scratch,
-                   heardEntryNote, heardEntryPrevNote);
+    const int entryBar = evoPhrase * phraseBarsOf(cfg);
+    const bool kept = cfg.harm != Harm::Keys;
+    int note = -1, prevNote = -1;
+    if (kept)
+        entryNotes(L, evoPrev, evoCur, entryBar, barLenQ, scratch, note, prevNote);
+    const std::uint32_t frame = entryFrameOf(L, entryBar);
+    if (kept == heardEntryKept && note == heardEntryNote && prevNote == heardEntryPrevNote
+        && frame == heardEntryFrame)
+        return false;
+    heardEntryKept = kept;
+    heardEntryNote = note;
+    heardEntryPrevNote = prevNote;
+    heardEntryFrame = frame;
+    return true;
 }
 
 void T5ynthPhraseSequencer::publishHeard()
@@ -386,20 +394,13 @@ void T5ynthPhraseSequencer::renderCurrent()
         entryNotes(L, prev, cur, bar, barLenQ, scratch, ep, epp);
         in.prevNote = ep;
         in.prevPrevNote = epp;
-        // The phrase's first bar is heard entering from these notes: Keep
-        // stores them, so the kept motif enters its origin phrase the same way.
-        const std::uint32_t frame = entryFrameOf(L, bar);
-        if (floorMod(bar, N) == 0
-            && (!heardEntryKept || ep != heardEntryNote || epp != heardEntryPrevNote
-                || frame != heardEntryFrame))
-        {
-            heardEntryKept = true;
-            heardEntryNote = ep;
-            heardEntryPrevNote = epp;
-            heardEntryFrame = frame;
-            publishHeard();
-        }
     }
+    // The heard channel carries the notes the phrase's first bar enters from
+    // in the config now: Keep stores them, so the kept motif enters its
+    // origin phrase as the phrase enters without it. Recomputed on every
+    // render, as a key change already did through rebuildEvolution, so a
+    // Harm, chord-loop or Variation change inside the phrase moves them too.
+    if (refreshHeardEntry()) publishHeard();
     in.slideIn = heldNote[static_cast<size_t>(slotOf(-1))] >= 0;
     renderBar(in, render);
     publishView();

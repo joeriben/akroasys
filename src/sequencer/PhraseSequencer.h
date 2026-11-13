@@ -145,13 +145,14 @@ private:
      *  was derived from, tag B = its phrase. */
     MotifChannel heard;
     void publishHeard();
-    /** The entry the current phrase's first bar renders with, and the frame
-     *  it renders in; updated when that bar is (re)rendered, so it is the one
-     *  heard. */
+    /** The entry the current phrase's first bar renders with in the config
+     *  now, and its frame; recomputed on every evolution step and every
+     *  render, so a Keep stores the entry a locate there would play. */
     bool heardEntryKept = false;
     int heardEntryNote = -1, heardEntryPrevNote = -1;
     std::uint32_t heardEntryFrame = 0;
-    void refreshHeardEntry();
+    /** Recomputes the heard entry; true when it changed. */
+    bool refreshHeardEntry();
     /** The heard motif, if it was derived from the stored motif of toAudio
      *  sequence `storedSeq`. */
     bool readHeard(PhraseModel::Motif& m, int& phrase, std::uint32_t storedSeq) const;
