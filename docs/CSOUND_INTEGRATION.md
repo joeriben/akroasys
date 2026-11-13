@@ -32,7 +32,7 @@ which is what makes it a different question from `brew install` on a user's Mac.
 |---|---|---|---|
 | library | `Contents/libs/CsoundLib64` | `csound64.dll` beside the module | `libs/libcsound64.so.6.0`, or the distro's for the `.deb` |
 | plugin opcodes | `Contents/libs/Opcodes64/` (24) | `plugins64/` (16) | `libs/Opcodes64/`, or Csound's own for the `.deb` |
-| STK data | `Contents/libs/rawwaves/` (41) | — no `stkops` module in Csound's Windows release | — the distro's, if it has one |
+| STK data | `Contents/libs/rawwaves/` (41) | — no `stkops` module in Csound's Windows release | — none in the tarball (`libstkops` needs `libstk`, which the bundler does not ship); the distro's `stkops`, if installed, for the `.deb` |
 | how it is found | load command `@loader_path/../libs/…`, recorded at link time | delay-load, then `LoadLibraryW` by absolute path at first use | SONAME + `$ORIGIN/libs` rpath |
 | where it comes from | vendored | vendored | `apt install libcsound64-dev` on the runner |
 | bundling step | `tools/bundle_csound_macos.sh` | CMake `copy_directory` | `tools/bundle_csound_linux.sh` (patchelf) |
@@ -67,8 +67,19 @@ these very files. Two properties follow. The directory must be
 **complete**: a file STK asks for and does not find leaves the module as an
 uncaught `stk::StkError` and `abort()`s the process, which inside a plugin is the
 host DAW — so the bundling step and the verifier both count the files. And the
-opcodes are **macOS-only**, because the Csound project's Windows release ships no
-`stkops` module. Nothing in `backend/lco_library.json` uses one. What the 27 are,
+opcodes are **macOS-only**: the Csound project's Windows release ships no `stkops`
+module, and the Linux tarball ships none either. On Linux `libstkops.so` NEEDs
+STK's own shared library (`libstk-4.6.x.so` on Ubuntu 24.04 and Fedora 42), and
+`tools/bundle_csound_linux.sh` copies only modules that need nothing beyond the
+bundle, glibc and the GCC runtime — so it is skipped, and since the engine points
+Csound at `libs/Opcodes64` whenever that directory exists, a distro's own
+`libstkops` is never consulted either. Bundling `libstk` is not the way out: it
+NEEDs JACK, PipeWire and ALSA, audio servers the bundler refuses in any module.
+Only the `.deb`, which uses the distro's Csound and its plugin directory, can have
+them: when the distro's `stkops` is installed and finds its data (`RAWWAVE_PATH`,
+or a default compiled into the module). On macOS the module carries STK statically,
+which is what a Linux `stkops` would have to copy to ship. Nothing in
+`backend/lco_library.json` uses one. What the 27 are,
 what each does with bare arguments and every control it has is in
 [`STK_OPCODES.html`](STK_OPCODES.html) — open it in a browser; it also records the
 one place where the shipped module and the Csound manual disagree with STK 5.0.1's
