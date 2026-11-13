@@ -118,10 +118,19 @@ public:
      *  authoring pass or a Re-Prompt step still running was asked for the
      *  sound before, and is dropped when it lands (lroPassOutlivedLoad). Not
      *  for a preset without either, nor a T5 oscillator snapshot: those leave
-     *  the LRO's sound, prompt, card and cache as they were, and a pass landing
-     *  after them only detaches the current preset's name, as it does without
-     *  a load. An LRO snapshot that holds a sound is refused while a pass runs. */
+     *  the LRO's sound, prompt and card as they were, and a pass landing after
+     *  them only detaches the current preset's name, as it does without a load.
+     *  (The LRO cache goes with every preset load all the same: it belongs to
+     *  the file, MainPanel::applyLoadedPreset.) An LRO snapshot, prompt-only or
+     *  not, is refused while a pass runs that will still land
+     *  (MainPanel::activateSnapshot, lroPassWillLand). */
     void dropLroPassInFlight() { ++lroLoadSeq_; }
+    /** Whether the authoring pass or Re-Prompt step now running will land:
+     *  false once a load has overtaken it (dropLroPassInFlight, a state
+     *  restore), because what it publishes is then dropped whole
+     *  (lroPassOutlivedLoad). Meaningful only while a pass runs
+     *  (onLcoBusyChanged). */
+    bool lroPassWillLand() const { return lroPassAskedAtLoad_ == lroLoadEpoch(); }
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -912,6 +921,9 @@ private:
     unsigned long long presetLoadSeq_ = 0;
     // The LRO's own (dropLroPassInFlight).
     unsigned long long lroLoadSeq_ = 0;
+    // The running LRO pass's lroLoadEpoch, taken where it starts (the same
+    // value its landing checks), for lroPassWillLand.
+    unsigned long long lroPassAskedAtLoad_ = 0;
     bool translatingPrompts_ = false;  // Union-Jack translate in flight (blocks IPC overlap)
     std::vector<std::pair<int, float>> pendingOffsets_;  // for DimensionExplorer
     std::map<juce::String, float> pendingAxes_;          // for SemanticAxes

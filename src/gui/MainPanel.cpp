@@ -3911,14 +3911,23 @@ void MainPanel::activateSnapshot(int slot)
         }
         const auto& lcoSnap = lcoSnapshots[static_cast<size_t>(slot - 1)];
         const bool hasSound = lcoSnap.orchestra.isNotEmpty();
-        if (hasSound && lcoBakeBusy_)
+        if (lcoBakeBusy_ && promptPanel.lroPassWillLand())
         {
-            // The running bake publishes its orchestra when it lands; handing this
-            // one over now would sound for a few seconds and then be replaced by a
-            // sound the user did not ask for. Say so instead of half-doing it. A
-            // prompt-only slot is unaffected — it touches no sound at all.
+            // The running pass lands into the very state a recall writes. A slot
+            // with a sound: the bake publishes its orchestra when it lands, so this
+            // one would sound for a few seconds and then be replaced by a sound
+            // the user did not ask for. A prompt-only slot touches no sound, but it
+            // re-points the editor and the Re-Prompt chain at the recalled words
+            // (adoptRecalledPrompt), and the landing writes over that: a step's
+            // rewrite of the PREVIOUS prompt replaces the recalled one in the
+            // editor and the chain and is authored; a bake resets the chain to its
+            // own text while the editor keeps the recalled one, so the next step
+            // under any engaged stance would listen to one text and rewrite
+            // another. Say so instead of half-doing it.
+            // A pass that a load has already overtaken lands nowhere
+            // (lroPassOutlivedLoad), so it holds no recall up while it finishes.
             statusBar.setStatusText(juce::String::fromUTF8(
-                "LRO is authoring \xe2\x80\x94 recall when the bake lands"));
+                "LRO is authoring \xe2\x80\x94 recall when it lands"));
             syncSnapshotUi();
             return;
         }

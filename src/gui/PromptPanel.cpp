@@ -2793,6 +2793,7 @@ void PromptPanel::triggerDcoBake()
     }
 
     dcoBaking_ = true;
+    lroPassAskedAtLoad_ = askedAtLoad;
     if (onLcoBusyChanged) onLcoBusyChanged(true);   // disable the reused GENERATE button
     // The first phase, named for what it is: before the first token can
     // stream, the author has to evaluate its whole prompt — the library
@@ -3459,6 +3460,7 @@ void PromptPanel::triggerDcoReprompt()
     const juce::String device = defaultInferenceDevice_;
 
     dcoRepromptBusy_ = true;
+    lroPassAskedAtLoad_ = askedAtLoad;
     if (onLcoBusyChanged) onLcoBusyChanged(true);   // disable the reused GENERATE button
     setLcoStatus("Listening, then rewriting", {}, /*busy=*/true);
 

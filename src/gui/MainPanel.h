@@ -185,10 +185,11 @@ private:
     std::array<LcoSnapshot, kNumSnapshotSlots> lcoSnapshots;
     std::array<LcoSnapshot, kNumSnapshotSlots> lcoPressCaptures;
     // True while an LCO authoring pass is in flight (PromptPanel::onLcoBusyChanged).
-    // A recall is refused for its duration — the bake publishes its own orchestra
-    // when it lands and would otherwise overwrite the recalled sound behind the
-    // user's back. Storing stays allowed: a slot taken meanwhile keeps what is
-    // sounding now, which is exactly what the press asked for.
+    // An LRO recall, prompt-only or not, is refused for its duration unless a load
+    // has already overtaken the pass (PromptPanel::lroPassWillLand): the landing
+    // writes the same orchestra, prompt and Re-Prompt chain a recall does
+    // (activateSnapshot says how). Storing stays allowed: a slot taken meanwhile
+    // keeps what is sounding now, which is exactly what the press asked for.
     bool lcoBakeBusy_ = false;
     int activeSnapshotIndex = 0;  // 0=OFF, 1..4=session snapshot selected
 
