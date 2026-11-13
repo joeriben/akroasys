@@ -756,6 +756,19 @@ int main(int argc, char** argv)
              play(c, 0.0, end, 4, 4, {}, 0, acts({ { 0.0, load4 }, { earlyQ, keepSeen } })),
              9, 28, earlyQ, "keep before the origin: every phrase plays on unchanged");
         check(kept.origin == 4, "keep before the origin: the origin stays 4, got " + std::to_string(kept.origin));
+        const Act stopKeepSeen = [&](T5ynthPhraseSequencer& s) {
+            s.stop();
+            s.keep();
+            kept = s.getStoredMotif();
+            s.start();
+        };
+        const Act stopStart = [](T5ynthPhraseSequencer& s) { s.stop(); s.start(); };
+        same(play(c, 0.0, end, 4, 4, {}, 0, acts({ { 0.0, load4 }, { earlyQ, stopStart } })),
+             play(c, 0.0, end, 4, 4, {}, 0, acts({ { 0.0, load4 }, { earlyQ, stopKeepSeen } })),
+             9, 28, earlyQ, "stop, keep before the origin, play on from the same bar: unchanged");
+        check(kept.origin == 4, "stop, keep before the origin: the origin stays 4, got "
+                                    + (kept.origin == kOriginAtNextEntry ? std::string("next entry")
+                                                                         : std::to_string(kept.origin)));
 
         // Keep in the first bar of a phrase after the origin. The bar's entry
         // is led from the phrase before; under the kept motif (origin = this

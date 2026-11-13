@@ -76,10 +76,11 @@ public:
      *  phrase where playback next starts when the transport is stopped. */
     void dice(const PhraseModel::Config& cfg, std::uint32_t newSeed);
     /** Stores the motif heard in the phrase now playing (or last played) as
-     *  the new motif, so playback goes on unchanged (a phrase before the
-     *  stored motif's origin keeps that origin); after a stop it starts from
-     *  the phrase where playback resumes. Does nothing while the stored
-     *  motif has not been heard yet: it is then itself what would be kept. */
+     *  the new motif, so playback goes on unchanged; after a stop it starts
+     *  from the phrase where playback resumes. A phrase before the stored
+     *  motif's origin played the motif itself: Keep keeps that origin,
+     *  running or stopped. Does nothing while the stored motif has not been
+     *  heard yet: it is then itself what would be kept. */
     void keep();
     /** Stores the motif analysed from step-sequencer steps; origin as dice. */
     void fromSteps(const PhraseModel::StepInput* steps, int count, const PhraseModel::Config& cfg);

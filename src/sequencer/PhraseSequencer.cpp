@@ -725,15 +725,17 @@ void T5ynthPhraseSequencer::keep()
     Motif m;
     int phrase = 0;
     if (!readHeard(m, phrase)) return;
-    // Running: the heard motif anchored at its own phrase plays on exactly as
-    // before, even when the next phrase has begun meanwhile. m.origin is the
-    // stored motif's origin as the audio thread resolved it (fitMotif carries
-    // it); a phrase before it plays the motif unevolved, so there the origin
-    // stays, or the phrases up to it would start evolving. Stopped: it starts
-    // from the phrase where playback resumes.
-    m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry
-                   ? kOriginAtNextEntry
-                   : std::max(phrase, m.origin);
+    // m.origin is the stored motif's origin as the audio thread resolved it
+    // (fitMotif carries it). A phrase before it played the motif unevolved:
+    // the origin stays, running or stopped, or the phrases up to it would
+    // start evolving. From the origin on, running: the heard motif anchored
+    // at its own phrase plays on exactly as before, even when the next phrase
+    // has begun meanwhile. Stopped: it starts from the phrase where playback
+    // resumes.
+    if (phrase >= m.origin)
+        m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry
+                       ? kOriginAtNextEntry
+                       : phrase;
     adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo = true;
