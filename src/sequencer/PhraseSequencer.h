@@ -110,8 +110,11 @@ public:
 private:
     // ── Motif hand-off ───────────────────────────────────────────────────
     /** A motif plus two tag words behind a seqlock of relaxed atomic words.
-     *  One writer thread, one reader thread; a read that catches a write in
-     *  progress fails and is retried by the caller. */
+     *  Writers must be serialised by the caller (toAudio: editMutex, so the
+     *  message thread and a host's state-restore thread can both write;
+     *  heard: the audio thread alone). Any number of readers on any threads;
+     *  a read that catches a write in progress fails and is retried by the
+     *  caller. */
     class MotifChannel
     {
     public:

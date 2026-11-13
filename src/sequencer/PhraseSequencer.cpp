@@ -660,7 +660,7 @@ T5ynthPhraseSequencer::MotifChannel::MotifChannel()
 
 void T5ynthPhraseSequencer::MotifChannel::write(const Motif& m, std::uint32_t tagA, std::uint32_t tagB)
 {
-    // Single writer. Odd sequence = write in progress.
+    // Writers serialised by the caller. Odd sequence = write in progress.
     const std::uint32_t s = seq.load(std::memory_order_relaxed);
     seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
