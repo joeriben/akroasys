@@ -79,6 +79,14 @@ unbroken.
   A preset without an oscillator sound and a T5 oscillator snapshot leave it
   alone.
 
+- **An oscillator snapshot holding only a prompt now waits while an instrument
+  is being written,** like one holding a sound already did. Recalled during a
+  Re-Prompt rewrite, the rewrite of the previous prompt replaced the recalled
+  one and was authored; recalled while an instrument was written, the next
+  Re-Prompt step listened to that instrument but rewrote the recalled prompt.
+  The status line says to recall when the instrument lands. A pass that a load
+  has already dropped no longer holds any snapshot back.
+
 - **Dimension Explorer offsets no longer carry over into a loaded preset.**
   Apply + Generate pressed while a render could not start (a Re-Prompt step
   listening, a tape replaying, no backend) left its offsets waiting, and the
