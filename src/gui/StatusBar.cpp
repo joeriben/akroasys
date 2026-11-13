@@ -265,6 +265,12 @@ void StatusBar::setPresetName(const juce::String& name)
     repaint();
 }
 
+void StatusBar::setReplayActive(bool active)
+{
+    for (auto* btn : { &newBtn, &saveBtn, &loadBtn })
+        btn->setEnabled(! active);
+}
+
 void StatusBar::setUpdateBadge(bool available, const juce::String& version)
 {
     if (updateBadge_ == available)

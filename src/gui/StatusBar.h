@@ -33,6 +33,13 @@ public:
     std::function<bool()> sessionLogAvailable;       // enables the menu item iff a session has been recorded
     std::function<void()> onPlaySessionLog;          // Export menu → pick a .t5evt and replay it
     std::function<bool()> replayActive;              // gates the menu item while a tape runs (transport = ReplayOverlay)
+    /** While a session-log replay runs, Init, Save and Library are off. The
+     *  live patch is then the TAPE's: Save would store it as the user's preset,
+     *  and Init or a load would change state under the tape that Stop puts back
+     *  only in part. Same rule as the Play item above and the shortcuts
+     *  MainPanel::keyPressed swallows while the overlay is up. Called by
+     *  MainPanel with the overlay (beginReplayUi / endReplayUi). */
+    void setReplayActive(bool active);
     std::function<void()> onSettings;
     std::function<void()> onManual;
     std::function<void(bool)> onKeyboardInputChanged;

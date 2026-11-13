@@ -664,15 +664,13 @@ MainPanel::MainPanel(T5ynthProcessor& processor)
     replayOverlay_.onStop = [this]
     {
         processorRef.stopReplay();
-        replayOverlay_.end();
-        statusBar.setStatusText(juce::String::fromUTF8("Replay stopped \xe2\x80\x94 patch restored"));
+        endReplayUi(juce::String::fromUTF8("Replay stopped \xe2\x80\x94 patch restored"));
     };
     // Cleared in ~MainPanel: the processor outlives this panel and would otherwise
     // call into a dead `this` when a tape reaches its end.
     processorRef.onReplayFinished = [this]
     {
-        replayOverlay_.end();
-        statusBar.setStatusText(juce::String::fromUTF8("Replay finished \xe2\x80\x94 patch restored"));
+        endReplayUi(juce::String::fromUTF8("Replay finished \xe2\x80\x94 patch restored"));
     };
     statusBar.onSettings     = [this] { if (settingsVisible) hideSettings(); else showSettings(); };
     statusBar.onManual       = [this] { showManual(); };
@@ -5034,9 +5032,25 @@ void MainPanel::loadReplaySession()
                     "Session log has no usable start patch \xe2\x80\x94 cannot replay"));
                 return;
             }
-            self->statusBar.setStatusText("Replaying " + file.getFileName());
-            self->replayOverlay_.begin(file.getFileName());
+            self->beginReplayUi(file.getFileName());
         });
+}
+
+// The replay transport on screen: the overlay, and the status-bar buttons that
+// must not act on the tape's patch (StatusBar::setReplayActive). One pair, so no
+// path can show or hide the one without the other.
+void MainPanel::beginReplayUi(const juce::String& tapeName)
+{
+    statusBar.setStatusText("Replaying " + tapeName);
+    replayOverlay_.begin(tapeName);
+    statusBar.setReplayActive(true);
+}
+
+void MainPanel::endReplayUi(const juce::String& status)
+{
+    replayOverlay_.end();
+    statusBar.setReplayActive(false);
+    statusBar.setStatusText(status);
 }
 
 void MainPanel::saveSessionLog()

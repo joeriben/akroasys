@@ -336,6 +336,8 @@ private:
     void exportWav();
     void saveSessionLog();   // Export menu → copy the current .t5evt to a chosen location
     void loadReplaySession();// Export menu → pick a .t5evt and hand it to the replay transport
+    void beginReplayUi(const juce::String& tapeName);   // overlay up, Init/Save/Library off
+    void endReplayUi(const juce::String& status);       // overlay down, buttons back
     juce::String suggestedExportBaseName() const;   // filename proposed in the WAV save dialog
     void loadDefaultPreset();
     void loadInitPreset();
