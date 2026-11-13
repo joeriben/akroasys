@@ -979,6 +979,33 @@ int main(int argc, char** argv)
         check(hangs == 0, "fill vs shuffle: no hanging voice, orphan off or bad glide (" + std::to_string(hangs) + ")");
     }
 
+    std::printf("\n== 14. A layer leaves the main line's glides alone\n");
+    {
+        // A layer doubles the line on its own strand, on the same onsets. An
+        // onset shared with another strand still continues the held note.
+        int glidesOff = 0, glidesLayer = 0;
+        for (std::uint32_t seed = 1; seed <= 8; ++seed)
+            for (Layer layer : { Layer::Off, Layer::Octave })
+            {
+                Config c = base();
+                c.part = Part::Lead;
+                c.harm = Harm::Chords;
+                c.chordDegrees = { 1, 7, 6, 7 };
+                c.stepsPerBar = 8; c.pulses = 5;
+                c.slide = 0.8f;
+                c.layer = layer;
+                const Run r = play(c, 0.0, 16 * B, 4, 4, {}, seed);
+                int g = 0;
+                for (const auto& pl : r.events)
+                    g += pl.ev.type == VoiceEvent::Type::NoteOn && pl.ev.strandId == -1
+                         && pl.ev.artic == VoiceEvent::Articulation::Glide;
+                (layer == Layer::Off ? glidesOff : glidesLayer) += g;
+            }
+        check(glidesOff > 0 && glidesLayer == glidesOff,
+              "octave layer: main-line glides unchanged (" + std::to_string(glidesLayer) + " with the layer, "
+                  + std::to_string(glidesOff) + " without)");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
