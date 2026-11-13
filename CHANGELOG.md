@@ -96,6 +96,11 @@ unbroken.
   waits.** It was attempted on every timer tick of the replay and wrote "replay
   running" over the status line each time; it now runs once the replay stops.
 
+- **Init, Save and Library are greyed out while a session log replays.** The
+  patch is then the tape's: Save stored it as a preset of your own, and Init or
+  a load from the Library changed it under the tape, which Stop then restored
+  only in part.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
