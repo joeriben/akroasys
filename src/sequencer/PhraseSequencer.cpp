@@ -758,22 +758,25 @@ Motif T5ynthPhraseSequencer::getStoredMotif() const
 
 void T5ynthPhraseSequencer::setStoredMotif(const Motif& m)
 {
+    const std::lock_guard<std::mutex> lock(editMutex);
     stored = m;
-    hasUndo = false;
+    hasUndo.store(false, std::memory_order_relaxed);
     publish(stored);
 }
 
 void T5ynthPhraseSequencer::dice(const Config& c, std::uint32_t newSeed)
 {
+    const std::lock_guard<std::mutex> lock(editMutex);
     adoptResolvedOrigin();
     undoMotif = stored;
-    hasUndo = true;
+    hasUndo.store(true, std::memory_order_relaxed);
     stored = generateMotif(newSeed, editOrigin.load(std::memory_order_relaxed), c);
     publish(stored);
 }
 
 void T5ynthPhraseSequencer::keep()
 {
+    const std::lock_guard<std::mutex> lock(editMutex);
     Motif m;
     int phrase = 0;
     if (!readHeard(m, phrase, toAudio.sequence())) return;
@@ -802,23 +805,25 @@ void T5ynthPhraseSequencer::keep()
     }
     adoptResolvedOrigin();
     undoMotif = stored;
-    hasUndo = true;
+    hasUndo.store(true, std::memory_order_relaxed);
     stored = m;
     publish(stored);
 }
 
 void T5ynthPhraseSequencer::fromSteps(const StepInput* steps, int count, const Config& c)
 {
+    const std::lock_guard<std::mutex> lock(editMutex);
     adoptResolvedOrigin();
     undoMotif = stored;
-    hasUndo = true;
+    hasUndo.store(true, std::memory_order_relaxed);
     stored = motifFromSteps(steps, count, c, stored.seed, editOrigin.load(std::memory_order_relaxed));
     publish(stored);
 }
 
 bool T5ynthPhraseSequencer::undo()
 {
-    if (!hasUndo) return false;
+    const std::lock_guard<std::mutex> lock(editMutex);
+    if (!hasUndo.load(std::memory_order_relaxed)) return false;
     adoptResolvedOrigin();
     std::swap(stored, undoMotif);   // a second Undo redoes
     publish(stored);

@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 /**
@@ -21,7 +22,9 @@
  *    stop / allNotesOff / processBlock. No allocation, no locks: `out` must
  *    have spare capacity (the processor reserves it).
  *  - Message thread: the stored-motif API (dice / keep / fromSteps / undo /
- *    setStoredMotif). The stored motif reaches the audio thread through a
+ *    setStoredMotif). A host may restore its state (setStoredMotif) off the
+ *    message thread, so the writers take editMutex; the audio thread never
+ *    does. The stored motif reaches the audio thread through a
  *    seqlock of relaxed atomic words; the audio thread tries once per block
  *    and keeps the previous motif when it catches a write in progress. The
  *    motif the audio thread plays goes back the same way, so Keep stores
@@ -87,7 +90,7 @@ public:
     void fromSteps(const PhraseModel::StepInput* steps, int count, const PhraseModel::Config& cfg);
     /** One level: returns to the motif before the last dice / keep / fromSteps. */
     bool undo();
-    bool canUndo() const { return hasUndo; }
+    bool canUndo() const { return hasUndo.load(std::memory_order_relaxed); }
 
     // ── GUI ──────────────────────────────────────────────────────────────
     std::atomic<int> currentStepForGui { -1 };    // step of the bar's grid, −1 stopped
@@ -150,9 +153,11 @@ private:
      *  kOriginAtNextEntry while stopped. */
     std::atomic<int> editOrigin { PhraseModel::kOriginAtNextEntry };
 
-    // Message-thread copies
+    // Message-side copies, under editMutex (the stored-motif writers may run
+    // on the message thread and on a host's state-restore thread at once).
+    std::mutex editMutex;
     PhraseModel::Motif stored, undoMotif;
-    bool hasUndo = false;
+    std::atomic<bool> hasUndo { false };
     /** A stored motif published as kOriginAtNextEntry gets its origin when it
      *  is first heard. The stored origin with that applied, and the adoption
      *  of it before every edit, so Undo republishes a motif as it was heard
