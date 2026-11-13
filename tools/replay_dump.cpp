@@ -27,6 +27,7 @@ static const char* sourceStr(NoteEventLogEntry::Source s)
     {
         case NoteEventLogEntry::Source::StepSequencer:        return "StepSeq";
         case NoteEventLogEntry::Source::GenerativeSequencer:  return "GenSeq";
+        case NoteEventLogEntry::Source::PhraseSequencer:      return "PhraseSeq";
         case NoteEventLogEntry::Source::Arpeggiator:          return "Arp";
         case NoteEventLogEntry::Source::ExternalMidi:         return "MIDI";
     }

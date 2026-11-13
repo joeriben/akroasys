@@ -82,9 +82,14 @@
     X(seqRunning)     X(seqBpm)     X(seqSteps)     X(seqDivision) \
     X(seqGlideTime)     X(seqGate)     X(seqShuffle)     X(seqOctave) \
     X(seqPreset)     X(arpMode)     X(arpRate)     X(arpOctaves) \
-    X(genSeqRunning)     X(genSteps)     X(genPulses)     X(genRotation) \
+    X(seqEngine)     X(genSteps)     X(genPulses)     X(genRotation) \
     X(genMutation)     X(genRange)     X(genFixSteps)     X(genFixPulses) \
     X(genFixRotation)     X(genFixMutation)     X(scaleRoot)     X(scaleType) \
+    X(phrPart)     X(phrHarm)     X(phrChord1)     X(phrChord2) \
+    X(phrChord3)     X(phrChord4)     X(phrChordRate)     X(phrExt7) \
+    X(phrLen)     X(phrPulses)     X(phrRotation)     X(phrBars) \
+    X(phrForm)     X(phrVariation)     X(phrEvolve)     X(phrLayer) \
+    X(phrSlide) \
     X(genFieldMode)     X(genFieldRate)     X(genFieldCenterPc)     X(genFieldPivot) \
     X(genCoordinationMode)     X(genCoordinationCap)     X(genRole)     X(genOctave) \
     X(genDivMult)     X(genDominance)     X(gen2Enable)     X(gen2Role) \

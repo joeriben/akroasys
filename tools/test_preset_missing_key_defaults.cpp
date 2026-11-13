@@ -51,6 +51,7 @@
 #include "JuceHeader.h"
 #include "PluginProcessor.h"
 #include "dsp/BlockParams.h"
+#include "sequencer/PhraseModel.h"
 
 #include <cmath>
 #include <cstdio>
@@ -260,6 +261,11 @@ static const Case kCases[] = {
     { "sequencer", "shuffle",     PID::seqShuffle },
     { "sequencer", "scaleRoot",   PID::scaleRoot },
     { "sequencer", "scaleType",   PID::scaleType },
+    // Stripped, the importer falls back to the legacy generativeSeq.enabled,
+    // which the export writes as engine == Gen. The decoy saved here is not
+    // Gen, so that fallback lands on Step, which is also the default; the
+    // fallback's own cases are in sub-test 4.
+    { "sequencer", "engine",      PID::seqEngine },
 
     // arpeggiator
     { "arpeggiator", "pattern",     PID::arpMode },
@@ -267,7 +273,6 @@ static const Case kCases[] = {
     { "arpeggiator", "octaveRange", PID::arpOctaves },
 
     // generative sequencer
-    { "generativeSeq", "enabled",     PID::genSeqRunning },
     { "generativeSeq", "steps",       PID::genSteps },
     { "generativeSeq", "pulses",      PID::genPulses },
     { "generativeSeq", "rotation",    PID::genRotation },
@@ -301,7 +306,141 @@ static const Case kCases[] = {
     { "generativeSeq/strand2", "fixPulses",   PID::gen2FixPulses },
     { "generativeSeq/strand2", "fixRotation", PID::gen2FixRotation },
     { "generativeSeq/strand2", "fixMutation", PID::gen2FixMutation },
+
+    // phrase sequencer (the motif is not a parameter: sub-test 5)
+    { "phraseSeq", "part",      PID::phrPart },
+    { "phraseSeq", "harmony",   PID::phrHarm },
+    { "phraseSeq", "chord1",    PID::phrChord1 },
+    { "phraseSeq", "chord2",    PID::phrChord2 },
+    { "phraseSeq", "chord3",    PID::phrChord3 },
+    { "phraseSeq", "chord4",    PID::phrChord4 },
+    { "phraseSeq", "chordRate", PID::phrChordRate },
+    { "phraseSeq", "ext7",      PID::phrExt7 },
+    { "phraseSeq", "len",       PID::phrLen },
+    { "phraseSeq", "pulses",    PID::phrPulses },
+    { "phraseSeq", "rotation",  PID::phrRotation },
+    { "phraseSeq", "bars",      PID::phrBars },
+    { "phraseSeq", "form",      PID::phrForm },
+    { "phraseSeq", "variation", PID::phrVariation },
+    { "phraseSeq", "evolve",    PID::phrEvolve },
+    { "phraseSeq", "layer",     PID::phrLayer },
+    { "phraseSeq", "slide",     PID::phrSlide },
 };
+
+static const char* const kPhraseParams[] = {
+    PID::phrPart, PID::phrHarm, PID::phrChord1, PID::phrChord2, PID::phrChord3, PID::phrChord4,
+    PID::phrChordRate, PID::phrExt7, PID::phrLen, PID::phrPulses, PID::phrRotation, PID::phrBars,
+    PID::phrForm, PID::phrVariation, PID::phrEvolve, PID::phrLayer, PID::phrSlide
+};
+
+static void setPlain (T5ynthProcessor& p, const char* pid, float plain)
+{
+    if (auto* par = p.getValueTreeState().getParameter (pid))
+        par->setValueNotifyingHost (par->convertTo0to1 (plain));
+}
+
+static bool sameBody (const PhraseModel::MotifBody& a, const PhraseModel::MotifBody& b)
+{
+    if (a.len != b.len || a.stepsPerBar != b.stepsPerBar || a.pulses != b.pulses
+        || a.rotation != b.rotation || a.part != b.part || a.seed != b.seed)
+        return false;
+    for (int i = 0; i < a.numSteps(); ++i)
+    {
+        const auto& x = a.slots[(size_t) i];
+        const auto& y = b.slots[(size_t) i];
+        if (x.fn != y.fn || x.member != y.member || x.octave != y.octave
+            || x.accent != y.accent || x.slide != y.slide)
+            return false;
+    }
+    return true;
+}
+
+static bool sameMotif (const PhraseModel::Motif& a, const PhraseModel::Motif& b)
+{
+    if (! sameBody (a, b) || a.origin != b.origin || a.leadInKept != b.leadInKept)
+        return false;
+    return ! a.leadInKept || (sameBody (a.leadIn, b.leadIn) && a.leadInPhrase == b.leadInPhrase);
+}
+
+// A motif no default produces: two bars of eight, every field off its
+// default, every slot field used, and a kept lead-in of its own shape.
+static PhraseModel::Motif probeMotif()
+{
+    using namespace PhraseModel;
+    Motif m;
+    m.len = 2; m.stepsPerBar = 8; m.pulses = 6; m.rotation = 3;
+    m.part = Part::Lead; m.seed = 0xdeadbeefu; m.origin = 5;
+    const Fn fns[] = { Fn::ChordTone, Fn::Rest, Fn::Passing, Fn::ApproachChromatic,
+                       Fn::NeighbourDown, Fn::Octave, Fn::Repeat, Fn::ApproachUp };
+    for (int i = 0; i < m.numSteps(); ++i)
+    {
+        auto& sl = m.slots[(size_t) i];
+        sl.fn = fns[i % 8];
+        sl.member = (std::uint8_t) (i % 4);
+        sl.octave = (std::int8_t) (i % 3 - 1);
+        sl.accent = i % 3 == 0;
+        sl.slide  = i % 5 == 1;
+    }
+    m.leadInKept = true;
+    m.leadIn.len = 1; m.leadIn.stepsPerBar = 16; m.leadIn.pulses = 5; m.leadIn.rotation = 2;
+    m.leadIn.part = Part::Riff; m.leadIn.seed = 77u;
+    for (int i = 0; i < m.leadIn.numSteps(); ++i)
+    {
+        auto& sl = m.leadIn.slots[(size_t) i];
+        sl.fn = i % 2 == 0 ? Fn::ChordTone : Fn::NeighbourUp;
+        sl.member = (std::uint8_t) ((i + 1) % 4);
+        sl.octave = (std::int8_t) ((i + 2) % 3 - 1);
+        sl.accent = i % 4 == 2;
+    }
+    m.leadInPhrase = 5;
+    return m;
+}
+
+// The motif in the file format, written from PRESET_FORMAT.md rather than by
+// the exporter, so the reader is held to the format and not to its own twin.
+static const char* const kFnKeys[] = { "rest", "chord_tone", "repeat", "octave", "passing",
+                                       "neighbour_up", "neighbour_down", "approach_up",
+                                       "approach_down", "approach_chromatic" };
+static_assert (std::size (kFnKeys) == (size_t) PhraseModel::Fn::Count, "kFnKeys out of sync");
+
+static void writeBody (const PhraseModel::MotifBody& b, juce::DynamicObject& o)
+{
+    o.setProperty ("len", b.len);
+    o.setProperty ("stepsPerBar", b.stepsPerBar);
+    o.setProperty ("pulses", b.pulses);
+    o.setProperty ("rotation", b.rotation);
+    o.setProperty ("part", PhrPart::kEntries[(int) b.part].key);
+    o.setProperty ("seed", (juce::int64) b.seed);
+    juce::Array<juce::var> slots;
+    for (int i = 0; i < b.numSteps(); ++i)
+    {
+        const auto& sl = b.slots[(size_t) i];
+        auto* so = new juce::DynamicObject();
+        so->setProperty ("fn", kFnKeys[(int) sl.fn]);
+        so->setProperty ("member", (int) sl.member);
+        so->setProperty ("octave", (int) sl.octave);
+        so->setProperty ("accent", sl.accent);
+        so->setProperty ("slide", sl.slide);
+        slots.add (juce::var (so));
+    }
+    o.setProperty ("slots", slots);
+}
+
+static juce::var motifJson (const PhraseModel::Motif& m)
+{
+    auto* o = new juce::DynamicObject();
+    juce::var out (o);
+    writeBody (m, *o);
+    o->setProperty ("origin", m.origin);
+    if (m.leadInKept)
+    {
+        auto* lo = new juce::DynamicObject();
+        writeBody (m.leadIn, *lo);
+        lo->setProperty ("phrase", m.leadInPhrase);
+        o->setProperty ("leadIn", juce::var (lo));
+    }
+    return out;
+}
 
 int main()
 {
@@ -455,6 +594,205 @@ int main()
             if ((int) std::lround (plainOf (proc, PID::filterType)) != FilterType::Off)
             {
                 std::printf ("  FAIL: filter `enabled: false` no longer forces Off\n");
+                ++failures;
+            }
+        }
+    }
+
+    // ── 4. the engine: sequencer.engine, and the bool it replaced ──
+    // generativeSeq.enabled was the Step<->Gen switch before the Phrase
+    // engine. A file that names the engine is read by it alone; a file from
+    // before reads the bool; a file with neither lands on the layout default.
+    {
+        struct EngineCase
+        {
+            const char* what;
+            bool keepEngine; const char* engine;       // engine key, when kept
+            bool keepEnabled; bool enabled;            // legacy bool, when kept
+            int decoy, want;
+        };
+        const EngineCase kEngine[] = {
+            { "neither key",                       false, "",       false, false, SeqEngine::Gen,    SeqEngine::Step },
+            { "only the legacy bool, true",        false, "",       true,  true,  SeqEngine::Phrase, SeqEngine::Gen },
+            { "only the legacy bool, false",       false, "",       true,  false, SeqEngine::Gen,    SeqEngine::Step },
+            { "engine phrase over a stale bool",   true,  "phrase", true,  true,  SeqEngine::Gen,    SeqEngine::Phrase },
+            { "engine gen",                        true,  "gen",    true,  true,  SeqEngine::Step,   SeqEngine::Gen },
+            { "engine step over a stale bool",     true,  "step",   true,  true,  SeqEngine::Phrase, SeqEngine::Step },
+        };
+        for (const auto& e : kEngine)
+        {
+            auto parsed = juce::JSON::parse (fullJson);
+            auto* seq = resolvePath (parsed, "sequencer");
+            auto* gs  = resolvePath (parsed, "generativeSeq");
+            if (seq == nullptr || gs == nullptr)
+            {
+                std::printf ("  FAIL: engine — sequencer or generativeSeq missing from the export\n");
+                ++failures;
+                break;
+            }
+            if (e.keepEngine) seq->setProperty ("engine", e.engine); else seq->removeProperty ("engine");
+            if (e.keepEnabled) gs->setProperty ("enabled", e.enabled); else gs->removeProperty ("enabled");
+            setPlain (proc, PID::seqEngine, (float) e.decoy);
+            proc.importJsonPreset (juce::JSON::toString (parsed, true));
+            const int got = (int) std::lround (plainOf (proc, PID::seqEngine));
+            if (got != e.want)
+            {
+                std::printf ("  FAIL: engine, %s: loaded %d, want %d\n", e.what, got, e.want);
+                ++failures;
+            }
+        }
+
+        // The export writes the bool as engine == Gen, so a reader that knows
+        // only the bool still tells Gen from the rest.
+        for (int eng = 0; eng < SeqEngine::kCount; ++eng)
+        {
+            setPlain (proc, PID::seqEngine, (float) eng);
+            auto parsed = juce::JSON::parse (proc.exportJsonPreset());
+            auto* seq = resolvePath (parsed, "sequencer");
+            auto* gs  = resolvePath (parsed, "generativeSeq");
+            if (seq == nullptr || gs == nullptr
+                || seq->getProperty ("engine").toString() != SeqEngine::kEntries[eng].key
+                || (bool) gs->getProperty ("enabled") != (eng == SeqEngine::Gen))
+            {
+                std::printf ("  FAIL: engine %d exported as engine \"%s\", enabled %d\n", eng,
+                             seq != nullptr ? seq->getProperty ("engine").toString().toRawUTF8() : "?",
+                             gs != nullptr ? (int) (bool) gs->getProperty ("enabled") : -1);
+                ++failures;
+            }
+        }
+    }
+
+    // ── 5. the phraseSeq block and the stored motif ──
+    {
+        const auto phraseDecoys = [&proc]
+        {
+            for (const char* id : kPhraseParams)
+                setNorm (proc, id, decoyNormFor (proc, id));
+        };
+        const auto withMotif = [&fullJson] (const juce::var& motif)
+        {
+            auto parsed = juce::JSON::parse (fullJson);
+            if (auto* ph = resolvePath (parsed, "phraseSeq"))
+                ph->setProperty ("motif", motif);
+            return juce::JSON::toString (parsed, true);
+        };
+        const auto withoutPhrase = [&fullJson] (bool asPattern)
+        {
+            auto parsed = juce::JSON::parse (fullJson);
+            auto* root = parsed.getDynamicObject();
+            root->removeProperty ("phraseSeq");
+            if (! asPattern)
+                return juce::JSON::toString (parsed, true);
+            // A .t5seq as SequencerPanel::writePatternTo writes it, minus the
+            // block under test.
+            juce::DynamicObject::Ptr pat = new juce::DynamicObject();
+            pat->setProperty ("version", 1);
+            pat->setProperty ("kind", "t5seq");
+            for (const char* key : { "sequencer", "arpeggiator", "generativeSeq" })
+                pat->setProperty (key, root->getProperty (key));
+            return juce::JSON::toString (juce::var (pat.get()), true);
+        };
+        const auto stored = [&proc] { return proc.getPhraseSequencer().getStoredMotif(); };
+        const PhraseModel::Motif probe = probeMotif();
+
+        // a. The reader, held to the format.
+        proc.importJsonPreset (withMotif (motifJson (probe)));
+        if (! sameMotif (stored(), probe))
+        {
+            std::printf ("  FAIL: phraseSeq.motif written to the format did not load as written\n");
+            ++failures;
+        }
+
+        // b. Writer and reader: what the export writes loads back as it was.
+        {
+            auto parsed = juce::JSON::parse (proc.exportJsonPreset());
+            auto* ph = resolvePath (parsed, "phraseSeq");
+            const juce::var exported = ph != nullptr ? ph->getProperty ("motif") : juce::var();
+            proc.importJsonPreset (withoutPhrase (false));
+            proc.importJsonPreset (withMotif (exported));
+            if (! sameMotif (stored(), probe))
+            {
+                std::printf ("  FAIL: the exported motif did not load back as it was stored\n");
+                ++failures;
+            }
+        }
+
+        // c. A .t5seq without the block leaves the phrase sequencer as it is.
+        phraseDecoys();
+        std::vector<float> parked;
+        for (const char* id : kPhraseParams) parked.push_back (normOf (proc, id));
+        proc.importJsonPreset (withoutPhrase (true));
+        for (size_t i = 0; i < std::size (kPhraseParams); ++i)
+            if (std::abs (normOf (proc, kPhraseParams[i]) - parked[i]) > 1.0e-5f)
+            {
+                std::printf ("  FAIL: a .t5seq without phraseSeq moved %s\n", kPhraseParams[i]);
+                ++failures;
+            }
+        if (! sameMotif (stored(), probe))
+        {
+            std::printf ("  FAIL: a .t5seq without phraseSeq replaced the stored motif\n");
+            ++failures;
+        }
+
+        // d. A preset without the block predates the phrase sequencer: defaults
+        //    and the empty motif, as a reset leaves them.
+        proc.importJsonPreset (withoutPhrase (false));
+        for (const char* id : kPhraseParams)
+            if (std::abs (normOf (proc, id) - defaultNormOf (proc, id)) > 1.0e-4f)
+            {
+                std::printf ("  FAIL: a preset without phraseSeq left %s at %.4f, default %.4f\n",
+                             id, normOf (proc, id), defaultNormOf (proc, id));
+                ++failures;
+            }
+        if (! sameMotif (stored(), PhraseModel::Motif {}))
+        {
+            std::printf ("  FAIL: a preset without phraseSeq kept a motif\n");
+            ++failures;
+        }
+
+        // e. The block without its motif: the empty motif, not the last one.
+        proc.importJsonPreset (withMotif (motifJson (probe)));
+        {
+            auto parsed = juce::JSON::parse (fullJson);
+            if (auto* ph = resolvePath (parsed, "phraseSeq"))
+                ph->removeProperty ("motif");
+            proc.importJsonPreset (juce::JSON::toString (parsed, true));
+            if (! sameMotif (stored(), PhraseModel::Motif {}))
+            {
+                std::printf ("  FAIL: phraseSeq without a motif kept the previous one\n");
+                ++failures;
+            }
+        }
+
+        // f. A lead-in that names no phrase has no place to apply: off.
+        {
+            auto m = motifJson (probe);
+            if (auto* lo = m.getDynamicObject()->getProperty ("leadIn").getDynamicObject())
+                lo->removeProperty ("phrase");
+            proc.importJsonPreset (withMotif (m));
+            auto want = probe;
+            want.leadInKept = false;
+            want.leadIn = {};
+            want.leadInPhrase = 0;
+            if (! sameMotif (stored(), want))
+            {
+                std::printf ("  FAIL: a lead-in without \"phrase\" did not stay off\n");
+                ++failures;
+            }
+        }
+
+        // g. A motif not heard yet keeps "origin": "next" through a round trip.
+        {
+            auto m = motifJson (probe);
+            m.getDynamicObject()->setProperty ("origin", "next");
+            proc.importJsonPreset (withMotif (m));
+            auto parsed = juce::JSON::parse (proc.exportJsonPreset());
+            auto* ph = resolvePath (parsed, "phraseSeq");
+            const auto* mo = ph != nullptr ? ph->getProperty ("motif").getDynamicObject() : nullptr;
+            if (stored().origin != PhraseModel::kOriginAtNextEntry || mo == nullptr
+                || mo->getProperty ("origin").toString() != "next")
+            {
+                std::printf ("  FAIL: origin \"next\" did not survive a round trip\n");
                 ++failures;
             }
         }

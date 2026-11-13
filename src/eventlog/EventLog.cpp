@@ -8,6 +8,7 @@ const char* noteEventSourceKey(NoteEventLogEntry::Source s)
     {
         case NoteEventLogEntry::Source::StepSequencer:        return "step_seq";
         case NoteEventLogEntry::Source::GenerativeSequencer:  return "gen_seq";
+        case NoteEventLogEntry::Source::PhraseSequencer:      return "phrase_seq";
         case NoteEventLogEntry::Source::Arpeggiator:          return "arp";
         case NoteEventLogEntry::Source::ExternalMidi:         return "midi";
     }

@@ -8,6 +8,7 @@ NoteEventLogEntry::Source sourceFromKey(const juce::String& key)
 {
     if (key == "step_seq") return NoteEventLogEntry::Source::StepSequencer;
     if (key == "gen_seq")  return NoteEventLogEntry::Source::GenerativeSequencer;
+    if (key == "phrase_seq") return NoteEventLogEntry::Source::PhraseSequencer;
     if (key == "arp")      return NoteEventLogEntry::Source::Arpeggiator;
     return NoteEventLogEntry::Source::ExternalMidi;
 }

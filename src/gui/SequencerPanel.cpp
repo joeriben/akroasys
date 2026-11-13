@@ -627,20 +627,23 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     octShiftA = std::make_unique<CA>(apvts, PID::seqOctave, octShiftHidden);
 
     // ── Generative sequencer controls ──
-    // genTransportBtn is now a HIDDEN APVTS bridge for PID::genSeqRunning
-    // (a STEP↔GEN mode toggle). The visible control is the Step|Gen switchbox
-    // below, which drives this button; the BA keeps the param in sync both ways.
-    genTransportBtn.setClickingTogglesState(true);
-    addChildComponent(genTransportBtn);              // in the tree, never shown
-    genRunningA = std::make_unique<BA>(apvts, PID::genSeqRunning, genTransportBtn);
-    genTransportBtn.onStateChange = [this] {
-        const bool gen = genTransportBtn.getToggleState();
-        modeStepBtn.setToggleState(!gen, juce::dontSendNotification);
-        modeGenBtn .setToggleState( gen, juce::dontSendNotification);
+    // engineHidden is the HIDDEN APVTS bridge for PID::seqEngine. The visible
+    // control is the mode switchbox below, which drives it; the CA keeps the
+    // param in sync both ways.
+    {
+        juce::StringArray engineItems;
+        for (const auto& e : SeqEngine::kEntries) engineItems.add(e.label);
+        engineHidden.addItemList(engineItems, 1);
+    }
+    engineHidden.onChange = [this] {
+        const int engine = engineHidden.getSelectedId() - 1;
+        modeStepBtn.setToggleState(engine == SeqEngine::Step, juce::dontSendNotification);
+        modeGenBtn .setToggleState(engine == SeqEngine::Gen,  juce::dontSendNotification);
         // Leaving Step mode cancels an in-progress step-record.
-        if (gen && processorRef.isStepRecordArmed())
+        if (engine != SeqEngine::Step && processorRef.isStepRecordArmed())
             processorRef.toggleStepRecord();
     };
+    engineA = std::make_unique<CA>(apvts, PID::seqEngine, engineHidden);
 
     // Step | Gen mode switchbox (visible) — segments drive the hidden bridge.
     modeStepBtn.setConnectedEdges(juce::Button::ConnectedOnRight);
@@ -657,14 +660,14 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
         b->setRadioGroupId(2010);
         addAndMakeVisible(*b);
     }
-    modeStepBtn.onClick = [this] { genTransportBtn.setToggleState(false, juce::sendNotificationSync); };
+    modeStepBtn.onClick = [this] { engineHidden.setSelectedId(SeqEngine::Step + 1, juce::sendNotificationSync); };
     // Double-click the Step segment to latch step-record (handled in mouseDoubleClick).
     modeStepBtn.addMouseListener(this, false);
-    modeGenBtn .onClick = [this] { genTransportBtn.setToggleState(true,  juce::sendNotificationSync); };
+    modeGenBtn .onClick = [this] { engineHidden.setSelectedId(SeqEngine::Gen + 1,  juce::sendNotificationSync); };
     {
-        const bool gen = genTransportBtn.getToggleState();   // initial sync from param
-        modeStepBtn.setToggleState(!gen, juce::dontSendNotification);
-        modeGenBtn .setToggleState( gen, juce::dontSendNotification);
+        const int engine = engineHidden.getSelectedId() - 1;   // initial sync from param
+        modeStepBtn.setToggleState(engine == SeqEngine::Step, juce::dontSendNotification);
+        modeGenBtn .setToggleState(engine == SeqEngine::Gen,  juce::dontSendNotification);
     }
 
     auto intFmt = [](double v) { return juce::String(juce::roundToInt(v)); };
@@ -1013,7 +1016,8 @@ SequencerPanel::~SequencerPanel()
     stopTimer();
 }
 
-// .t5seq is a partial preset: sequencer + arpeggiator + generative seq only.
+// .t5seq is a partial preset: sequencer + arpeggiator + generative seq +
+// phrase seq only.
 // Schema is the snake_case-keyed subset of exportJsonPreset()/importJsonPreset()
 // — single source of truth, no schema drift.
 bool SequencerPanel::writePatternTo(const juce::File& file)
@@ -1028,7 +1032,7 @@ bool SequencerPanel::writePatternTo(const juce::File& file)
     out->setProperty("kind", "t5seq");
     out->setProperty("timestamp", juce::Time::getCurrentTime().toISO8601(true));
 
-    for (const char* key : { "sequencer", "arpeggiator", "generativeSeq" })
+    for (const char* key : { "sequencer", "arpeggiator", "generativeSeq", "phraseSeq" })
     {
         if (!full->hasProperty(key))
             continue;
@@ -1061,7 +1065,8 @@ bool SequencerPanel::loadPatternFrom(const juce::File& file)
         return false;
 
     // importJsonPreset is tolerant: missing sub-objects (synth, engine, …)
-    // are skipped, so a partial .t5seq only touches sequencer / arp / gen.
+    // are skipped, so a partial .t5seq only touches sequencer / arp / gen /
+    // phrase.
     if (!processorRef.importJsonPreset(file.loadFileAsString()))
         return false;
 
@@ -1141,8 +1146,8 @@ void SequencerPanel::mouseDoubleClick(const juce::MouseEvent& e)
 
 void SequencerPanel::timerCallback()
 {
-    bool genRunning = processorRef.getValueTreeState()
-        .getRawParameterValue(PID::genSeqRunning)->load() > 0.5f;
+    bool genRunning = static_cast<int>(processorRef.getValueTreeState()
+        .getRawParameterValue(PID::seqEngine)->load()) == SeqEngine::Gen;
     bool seqRunning = processorRef.getValueTreeState()
         .getRawParameterValue(PID::seqRunning)->load() > 0.5f;
 
@@ -1542,8 +1547,8 @@ void SequencerPanel::resized()
     area.removeFromBottom(g);
 
     // ═══ Determine mode ═══
-    genModeActive = processorRef.getValueTreeState()
-        .getRawParameterValue(PID::genSeqRunning)->load() > 0.5f;
+    genModeActive = static_cast<int>(processorRef.getValueTreeState()
+        .getRawParameterValue(PID::seqEngine)->load()) == SeqEngine::Gen;
 
     // Visibility: step grid vs gen controls (Row 1 stays ALWAYS visible)
     for (int i = 0; i < MAX_COLS; ++i)

@@ -219,7 +219,7 @@ int main()
             if (auto* p = r.proc.getValueTreeState().getParameter (pid))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
-        set (PID::genSeqRunning, 0.0f);
+        set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
         r.run (2);
         auto& seq = r.proc.getStepSequencer();
         seq.setNumSteps (4);

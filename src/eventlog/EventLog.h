@@ -24,7 +24,7 @@ enum class ParamOrigin : uint8_t { HostAutomation, UserEdit, MidiCCLearn };
  *  apart — both always use -1). */
 struct NoteEventLogEntry
 {
-    enum class Source : uint8_t { StepSequencer, GenerativeSequencer, Arpeggiator, ExternalMidi };
+    enum class Source : uint8_t { StepSequencer, GenerativeSequencer, Arpeggiator, ExternalMidi, PhraseSequencer };
 
     uint64_t          timestamp    = 0;   // running sample counter at tap time (+ sampleOffset)
     Source            source       = Source::ExternalMidi;

@@ -16,9 +16,9 @@
  *     library (= the sidebar's TAGS list) must render before the canonical
  *     starter pack or the two lists visibly disagree. The merge lives in
  *     PresetManagerPanel::applyTagVocabulary().
- *   - "generative" only appears when the generative sequencer is currently
- *     running, since that's the only context where the tag is meaningful
- *     (sequenced motion that varies between plays).
+ *   - "generative" only appears when a generative sequencer engine (Phrase
+ *     or Gen) is selected, since that's the only context where the tag is
+ *     meaningful (sequenced motion that varies as it plays).
  *
  *  Vocabulary lives in this header (not a translation unit) because it is
  *  pure data — header-only avoids another compile target without

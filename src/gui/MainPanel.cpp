@@ -2116,10 +2116,10 @@ void MainPanel::showPresetManager()
     // Push the canonical tag taxonomy before refreshing the library so the
     // Detail-cloud merge sees both the curated set and the user-seen tags
     // in a single applyTagVocabulary() call inside refreshLibrary(). The
-    // "generative" tag only ships when the generative sequencer is
-    // currently running — see TagVocabulary.h for the rationale.
-    const bool genSeqActive = processorRef.getValueTreeState()
-                                  .getRawParameterValue(PID::genSeqRunning)->load() > 0.5f;
+    // "generative" tag only ships when a generative engine (Phrase or Gen)
+    // is selected — see TagVocabulary.h for the rationale.
+    const bool genSeqActive = static_cast<int>(processorRef.getValueTreeState()
+                                  .getRawParameterValue(PID::seqEngine)->load()) != SeqEngine::Step;
     presetManager.setTagVocabularyCanonical(TagVocabulary::getCanonical(genSeqActive));
     presetManager.setRuntimeDevice(promptPanel.getInferenceDevice());
     presetManager.refreshLibrary();

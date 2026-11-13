@@ -12,6 +12,31 @@
 
 #define SAMPLER_PROCESSOR_DEBUG_LOG 0
 
+// RAII around a load that may change the sequencer engine (preset import,
+// DAW state restore): see seqTransferHoldDepth_. Gen re-reads its step /
+// pulse / rotation / mutation params after the load either way.
+struct T5ynthProcessor::SeqTransferHold
+{
+    explicit SeqTransferHold(T5ynthProcessor& p) : proc(p)
+    {
+        const juce::ScopedLock sl(proc.getCallbackLock());
+        ++proc.seqTransferHoldDepth_;
+    }
+    ~SeqTransferHold()
+    {
+        const juce::ScopedLock sl(proc.getCallbackLock());
+        if (--proc.seqTransferHoldDepth_ == 0)
+        {
+            proc.seqTransferSkipNext_ = true;
+            proc.lastGenSteps = proc.lastGenPulses = proc.lastGenRotation = -1;
+            proc.lastGenMutation = -1.0f;
+        }
+    }
+    SeqTransferHold(const SeqTransferHold&) = delete;
+    SeqTransferHold& operator=(const SeqTransferHold&) = delete;
+    T5ynthProcessor& proc;
+};
+
 namespace
 {
 constexpr float kAlphaAnchorSnapThreshold = 0.04f;
@@ -590,7 +615,7 @@ T5ynthProcessor::T5ynthProcessor()
     // Cache the transport params the XL DAW-mode buttons toggle (set from the audio
     // thread via setValueNotifyingHost — same mechanism as the CC binding apply).
     seqRunningParam_    = parameters.getParameter(PID::seqRunning);
-    genSeqRunningParam_ = parameters.getParameter(PID::genSeqRunning);
+    seqEngineParam_     = parameters.getParameter(PID::seqEngine);
 
     juce::File("/tmp/t5ynth_sampler_debug.log").deleteFile();
     samplerProcessorDebugLog("session start");
@@ -878,6 +903,15 @@ void T5ynthProcessor::beginComputerKeyboardNote(int midiNote, float velocity, bo
     const int note = juce::jlimit(0, 127, midiNote);
     const float vel = juce::jlimit(0.0f, 1.0f, velocity);
 
+    // Phrase + Keys: the key sets the phrase chord and nothing else — no
+    // voice, no arp key, no step record (routePhraseKeys does the same for
+    // MIDI). A key this keyboard already holds there stays there.
+    if (phraseTakesKeys() || phraseKeyFromComputer_[static_cast<size_t>(note)])
+    {
+        phraseKeyPress(note, /*channelBit=*/0);
+        return;
+    }
+
     // The arpeggiator tracks held keys unconditionally (see Arpeggiator.h): this
     // is what lets the computer keyboard drive the arp at all — it reads the MIDI
     // buffer, which these notes never enter — and what lets switching the arp on
@@ -918,6 +952,12 @@ void T5ynthProcessor::endComputerKeyboardNote(int midiNote)
     const juce::ScopedLock sl(getCallbackLock());
 
     const int note = juce::jlimit(0, 127, midiNote);
+    // A key the phrase sequencer took ends there, whatever the mode is now.
+    if (phraseKeyFromComputer_[static_cast<size_t>(note)])
+    {
+        phraseKeyRelease(note, /*channelBit=*/0);
+        return;
+    }
     arpeggiator.noteOff(note, /*mpeChannel=*/0);
     voiceManager.noteKeyUp(note, /*midiChannel=*/0);
     // Unconditional: a no-op unless this key really started a direct voice (arp
@@ -934,7 +974,11 @@ void T5ynthProcessor::allComputerKeyboardNotesOff()
     arpeggiator.allKeysUp();
     voiceManager.allKeysReleased();
     for (int note = 0; note < 128; ++note)
+    {
+        if (phraseKeyFromComputer_[static_cast<size_t>(note)])
+            phraseKeyRelease(note, /*channelBit=*/0);
         voiceManager.noteOff(note, kComputerKeyboardSourceId);
+    }
     if (!voiceManager.hasActiveVoices())
         lastMidiNoteOn.store(false, std::memory_order_relaxed);
 }
@@ -1467,7 +1511,6 @@ bool T5ynthProcessor::startReplay(const EventLogReader& reader)
                                        csoundParamsText_, csoundControls_, authorSettings_,
                                        authorSettingsGeneration_ };
     preReplaySeqRunning_     = parameters.getRawParameterValue(PID::seqRunning)->load();
-    preReplayGenSeqRunning_  = parameters.getRawParameterValue(PID::genSeqRunning)->load();
     preReplayRepromptStance_ = parameters.getRawParameterValue(PID::repromptStance)->load();
     preReplayDcoStance_      = parameters.getRawParameterValue(PID::dcoRepromptStance)->load();
 
@@ -1519,7 +1562,16 @@ bool T5ynthProcessor::startReplay(const EventLogReader& reader)
     {
         const int tapeEpoch = reader.getHeader().calibEpoch;
         for (auto& p : state.paramEvents)
+        {
             p.value = Calibration::migrateLoggedValue(p.paramId, p.value, tapeEpoch);
+            // A tape from before seq_engine logged the Step<->Gen bool, which no
+            // parameter carries any more.
+            if (p.paramId == "gen_seq_running")
+            {
+                p.paramId = PID::seqEngine;
+                p.value = static_cast<float>(p.value > 0.5f ? SeqEngine::Gen : SeqEngine::Step);
+            }
+        }
     }
     state.totalDurationSamples = rebase(reader.getTotalDurationSamples());
     state.sampleRate = deviceSR;   // the tail check below now lives in the device domain
@@ -1603,7 +1655,6 @@ void T5ynthProcessor::stopReplay()
                 p->setValueNotifyingHost(p->convertTo0to1(v));
         };
         restore(PID::seqRunning,      preReplaySeqRunning_);
-        restore(PID::genSeqRunning,   preReplayGenSeqRunning_);
         restore(PID::repromptStance,  preReplayRepromptStance_);
         restore(PID::dcoRepromptStance, preReplayDcoStance_);
     }
@@ -2499,9 +2550,65 @@ juce::AudioProcessorValueTreeState::ParameterLayout T5ynthProcessor::createParam
         juce::ParameterID{PID::seqPreset, 1}, "Seq Preset",
         toChoices(SeqPreset::kEntries), 0));
 
-    // Generative sequencer
+    // Sequencer engine: the Step | Phrase | Gen switch. A mode, not transport
+    // (seq_running is the transport). Replaces the bool gen_seq_running, which
+    // setStateInformation, startReplay and importJsonPreset migrate.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::seqEngine, 1}, "Seq Engine",
+        toChoices(SeqEngine::kEntries), SeqEngine::Step));
+
+    // Phrase sequencer (docs/PHRASE_SEQ_CONCEPT.md). The motif is not a
+    // parameter: it lives in the state XML and the preset's phraseSeq block.
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrPart, 1}, "Phrase Part",
+        toChoices(PhrPart::kEntries), PhrPart::Bass));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrHarm, 1}, "Phrase Harmony",
+        toChoices(PhrHarm::kEntries), PhrHarm::Pedal));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrChord1, 1}, "Phrase Chord 1",
+        toChoices(PhrChord::kEntries), 1));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrChord2, 1}, "Phrase Chord 2",
+        toChoices(PhrChord::kEntries), PhrChord::Off));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrChord3, 1}, "Phrase Chord 3",
+        toChoices(PhrChord::kEntries), PhrChord::Off));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrChord4, 1}, "Phrase Chord 4",
+        toChoices(PhrChord::kEntries), PhrChord::Off));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrChordRate, 1}, "Phrase Chord Rate",
+        toChoices(PhrChordRate::kEntries), PhrChordRate::B1));
     params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID{PID::genSeqRunning, 1}, "Gen Seq Running", false));
+        juce::ParameterID{PID::phrExt7, 1}, "Phrase Ext 7", false));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrLen, 1}, "Phrase Len",
+        toChoices(PhrLen::kEntries), PhrLen::B1));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{PID::phrPulses, 1}, "Phrase Pulses", 1, 32, 4));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{PID::phrRotation, 1}, "Phrase Rotation", 0, 31, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrBars, 1}, "Phrase Bars",
+        toChoices(PhrBars::kEntries), PhrBars::B8));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrForm, 1}, "Phrase Form",
+        toChoices(PhrForm::kEntries), PhrForm::AAAB));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{PID::phrVariation, 1}, "Phrase Variation",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{PID::phrEvolve, 1}, "Phrase Evolve",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{PID::phrLayer, 1}, "Phrase Layer",
+        toChoices(PhrLayer::kEntries), PhrLayer::Off));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{PID::phrSlide, 1}, "Phrase Slide",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+
+    // Generative sequencer
     params.push_back(std::make_unique<juce::AudioParameterInt>(
         juce::ParameterID{PID::genSteps, 1}, "Gen Steps", 2, 32, 21));
     params.push_back(std::make_unique<juce::AudioParameterInt>(
@@ -2919,6 +3026,7 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     internalNoteEvents_.reserve(2048);
     stepSequencer.prepare(sampleRate, samplesPerBlock);
     generativeSequencer.prepare(sampleRate, samplesPerBlock);
+    phraseSequencer.prepare(sampleRate);
     arpeggiator.prepare(sampleRate, samplesPerBlock);
     lfo1Buffer.resize(static_cast<size_t>(samplesPerBlock));
     lfo2Buffer.resize(static_cast<size_t>(samplesPerBlock));
@@ -3900,9 +4008,13 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     if (replayActive)
         midiMessages.clear();
 
-    // ── Host-transport snapshot (feeds resolveSyncBpm()) ────────────────────
+    // ── Host-transport snapshot (feeds resolveSyncBpm() and the phrase
+    //    sequencer's bar position) ────────────────────────────────────────────
     {
         bool playing = false;
+        hostPpqValid_ = false;
+        hostTsNum_ = 4;
+        hostTsDen_ = 4;
         if (auto* ph = getPlayHead())
         {
             if (auto pos = ph->getPosition())
@@ -3913,6 +4025,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                     if (auto bpm = pos->getBpm())
                         hostBpmLastSeen.store(static_cast<float>(*bpm),
                                               std::memory_order_relaxed);
+                    if (auto ppq = pos->getPpqPosition())
+                    {
+                        hostPpq_ = *ppq;
+                        hostPpqValid_ = true;
+                    }
+                }
+                if (auto ts = pos->getTimeSignature())
+                {
+                    hostTsNum_ = ts->numerator;
+                    hostTsDen_ = ts->denominator;
                 }
             }
         }
@@ -4011,6 +4133,8 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         arpeggiator.allKeysUp();
         voiceManager.allKeysReleased();
         arpeggiator.clearSeqLead();
+        // The same for the keys the phrase sequencer holds (its chord latches).
+        releaseAllPhraseKeys();
         lastMidiNoteOn.store(false, std::memory_order_relaxed);
     }
 
@@ -4025,14 +4149,14 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     //     DriftLFO::setLfoArmed) — and release it on the next bar downbeat
     //     (where barStartFlag is consumed, below) so its first cycle starts on
     //     the "1". ("ggf. kurz warten bis der Beat kommt.")
-    // Scope: only while the STEP seq is the lead (not GEN mode, host not
-    // playing) — that is the only transport exposing a bar signal to align to;
-    // GEN-engine and host-led playback keep the old immediate behaviour.
-    // PID::genSeqRunning is a STEP↔GEN toggle, not transport.
+    // Scope: only while the Step or Phrase engine leads (host not playing) —
+    // those are the transports exposing a bar signal to align to; the Gen
+    // engine and host-led playback keep the old immediate behaviour.
+    // PID::seqEngine picks the engine, it is not transport.
     {
         const bool seqRunNow      = paramCache.seqRunning->load() > 0.5f;
         const bool transportStart = seqRunNow && !lastSeqRunning;
-        const bool stepLeads      = seqRunNow && !genModeActiveInAudio
+        const bool stepLeads      = seqRunNow && activeSeqEngine != SeqEngine::Gen
                                     && !hostPlayingNow.load(std::memory_order_relaxed);
 
         const int lc[3] = { static_cast<int>(paramCache.lfo1ClockMode->load()),
@@ -4629,8 +4753,10 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     if (arpEnabled && !arpWasEnabled)
     {
         const size_t flushFrom = internalNoteEvents_.size();
-        if (genModeActiveInAudio)
+        if (activeSeqEngine == SeqEngine::Gen)
             generativeSequencer.allNotesOff(internalNoteEvents_);
+        else if (activeSeqEngine == SeqEngine::Phrase)
+            phraseSequencer.allNotesOff(internalNoteEvents_);
         else
             stepSequencer.allNotesOff(internalNoteEvents_);
 
@@ -4744,95 +4870,160 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         }
     }
 
-    // GEN mode toggle — PLAY is master transport, GEN switches engine
-    bool genModeWanted = paramCache.genSeqRunning->load() > 0.5f;
+    // Engine switch: PLAY is the master transport, PID::seqEngine picks the
+    // engine (Step / Phrase / Gen). A change applies at once: the pattern
+    // carries over where the target can hold it (Step → Gen seeds Gen,
+    // Gen → Step and Phrase → Step copy into the step grid), then the
+    // outgoing engine's sounding notes end and it stops. A switch a preset
+    // import or state restore causes carries nothing over (SeqTransferHold):
+    // the load brings its own patterns.
+    const int seqEngineWanted = juce::jlimit(0, SeqEngine::kCount - 1,
+                                             static_cast<int>(paramCache.seqEngine->load()));
     int seqDivision = static_cast<int>(paramCache.seqDivision->load());
 
-    // Detect mode switch: apply at step 0 boundary
-    if (genModeWanted != genModeActiveInAudio)
+    if (seqEngineWanted != activeSeqEngine)
     {
-        // Check if either sequencer is at step 0 (or not running yet)
-        bool atBarBoundary = !seqRunning
-            || stepSequencer.getCurrentStep() == 0
-            || generativeSequencer.currentStepForGui.load(std::memory_order_relaxed) <= 0;
+        const int from = activeSeqEngine;
+        const int to = seqEngineWanted;
+        const bool transfer = seqTransferHoldDepth_ == 0 && ! seqTransferSkipNext_;
 
-        if (atBarBoundary)
+        if (transfer && from == SeqEngine::Step && to == SeqEngine::Gen)
         {
-            if (genModeWanted)
+            // Step → Gen: seed from the step pattern
+            int seqCount = stepSequencer.getNumSteps();
+            int seedNotes[T5ynthStepSequencer::MAX_STEPS]{};
+            bool seedEnabled[T5ynthStepSequencer::MAX_STEPS]{};
+            int pulseCount = 0;
+            for (int i = 0; i < seqCount; ++i)
             {
-                // Step → Gen: seed from current step seq pattern, then switch
-                int seqCount = stepSequencer.getNumSteps();
-                int seedNotes[T5ynthStepSequencer::MAX_STEPS]{};
-                bool seedEnabled[T5ynthStepSequencer::MAX_STEPS]{};
-                int pulseCount = 0;
-                for (int i = 0; i < seqCount; ++i)
-                {
-                    const auto& step = stepSequencer.getStep(i);
-                    seedNotes[i] = step.note;
-                    seedEnabled[i] = step.enabled;
-                    if (step.enabled) pulseCount++;
-                }
-
-                // Flush step-seq's currently-sounding note before the gen-seq
-                // takes over — avoids a hanging voice across the engine swap.
-                stepSequencer.allNotesOff(internalNoteEvents_);
-                stopSequencerOneShots();
-                stepSequencer.stop();
-                generativeSequencer.setBpm(static_cast<double>(seqBpm));
-                generativeSequencer.setDivision(seqDivision);
-                generativeSequencer.setGate(seqGate);
-                generativeSequencer.setShuffle(seqShuffle);
-                generativeSequencer.setScale(
-                    static_cast<int>(paramCache.scaleType->load()),
-                    static_cast<int>(paramCache.scaleRoot->load()));
-                generativeSequencer.setPrimaryTransposeSemitones(seqOctaveShift * 12);
-                generativeSequencer.seedFromSteps(seedNotes, seedEnabled, seqCount);
-
-                // Update gen params to match seeded pattern
-                if (auto* par = parameters.getParameter(PID::genSteps))
-                    par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(seqCount)));
-                if (auto* par = parameters.getParameter(PID::genPulses))
-                    par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(pulseCount)));
-
-                lastGenSteps = lastGenPulses = lastGenRotation = -1;
-                lastGenMutation = -1.0f;
-                genModeActiveInAudio = true;
+                const auto& step = stepSequencer.getStep(i);
+                seedNotes[i] = step.note;
+                seedEnabled[i] = step.enabled;
+                if (step.enabled) pulseCount++;
             }
-            else
+
+            generativeSequencer.setBpm(static_cast<double>(seqBpm));
+            generativeSequencer.setDivision(seqDivision);
+            generativeSequencer.setGate(seqGate);
+            generativeSequencer.setShuffle(seqShuffle);
+            generativeSequencer.setScale(
+                static_cast<int>(paramCache.scaleType->load()),
+                static_cast<int>(paramCache.scaleRoot->load()));
+            generativeSequencer.setPrimaryTransposeSemitones(seqOctaveShift * 12);
+            generativeSequencer.seedFromSteps(seedNotes, seedEnabled, seqCount);
+
+            // Update gen params to match seeded pattern
+            if (auto* par = parameters.getParameter(PID::genSteps))
+                par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(seqCount)));
+            if (auto* par = parameters.getParameter(PID::genPulses))
+                par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(pulseCount)));
+        }
+        else if (transfer && from == SeqEngine::Gen && to == SeqEngine::Step)
+        {
+            // Gen → Step: copy the generated pattern into the step grid
+            int genSteps = generativeSequencer.numStepsForGui.load(std::memory_order_relaxed);
+            if (genSteps > 0)
             {
-                // Gen → Step: copy generated pattern into step data, then switch
-                int genSteps = generativeSequencer.numStepsForGui.load(std::memory_order_relaxed);
-                if (genSteps > 0)
+                stepSequencer.setNumSteps(genSteps);
+                seqSteps = genSteps;   // the Step branch below re-asserts it this block
+                if (auto* par = parameters.getParameter(PID::seqSteps))
+                    par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(genSteps)));
+                for (int i = 0; i < genSteps; ++i)
                 {
-                    stepSequencer.setNumSteps(genSteps);
-                    if (auto* par = parameters.getParameter(PID::seqSteps))
-                        par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(genSteps)));
-                    for (int i = 0; i < genSteps; ++i)
+                    int note = generativeSequencer.notePatternForGui[static_cast<size_t>(i)]
+                        .load(std::memory_order_relaxed);
+                    if (note > 0)
                     {
-                        int note = generativeSequencer.notePatternForGui[static_cast<size_t>(i)]
-                            .load(std::memory_order_relaxed);
-                        if (note > 0)
-                        {
-                            stepSequencer.setStepNote(i, note);
-                            stepSequencer.setStepEnabled(i, true);
-                        }
-                        else
-                        {
-                            stepSequencer.setStepEnabled(i, false);
-                        }
+                        stepSequencer.setStepNote(i, note);
+                        stepSequencer.setStepEnabled(i, true);
+                    }
+                    else
+                    {
+                        stepSequencer.setStepEnabled(i, false);
                     }
                 }
-                // Flush every gen-seq strand's sounding note before handing
-                // back to the step-seq — avoids hanging voices across the swap.
-                generativeSequencer.allNotesOff(internalNoteEvents_);
-                generativeSequencer.stop();
-                genModeActiveInAudio = false;
             }
         }
+        else if (transfer && from == SeqEngine::Phrase && to == SeqEngine::Step)
+        {
+            // Phrase → Step: the bar the phrase view shows goes into the step
+            // grid. Every phrase step is one step-long onset; a slide holds it
+            // into the next onset, which is the step grid's slide on the
+            // source step. Accents map to full velocity, the rest to the step
+            // default, so From Step reads the accents back (> 0.85).
+            std::array<PhraseModel::StepView, PhraseModel::kMaxBarSteps> view {};
+            const int n = phraseSequencer.readView(view);
+            if (n > 0)
+            {
+                stepSequencer.setNumSteps(n);
+                seqSteps = n;   // the Step branch below re-asserts it this block
+                if (auto* par = parameters.getParameter(PID::seqSteps))
+                    par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(n)));
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto& v = view[static_cast<size_t>(i)];
+                    stepSequencer.setStepBindMode(i, v.slide ? T5ynthStepSequencer::BindMode::Glide
+                                                             : T5ynthStepSequencer::BindMode::Off);
+                    if (v.note >= 0)
+                    {
+                        stepSequencer.setStepNote(i, v.note);
+                        stepSequencer.setStepVelocity(i, v.accent ? 1.0f
+                                                                  : T5ynthStepSequencer::Step{}.velocity);
+                        stepSequencer.setStepEnabled(i, true);
+                    }
+                    else
+                    {
+                        stepSequencer.setStepEnabled(i, false);
+                    }
+                }
+            }
+        }
+
+        // The outgoing engine's sounding notes end here — no voice hangs
+        // across the swap.
+        if (from == SeqEngine::Step)
+        {
+            stepSequencer.allNotesOff(internalNoteEvents_);
+            stopSequencerOneShots();
+            stepSequencer.stop();
+        }
+        else if (from == SeqEngine::Phrase)
+        {
+            phraseSequencer.allNotesOff(internalNoteEvents_);
+            phraseSequencer.stop();
+        }
+        else
+        {
+            generativeSequencer.allNotesOff(internalNoteEvents_);
+            generativeSequencer.stop();
+        }
+
+        if (to == SeqEngine::Gen)
+        {
+            // Gen re-reads its steps / pulses / rotation / mutation params.
+            lastGenSteps = lastGenPulses = lastGenRotation = -1;
+            lastGenMutation = -1.0f;
+        }
+        activeSeqEngine = to;
     }
+    if (seqTransferHoldDepth_ == 0)
+        seqTransferSkipNext_ = false;
+
+    // Phrase + Keys: the played notes set the phrase chord and leave the
+    // buffer here, before the engine reads the chord and before the arp and
+    // the voices see any note.
+    routePhraseKeys(midiMessages, replayActive);
+
+    // Phrase tempo: the host's while it drives the bar position (the phrase
+    // follows its PPQ), otherwise Seq BPM like Step and Gen.
+    const bool phraseHostSync = hostPlayingNow.load(std::memory_order_relaxed) && hostPpqValid_;
+    const float hostBpmNow = hostBpmLastSeen.load(std::memory_order_relaxed);
+    const float phraseBpm = phraseHostSync && hostBpmNow > 0.0f ? hostBpmNow : seqBpm;
+    // The tempo the arpeggiator runs at: the active engine's.
+    const float engineBpm = activeSeqEngine == SeqEngine::Phrase ? phraseBpm : seqBpm;
 
     // Configure + run the active engine
-    if (genModeActiveInAudio)
+    if (activeSeqEngine == SeqEngine::Gen)
     {
         generativeSequencer.setBpm(static_cast<double>(seqBpm));
         generativeSequencer.setDivision(seqDivision);
@@ -5044,6 +5235,28 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             }
         }
     }
+    else if (activeSeqEngine == SeqEngine::Phrase)
+    {
+        phraseSequencer.setConfig(phraseConfigFromParams());
+        phraseSequencer.setTimeSignature(hostTsNum_, hostTsDen_);
+
+        if (seqRunning)
+        {
+            phraseSequencer.start();
+        }
+        else if (phraseSequencer.isRunning())
+        {
+            // processBlock does nothing once stopped: end what sounds first.
+            phraseSequencer.allNotesOff(internalNoteEvents_);
+            phraseSequencer.stop();
+        }
+        const size_t eventLogPhraseSeqBefore_ = internalNoteEvents_.size();
+        phraseSequencer.processBlock(numSamples, static_cast<double>(phraseBpm),
+                                     phraseHostSync, hostPpq_, internalNoteEvents_);
+        if (eventLogRecordingActive())
+            logInternalNoteEventsFrom(eventLogPhraseSeqBefore_, NoteEventLogEntry::Source::PhraseSequencer,
+                                     seqRunning && arpEnabled, /*genModeForSkip=*/false);
+    }
     else
     {
         stepSequencer.setBpm(static_cast<double>(seqBpm));
@@ -5065,15 +5278,19 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                                      seqRunning && arpEnabled, /*genModeForSkip=*/false);
     }
 
-    // Consume bar-start flag (sequencer display + sync-arm release)
-    if (stepSequencer.barStartFlag.exchange(false))
+    // Consume the bar-start flags (sequencer display + sync-arm release). Both
+    // are taken every block, so neither holds a stale bar across an engine
+    // switch; only the engine that runs sets its flag.
+    const bool stepBarStart   = stepSequencer.barStartFlag.exchange(false);
+    const bool phraseBarStart = phraseSequencer.barStartFlag.exchange(false);
+    if (stepBarStart || phraseBarStart)
     {
         barBoundaryFlag.store(true, std::memory_order_relaxed);
 
         // Release any sync-armed Drift/LFO on the downbeat: they have been held
         // silent at phase 0 since the Off→Sync switch, so from here their cycle
-        // runs locked to the "1". (Released here, right after the step seq sets
-        // barStartFlag for the bar it just crossed.)
+        // runs locked to the "1". (Released here, right after the step or
+        // phrase engine sets barStartFlag for the bar it just crossed.)
         LFO* const lfoPtr[3] = { &lfo1, &lfo2, &lfo3 };
         for (int i = 0; i < 3; ++i)
         {
@@ -5099,7 +5316,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // and it falls silent instead of cycling the last step forever.
     if (arpEnabled)
     {
-        arpeggiator.setBpm(static_cast<double>(seqBpm));
+        arpeggiator.setBpm(static_cast<double>(engineBpm));
         arpeggiator.setRate(arpRate);
         arpeggiator.setOctaveRange(arpOctaves);
         arpeggiator.setShuffle(seqShuffle);
@@ -5158,22 +5375,27 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
         if (seqRunning)
         {
-            // The running sequencer offers its lead note. Lead = step-seq notes
-            // (strandId < 0) or gen-seq strand 0; non-lead gen strands keep
-            // sounding alongside the arp. Pull every lead event out of the
-            // internal stream — held keys outrank the lead, but either way it
-            // must not sound raw underneath the arp.
+            // The running sequencer offers its lead note. Lead = the main line
+            // of the step and phrase engines (strandId < 0) or gen-seq strand 0;
+            // the other strands keep sounding alongside the arp. Pull every lead
+            // event out of the internal stream — held keys outrank the lead, but
+            // either way it must not sound raw underneath the arp. The lead note
+            // is the block's latest lead onset; a phrase Stab puts a whole chord
+            // on one tick, and of that the lowest note leads.
             int leadNote = -1;
+            int leadOffset = -1;
             float leadVel = 0.0f;
-            const bool genMode = genModeActiveInAudio;
+            const bool genMode = activeSeqEngine == SeqEngine::Gen;
             internalNoteEvents_.erase(
                 std::remove_if(internalNoteEvents_.begin(), internalNoteEvents_.end(),
                     [&](const VoiceEvent& e)
                     {
                         const bool lead = genMode ? (e.strandId == 0) : (e.strandId < 0);
                         if (!lead) return false;
-                        if (e.type == VoiceEvent::Type::NoteOn)
-                            { leadNote = e.note; leadVel = e.velocity; }
+                        if (e.type == VoiceEvent::Type::NoteOn
+                            && (e.sampleOffset > leadOffset
+                                || (e.sampleOffset == leadOffset && e.note < leadNote)))
+                            { leadNote = e.note; leadVel = e.velocity; leadOffset = e.sampleOffset; }
                         return true;  // drop lead note-ons AND note-offs
                     }),
                 internalNoteEvents_.end());
@@ -5674,10 +5896,14 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         if (ev.type == VoiceEvent::Type::NoteOn)
                         {
                             const bool isBind = (ev.artic != VoiceEvent::Articulation::Normal);
-                            // Bind = instant (glideMs 0); Glide + Normal = getGlideTime()
-                            // (Normal's value only feeds mono legato).
+                            // Bind = instant (glideMs 0); Glide + Normal = the
+                            // active engine's glide time (Normal's value only
+                            // feeds mono legato).
                             const float glideMs = (ev.artic == VoiceEvent::Articulation::Bind)
-                                                ? 0.0f : stepSequencer.getGlideTime();
+                                ? 0.0f
+                                : activeSeqEngine == SeqEngine::Phrase
+                                    ? phraseSequencer.getGlideTime(static_cast<double>(phraseBpm))
+                                    : stepSequencer.getGlideTime();
                             lastMidiNote.store(ev.note, std::memory_order_relaxed);
                             lastMidiVelocity.store(juce::roundToInt(ev.velocity * 127.0f),
                                                    std::memory_order_relaxed);
@@ -7297,9 +7523,210 @@ void T5ynthProcessor::updateDriftState(int numSamples, float syncBpm)
 
 bool T5ynthProcessor::seqRunningNow() const
 {
-    const bool stepOn = paramCache.seqRunning->load() > 0.5f;
-    const bool genOn  = paramCache.genSeqRunning->load() > 0.5f;
-    return stepOn || genOn;
+    return paramCache.seqRunning->load() > 0.5f;
+}
+
+// ─── Phrase sequencer ───────────────────────────────────────────────────────
+
+static_assert(PhrPart::Bass == static_cast<int>(PhraseModel::Part::Bass)
+              && PhrPart::Riff == static_cast<int>(PhraseModel::Part::Riff)
+              && PhrPart::Lead == static_cast<int>(PhraseModel::Part::Lead)
+              && PhrPart::Stab == static_cast<int>(PhraseModel::Part::Stab),
+              "PhrPart index order must equal PhraseModel::Part.");
+static_assert(PhrHarm::Pedal == static_cast<int>(PhraseModel::Harm::Pedal)
+              && PhrHarm::Keys == static_cast<int>(PhraseModel::Harm::Keys)
+              && PhrHarm::Chords == static_cast<int>(PhraseModel::Harm::Chords),
+              "PhrHarm index order must equal PhraseModel::Harm.");
+static_assert(PhrForm::Loop == static_cast<int>(PhraseModel::Form::Loop)
+              && PhrForm::AAAB == static_cast<int>(PhraseModel::Form::AAAB)
+              && PhrForm::AABA == static_cast<int>(PhraseModel::Form::AABA)
+              && PhrForm::ABAB == static_cast<int>(PhraseModel::Form::ABAB),
+              "PhrForm index order must equal PhraseModel::Form.");
+static_assert(PhrLayer::Off == static_cast<int>(PhraseModel::Layer::Off)
+              && PhrLayer::Octave == static_cast<int>(PhraseModel::Layer::Octave)
+              && PhrLayer::Chord == static_cast<int>(PhraseModel::Layer::Chord)
+              && PhrLayer::Answer == static_cast<int>(PhraseModel::Layer::Answer),
+              "PhrLayer index order must equal PhraseModel::Layer.");
+
+PhraseModel::Config T5ynthProcessor::phraseConfigFromParams() const
+{
+    auto idx = [](const std::atomic<float>* p, int count)
+    {
+        return juce::jlimit(0, count - 1, static_cast<int>(p->load()));
+    };
+
+    PhraseModel::Config c;
+    c.part = static_cast<PhraseModel::Part>(idx(paramCache.phrPart, PhrPart::kCount));
+    c.harm = static_cast<PhraseModel::Harm>(idx(paramCache.phrHarm, PhrHarm::kCount));
+    c.chordDegrees = { idx(paramCache.phrChord1, PhrChord::kCount),
+                       idx(paramCache.phrChord2, PhrChord::kCount),
+                       idx(paramCache.phrChord3, PhrChord::kCount),
+                       idx(paramCache.phrChord4, PhrChord::kCount) };
+    c.chordRateBars = PhrChordRate::bars(idx(paramCache.phrChordRate, PhrChordRate::kCount));
+    c.ext7       = paramCache.phrExt7->load() > 0.5f;
+    c.len        = PhrLen::bars(idx(paramCache.phrLen, PhrLen::kCount));
+    c.stepsPerBar = PhraseModel::stepsPerBarForDivision(idx(paramCache.seqDivision, SeqDivision::kCount));
+    c.pulses     = static_cast<int>(paramCache.phrPulses->load());
+    c.rotation   = static_cast<int>(paramCache.phrRotation->load());
+    c.phraseBars = PhrBars::bars(idx(paramCache.phrBars, PhrBars::kCount));
+    c.form       = static_cast<PhraseModel::Form>(idx(paramCache.phrForm, PhrForm::kCount));
+    c.variation  = paramCache.phrVariation->load();
+    c.evolve     = paramCache.phrEvolve->load();
+    c.slide      = paramCache.phrSlide->load();
+    c.layer      = static_cast<PhraseModel::Layer>(idx(paramCache.phrLayer, PhrLayer::kCount));
+    c.scaleType  = idx(paramCache.scaleType, ScaleType::kCount);
+    c.scaleRoot  = idx(paramCache.scaleRoot, ScaleRoot::kCount);
+    c.gate       = paramCache.seqGate->load();
+    c.shuffle    = paramCache.seqShuffle->load();
+    c.transpose  = (idx(paramCache.seqOctave, SeqOctave::kCount) - 2) * 12;
+    return c;
+}
+
+bool T5ynthProcessor::phraseTakesKeys() const
+{
+    return activeSeqEngine == SeqEngine::Phrase
+        && static_cast<int>(paramCache.phrHarm->load()) == PhrHarm::Keys
+        && ! isReplayActive();
+}
+
+void T5ynthProcessor::phraseKeyPress(int note, std::uint16_t channelBit)
+{
+    const bool wasDown = phraseKeyIsDown(note);
+    if (channelBit != 0)
+        phraseKeyChannels_[static_cast<size_t>(note)] |= channelBit;
+    else
+        phraseKeyFromComputer_[static_cast<size_t>(note)] = true;
+    if (! wasDown)
+    {
+        ++phraseKeysDown_;
+        phraseSequencer.keyOn(note);
+    }
+}
+
+void T5ynthProcessor::phraseKeyRelease(int note, std::uint16_t channelBit)
+{
+    const bool wasDown = phraseKeyIsDown(note);
+    if (channelBit != 0)
+        phraseKeyChannels_[static_cast<size_t>(note)] &= static_cast<std::uint16_t>(~channelBit);
+    else
+        phraseKeyFromComputer_[static_cast<size_t>(note)] = false;
+    if (wasDown && ! phraseKeyIsDown(note))
+    {
+        --phraseKeysDown_;
+        phraseSequencer.keyOff(note);
+    }
+}
+
+void T5ynthProcessor::releaseAllPhraseKeys()
+{
+    if (phraseKeysDown_ == 0)
+        return;
+    for (int note = 0; note < 128; ++note)
+        if (phraseKeyIsDown(note))
+            phraseSequencer.keyOff(note);
+    phraseKeyChannels_.fill(0);
+    phraseKeyFromComputer_.fill(false);
+    phraseKeysDown_ = 0;
+}
+
+void T5ynthProcessor::routePhraseKeys(juce::MidiBuffer& midi, bool replayActive)
+{
+    // The tape cleared the buffer, so no note-off of a key taken before it
+    // can arrive: hold nothing, as the arp does during replay.
+    if (replayActive)
+    {
+        releaseAllPhraseKeys();
+        return;
+    }
+    if (midi.isEmpty())
+        return;
+    const bool take = phraseTakesKeys();
+    if (! take && phraseKeysDown_ == 0)
+        return;
+
+    // A note-on goes to the phrase sequencer while Keys takes notes, and also
+    // when its channel already holds the note there (a repeated note-on must
+    // not start a voice whose note-off the phrase sequencer then takes).
+    // Note-offs follow their note-on. CC 120/123 release the keys and stay in
+    // the buffer for the voices.
+    arpFilteredMidi_.clear();
+    bool taken = false;
+    for (const auto metadata : midi)
+    {
+        const auto msg = metadata.getMessage();
+        if (msg.isNoteOn() || msg.isNoteOff())
+        {
+            const int note = msg.getNoteNumber();
+            const auto bit = static_cast<std::uint16_t>(1u << (juce::jlimit(1, 16, msg.getChannel()) - 1));
+            const bool held = (phraseKeyChannels_[static_cast<size_t>(note)] & bit) != 0;
+            if (msg.isNoteOn() && (take || held))
+            {
+                phraseKeyPress(note, bit);
+                taken = true;
+                continue;
+            }
+            if (msg.isNoteOff() && held)
+            {
+                phraseKeyRelease(note, bit);
+                taken = true;
+                continue;
+            }
+        }
+        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+        {
+            releaseAllPhraseKeys();
+        }
+        arpFilteredMidi_.addEvent(msg, metadata.samplePosition);
+    }
+    if (taken)
+    {
+        midi.clear();
+        midi.addEvents(arpFilteredMidi_, 0, -1, 0);
+    }
+}
+
+void T5ynthProcessor::phraseDice()
+{
+    const auto seed = static_cast<std::uint32_t>(juce::Random::getSystemRandom().nextInt());
+    phraseSequencer.dice(phraseConfigFromParams(), seed);
+}
+
+void T5ynthProcessor::phraseKeep()
+{
+    phraseSequencer.keep();
+}
+
+bool T5ynthProcessor::phraseFromSteps()
+{
+    std::array<PhraseModel::StepInput, T5ynthStepSequencer::MAX_STEPS> in {};
+    const int count = juce::jlimit(0, T5ynthStepSequencer::MAX_STEPS, stepSequencer.getNumSteps());
+    for (int i = 0; i < count; ++i)
+    {
+        const auto& st = stepSequencer.getStep(i);
+        in[static_cast<size_t>(i)] = { st.note, st.enabled,
+                                       st.bindMode == T5ynthStepSequencer::BindMode::Glide,
+                                       st.velocity };
+    }
+    if (! phraseSequencer.fromSteps(in.data(), count, phraseConfigFromParams()))
+        return false;
+
+    // The analysed motif records the shape it was made for; with Len / Pulses
+    // / Rotation set to it, fitMotif plays it as analysed.
+    const auto m = phraseSequencer.getStoredMotif();
+    auto write = [this](const char* id, float value)
+    {
+        if (auto* par = parameters.getParameter(id))
+            par->setValueNotifyingHost(par->convertTo0to1(value));
+    };
+    write(PID::phrLen, static_cast<float>(m.len == 2 ? PhrLen::B2 : PhrLen::B1));
+    write(PID::phrPulses, static_cast<float>(m.pulses));
+    write(PID::phrRotation, static_cast<float>(m.rotation));
+    return true;
+}
+
+bool T5ynthProcessor::phraseUndo()
+{
+    return phraseSequencer.undo();
 }
 
 float T5ynthProcessor::resolveSyncBpm() const
@@ -9859,6 +10286,11 @@ void T5ynthProcessor::getStateInformation(juce::MemoryBlock& destData)
     writeState(destData, stateCarriesLro());
 }
 
+// The phrase motif as JSON (state XML attribute, preset phraseSeq.motif);
+// defined with the choice-key helpers below.
+static juce::var phraseMotifToVar(const PhraseModel::Motif& m);
+static PhraseModel::Motif phraseMotifFromVar(const juce::var& v);
+
 void T5ynthProcessor::writeState(juce::MemoryBlock& destData, bool withLro)
 {
     auto state = parameters.copyState();
@@ -9867,6 +10299,9 @@ void T5ynthProcessor::writeState(juce::MemoryBlock& destData, bool withLro)
     xml->setAttribute("midiClockEnabled", midiClockEnabled_.load());
     xml->setAttribute("modalityEpoch", currentModalityEpoch_);
     xml->setAttribute("calibEpoch", Calibration::kEpoch);
+    // The phrase motif is not a parameter (docs/PHRASE_SEQ_CONCEPT.md §5).
+    xml->setAttribute("phraseMotif",
+                      juce::JSON::toString(phraseMotifToVar(phraseSequencer.getStoredMotif()), true));
     // Csound orchestra (mirrors exportJsonPreset's engine block): PID::engineMode
     // is an APVTS param, so a session saved in Csound mode would otherwise reload
     // with the wrong (built-in, or a reused live instance's previous-project)
@@ -10154,6 +10589,13 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
                     && ! hasParam(kAftertouchAmtPid[t]))
                     appendParam(kAftertouchAmtPid[t], paramVal("aftertouch_amount", 0.0f));
             }
+
+            // The Step<->Gen bool gen_seq_running became the engine choice
+            // seq_engine {Step, Phrase, Gen}: on -> Gen, off -> Step.
+            if (hasParam("gen_seq_running") && ! hasParam(PID::seqEngine))
+                appendParam(PID::seqEngine,
+                            static_cast<float>(paramVal("gen_seq_running", 0.0f) > 0.5f
+                                                   ? SeqEngine::Gen : SeqEngine::Step));
         }
 
         // Calibration migration: rescale values authored under older DSP full-scales
@@ -10167,6 +10609,9 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
         // generates (one setValueNotifyingHost per changed param) — a DAW
         // reopening a saved session is a bulk load exactly like a preset import.
         BulkParamLoadGuard eventLogGuard(*this);
+        // An engine switch the restore causes carries no pattern over: the
+        // state brings its own (step grid, Gen params, phrase motif).
+        SeqTransferHold seqTransferHold(*this);
         // A restored session is a different patch, so the last authoring's borrowed
     // knobs go back BEFORE the tree lands — free, since replaceState is about to
     // write every shelf parameter regardless: the ones the tree carries from the
@@ -10181,6 +10626,14 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
         // Unnamed for a DAW-session restore; the replay transport names its own
         // (replay_start / replay_end) via stateRestoreMarkerName_.
         eventLogGuard.commit(markerName);
+
+        // The phrase motif. A state without one (saved before the phrase
+        // sequencer existed) restores the empty record, which the seed and
+        // the parameters fill, as a reset does.
+        phraseSequencer.setStoredMotif(
+            xml->hasAttribute("phraseMotif")
+                ? phraseMotifFromVar(juce::JSON::parse(xml->getStringAttribute("phraseMotif")))
+                : PhraseModel::Motif {});
 
         // Modality epoch (v2.5.0+) — restored only on a matching-tag state load, so a
         // foreign/empty blob (guard false) leaves the live epoch untouched rather than
@@ -10224,9 +10677,9 @@ void T5ynthProcessor::setStateInformation(const void* data, int sizeInBytes)
         }
     }
 
-    // Never auto-start sequencers on session restore — no acoustic surprises
+    // Never auto-start sequencers on session restore — no acoustic surprises.
+    // (seq_engine is the engine choice, not a transport: it stays as saved.)
     parameters.getParameter(PID::seqRunning)->setValueNotifyingHost(0.0f);
-    parameters.getParameter(PID::genSeqRunning)->setValueNotifyingHost(0.0f);
 
     // Same anti-surprise rule for the Re-Prompt loop, but ONLY on this DAW host-state
     // path: a non-Off stance with a non-Manual cadence is a self-running generation
@@ -10301,6 +10754,133 @@ static int choiceFromKey(const juce::String& s, const ChoiceEntry (&entries)[N])
 template <std::size_t N>
 static juce::String choiceToKey(int i, const ChoiceEntry (&entries)[N]) {
     return juce::String(i >= 0 && i < static_cast<int>(N) ? entries[i].key : entries[0].key);
+}
+
+// ── Phrase motif ↔ JSON ──
+// Keys, not enum values, so a reordered PhraseModel::Fn cannot change what a
+// saved motif means. An unknown key reads as the first entry (Rest).
+static constexpr ChoiceEntry kPhraseFnKeys[] = {
+    { "rest",               "Rest"              },
+    { "chord_tone",         "ChordTone"         },
+    { "repeat",             "Repeat"            },
+    { "octave",             "Octave"            },
+    { "passing",            "Passing"           },
+    { "neighbour_up",       "NeighbourUp"       },
+    { "neighbour_down",     "NeighbourDown"     },
+    { "approach_up",        "ApproachUp"        },
+    { "approach_down",      "ApproachDown"      },
+    { "approach_chromatic", "ApproachChromatic" }
+};
+static_assert(std::size(kPhraseFnKeys) == static_cast<std::size_t>(PhraseModel::Fn::Count),
+              "kPhraseFnKeys must name every PhraseModel::Fn in order.");
+
+// A motif's body: its shape, Part, seed and slots (the stored motif and its
+// kept lead-in alike).
+static void phraseMotifBodyToObject(const PhraseModel::MotifBody& b, juce::DynamicObject& obj)
+{
+    obj.setProperty("len", b.len);
+    obj.setProperty("stepsPerBar", b.stepsPerBar);
+    obj.setProperty("pulses", b.pulses);
+    obj.setProperty("rotation", b.rotation);
+    obj.setProperty("part", choiceToKey(static_cast<int>(b.part), PhrPart::kEntries));
+    obj.setProperty("seed", static_cast<juce::int64>(b.seed));
+    juce::Array<juce::var> slots;
+    const int n = juce::jlimit(0, PhraseModel::kMaxMotifSteps, b.numSteps());
+    for (int i = 0; i < n; ++i)
+    {
+        const auto& sl = b.slots[static_cast<size_t>(i)];
+        auto* so = new juce::DynamicObject();
+        so->setProperty("fn", choiceToKey(static_cast<int>(sl.fn), kPhraseFnKeys));
+        so->setProperty("member", static_cast<int>(sl.member));
+        so->setProperty("octave", static_cast<int>(sl.octave));
+        so->setProperty("accent", sl.accent);
+        so->setProperty("slide", sl.slide);
+        slots.add(juce::var(so));
+    }
+    obj.setProperty("slots", slots);
+}
+
+static void phraseMotifBodyFromObject(const juce::DynamicObject& obj, PhraseModel::MotifBody& b)
+{
+    // Seed and Part belong to every record, the empty one (len 0) included:
+    // the seed and the parameters fill that one.
+    b.part = static_cast<PhraseModel::Part>(choiceFromKey(obj.getProperty("part").toString(), PhrPart::kEntries));
+    if (obj.hasProperty("seed"))
+        b.seed = static_cast<std::uint32_t>(static_cast<juce::int64>(obj.getProperty("seed")));
+
+    // The slots only on a grid the Division can make; otherwise the record
+    // stays empty.
+    const int spb = static_cast<int>(obj.getProperty("stepsPerBar"));
+    const bool gridOk = spb == 1 || spb == 2 || spb == 4 || spb == 8 || spb == 16;
+    const int len = static_cast<int>(obj.getProperty("len"));
+    if (! gridOk || len < 1 || len > 2)
+        return;
+
+    b.len = len;
+    b.stepsPerBar = spb;
+    b.pulses = juce::jlimit(0, b.numSteps(), static_cast<int>(obj.getProperty("pulses")));
+    b.rotation = juce::jlimit(0, b.numSteps() - 1, static_cast<int>(obj.getProperty("rotation")));
+
+    if (const auto* slots = obj.getProperty("slots").getArray())
+    {
+        const int n = juce::jmin(b.numSteps(), slots->size());
+        for (int i = 0; i < n; ++i)
+        {
+            const auto* so = (*slots)[i].getDynamicObject();
+            if (so == nullptr)
+                continue;
+            auto& sl = b.slots[static_cast<size_t>(i)];
+            sl.fn = static_cast<PhraseModel::Fn>(choiceFromKey(so->getProperty("fn").toString(), kPhraseFnKeys));
+            sl.member = static_cast<std::uint8_t>(juce::jlimit(0, 3, static_cast<int>(so->getProperty("member"))));
+            sl.octave = static_cast<std::int8_t>(juce::jlimit(-1, 1, static_cast<int>(so->getProperty("octave"))));
+            sl.accent = static_cast<bool>(so->getProperty("accent"));
+            sl.slide = static_cast<bool>(so->getProperty("slide"));
+        }
+    }
+}
+
+static juce::var phraseMotifToVar(const PhraseModel::Motif& m)
+{
+    auto* obj = new juce::DynamicObject();
+    juce::var out(obj);
+    phraseMotifBodyToObject(m, *obj);
+    // Not heard yet: it starts evolving where it is first heard.
+    if (m.origin == PhraseModel::kOriginAtNextEntry)
+        obj->setProperty("origin", "next");
+    else
+        obj->setProperty("origin", m.origin);
+    if (m.leadInKept)
+    {
+        auto* lo = new juce::DynamicObject();
+        phraseMotifBodyToObject(m.leadIn, *lo);
+        lo->setProperty("phrase", m.leadInPhrase);
+        obj->setProperty("leadIn", juce::var(lo));
+    }
+    return out;
+}
+
+static PhraseModel::Motif phraseMotifFromVar(const juce::var& v)
+{
+    PhraseModel::Motif m;
+    const auto* obj = v.getDynamicObject();
+    if (obj == nullptr)
+        return m;
+
+    phraseMotifBodyFromObject(*obj, m);
+    const auto origin = obj->getProperty("origin");
+    m.origin = origin.isInt() || origin.isInt64() || origin.isDouble()
+                   ? static_cast<int>(origin)
+                   : PhraseModel::kOriginAtNextEntry;
+
+    // A lead-in holds only before the phrase it preceded: without one it
+    // names no place to apply, and stays off.
+    if (const auto* lo = obj->getProperty("leadIn").getDynamicObject(); lo != nullptr && lo->hasProperty("phrase"))
+    {
+        m.leadInKept = true;
+        phraseMotifBodyFromObject(*lo, m.leadIn);
+        m.leadInPhrase = static_cast<int>(lo->getProperty("phrase"));
+    }
+    return m;
 }
 
 static int filterTypeFromString(const juce::String& s)  { return choiceFromKey(s, FilterType::kEntries); }
@@ -11406,6 +11986,7 @@ juce::String T5ynthProcessor::exportJsonPreset() const
     seq->setProperty("shuffle", get(PID::seqShuffle));
     seq->setProperty("scaleRoot", choiceToKey(getInt(PID::scaleRoot), ScaleRoot::kEntries));
     seq->setProperty("scaleType", choiceToKey(getInt(PID::scaleType), ScaleType::kEntries));
+    seq->setProperty("engine", choiceToKey(getInt(PID::seqEngine), SeqEngine::kEntries));
     root->setProperty("sequencer", seq.get());
 
     // Arpeggiator — new v3 format stores pattern as a single key
@@ -11418,7 +11999,9 @@ juce::String T5ynthProcessor::exportJsonPreset() const
 
     // Generative sequencer
     juce::DynamicObject::Ptr genSeq = new juce::DynamicObject();
-    genSeq->setProperty("enabled", get(PID::genSeqRunning) > 0.5f);
+    // sequencer.engine is the engine; "enabled" stays for readers that
+    // predate it (Gen on or off).
+    genSeq->setProperty("enabled", getInt(PID::seqEngine) == SeqEngine::Gen);
     genSeq->setProperty("steps", getInt(PID::genSteps));
     genSeq->setProperty("pulses", getInt(PID::genPulses));
     genSeq->setProperty("rotation", getInt(PID::genRotation));
@@ -11494,6 +12077,29 @@ juce::String T5ynthProcessor::exportJsonPreset() const
 
     root->setProperty("generativeSeq", genSeq.get());
 
+    // Phrase sequencer (docs/PHRASE_SEQ_CONCEPT.md): its parameters and the
+    // stored motif, which is not a parameter.
+    juce::DynamicObject::Ptr phrase = new juce::DynamicObject();
+    phrase->setProperty("part",      choiceToKey(getInt(PID::phrPart),      PhrPart::kEntries));
+    phrase->setProperty("harmony",   choiceToKey(getInt(PID::phrHarm),      PhrHarm::kEntries));
+    phrase->setProperty("chord1",    choiceToKey(getInt(PID::phrChord1),    PhrChord::kEntries));
+    phrase->setProperty("chord2",    choiceToKey(getInt(PID::phrChord2),    PhrChord::kEntries));
+    phrase->setProperty("chord3",    choiceToKey(getInt(PID::phrChord3),    PhrChord::kEntries));
+    phrase->setProperty("chord4",    choiceToKey(getInt(PID::phrChord4),    PhrChord::kEntries));
+    phrase->setProperty("chordRate", choiceToKey(getInt(PID::phrChordRate), PhrChordRate::kEntries));
+    phrase->setProperty("ext7",      get(PID::phrExt7) > 0.5f);
+    phrase->setProperty("len",       choiceToKey(getInt(PID::phrLen),       PhrLen::kEntries));
+    phrase->setProperty("pulses",    getInt(PID::phrPulses));
+    phrase->setProperty("rotation",  getInt(PID::phrRotation));
+    phrase->setProperty("bars",      choiceToKey(getInt(PID::phrBars),      PhrBars::kEntries));
+    phrase->setProperty("form",      choiceToKey(getInt(PID::phrForm),      PhrForm::kEntries));
+    phrase->setProperty("variation", get(PID::phrVariation));
+    phrase->setProperty("evolve",    get(PID::phrEvolve));
+    phrase->setProperty("layer",     choiceToKey(getInt(PID::phrLayer),     PhrLayer::kEntries));
+    phrase->setProperty("slide",     get(PID::phrSlide));
+    phrase->setProperty("motif",     phraseMotifToVar(phraseSequencer.getStoredMotif()));
+    root->setProperty("phraseSeq", phrase.get());
+
     // CC bindings — sparse: only write entries that have a param assigned.
     // Old presets that lack this key default to no bindings on load.
     juce::Array<juce::var> ccArr;
@@ -11522,6 +12128,9 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
     // otherwise generate; any early return below (parse failure) cancels silently
     // via the guard's destructor, no marker logged for a load that never happened.
     BulkParamLoadGuard eventLogGuard(*this);
+    // An engine switch the import causes carries no pattern over: the preset
+    // brings its own.
+    SeqTransferHold seqTransferHold(*this);
 
     auto parsed = juce::JSON::parse(json);
     if (!parsed.isObject()) return false;
@@ -12385,10 +12994,71 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
                          [](const juce::var& v) { return static_cast<float>(static_cast<int>(v)); });
     }
 
+    // ── Engine ── sequencer.engine picks Step / Phrase / Gen. A file from
+    // before it carries generativeSeq.enabled (Gen on or off); a sequencer
+    // block that says neither was written before Gen existed and means the
+    // layout's engine. A file with neither block leaves the engine alone, as
+    // it leaves every block it does not carry.
+    {
+        const auto* seq = root->getProperty("sequencer").getDynamicObject();
+        const auto* gs  = root->getProperty("generativeSeq").getDynamicObject();
+        if (seq != nullptr && seq->hasProperty("engine"))
+            setChoiceParamFromJson(parameters, PID::seqEngine, seq, "engine", SeqEngine::kEntries);
+        else if (gs != nullptr && gs->hasProperty("enabled"))
+            setParam(parameters, PID::seqEngine,
+                     static_cast<float>(static_cast<bool>(gs->getProperty("enabled"))
+                                            ? SeqEngine::Gen : SeqEngine::Step));
+        else if (seq != nullptr || gs != nullptr)
+            setParamToLayoutDefault(parameters, PID::seqEngine);
+    }
+
+    // ── Phrase sequencer ── (docs/PHRASE_SEQ_CONCEPT.md) Its parameters and
+    // the stored motif, which is not a parameter. A preset without the block
+    // was saved before the phrase sequencer existed: a preset is a full patch,
+    // so it restores the defaults and the empty motif (which the seed and the
+    // parameters fill, as a reset does). A .t5seq without it loads on top of
+    // the live patch and leaves the phrase sequencer as it is.
+    {
+        static const char* const kPhraseParams[] = {
+            PID::phrPart, PID::phrHarm, PID::phrChord1, PID::phrChord2, PID::phrChord3, PID::phrChord4,
+            PID::phrChordRate, PID::phrExt7, PID::phrLen, PID::phrPulses, PID::phrRotation, PID::phrBars,
+            PID::phrForm, PID::phrVariation, PID::phrEvolve, PID::phrLayer, PID::phrSlide
+        };
+        const auto toInt = [](const juce::var& v) { return static_cast<float>(static_cast<int>(v)); };
+        if (const auto* ph = root->getProperty("phraseSeq").getDynamicObject())
+        {
+            setChoiceParamFromJson(parameters, PID::phrPart,      ph, "part",      PhrPart::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrHarm,      ph, "harmony",   PhrHarm::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrChord1,    ph, "chord1",    PhrChord::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrChord2,    ph, "chord2",    PhrChord::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrChord3,    ph, "chord3",    PhrChord::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrChord4,    ph, "chord4",    PhrChord::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrChordRate, ph, "chordRate", PhrChordRate::kEntries);
+            setBoolParamFromJson  (parameters, PID::phrExt7,      ph, "ext7");
+            setChoiceParamFromJson(parameters, PID::phrLen,       ph, "len",       PhrLen::kEntries);
+            setParamFromJson      (parameters, PID::phrPulses,    ph, "pulses",    toInt);
+            setParamFromJson      (parameters, PID::phrRotation,  ph, "rotation",  toInt);
+            setChoiceParamFromJson(parameters, PID::phrBars,      ph, "bars",      PhrBars::kEntries);
+            setChoiceParamFromJson(parameters, PID::phrForm,      ph, "form",      PhrForm::kEntries);
+            setParamFromJson      (parameters, PID::phrVariation, ph, "variation");
+            setParamFromJson      (parameters, PID::phrEvolve,    ph, "evolve");
+            setChoiceParamFromJson(parameters, PID::phrLayer,     ph, "layer",     PhrLayer::kEntries);
+            setParamFromJson      (parameters, PID::phrSlide,     ph, "slide");
+            phraseSequencer.setStoredMotif(ph->hasProperty("motif")
+                                               ? phraseMotifFromVar(ph->getProperty("motif"))
+                                               : PhraseModel::Motif {});
+        }
+        else if (! importingSequencePattern)
+        {
+            for (const char* id : kPhraseParams)
+                setParamToLayoutDefault(parameters, id);
+            phraseSequencer.setStoredMotif(PhraseModel::Motif {});
+        }
+    }
+
     // ── Generative sequencer ──
     if (auto* gs = root->getProperty("generativeSeq").getDynamicObject())
     {
-        setBoolParamFromJson(parameters, PID::genSeqRunning, gs, "enabled");
         // Every one of these has a non-zero default (21 steps, 16 pulses,
         // rotation 2, mutation 0.80, range 3, and two of the four Fix switches
         // on). A Euclidean strand of 0 steps and 0 pulses is not a pattern.
@@ -12530,20 +13200,6 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
     // not touched here and not serialized — so a preset load can no longer wipe the XL
     // faders/encoders. No re-apply needed.
 
-    // Pin engine-mode to the loaded value so the audio thread's Step↔Gen
-    // transition (which copies pattern data between the two sequencers) does
-    // not fire on the next block and overwrite the freshly imported step/gen
-    // state. Without this, loading a preset while the in-memory mode differs
-    // from the preset's mode silently corrupts the just-loaded sequencer
-    // state.
-    {
-        const juce::ScopedLock sl (getCallbackLock());
-        const bool wantGen = paramCache.genSeqRunning->load() > 0.5f;
-        genModeActiveInAudio = wantGen;
-        lastGenSteps = lastGenPulses = lastGenRotation = -1;
-        lastGenMutation = -1.0f;
-    }
-
     eventLogGuard.commit({});   // no filename here; the caller's own marker (applyLoadedPreset) carries the real name
     return true;
 }
@@ -12655,9 +13311,14 @@ void T5ynthProcessor::handleAsyncUpdate()
     if (xlSeqToggleReq_.exchange(false, std::memory_order_acq_rel) && seqRunningParam_ != nullptr)
         seqRunningParam_->setValueNotifyingHost(
             paramCache.seqRunning->load() > 0.5f ? 0.0f : 1.0f);
-    if (xlSeqModeToggleReq_.exchange(false, std::memory_order_acq_rel) && genSeqRunningParam_ != nullptr)
-        genSeqRunningParam_->setValueNotifyingHost(
-            paramCache.genSeqRunning->load() > 0.5f ? 0.0f : 1.0f);
+    if (xlSeqModeToggleReq_.exchange(false, std::memory_order_acq_rel) && seqEngineParam_ != nullptr)
+    {
+        // Step -> Phrase -> Gen -> Step, the order of the panel's switch.
+        const int cur = juce::jlimit(0, SeqEngine::kCount - 1,
+                                     static_cast<int>(paramCache.seqEngine->load()));
+        seqEngineParam_->setValueNotifyingHost(
+            seqEngineParam_->convertTo0to1(static_cast<float>((cur + 1) % SeqEngine::kCount)));
+    }
 
     // XL "Generate" button (CC 37): trigger a generation on the message thread.
     // onGenerateRequested → MainPanel::triggerMainGeneration (which itself no-ops if a
@@ -13250,10 +13911,10 @@ static constexpr int kXLSnapFirst      = 45;   // bottom row 1-4 → snapshot sl
 static constexpr int kXLSnapLast       = 48;
 static constexpr int kXLBtnCache       = 49;   // bottom row 5 → toggle inference cache 4↔Off
 static constexpr int kXLBtnGenTiming   = 50;   // bottom row 6 → toggle drift_regen a.s.a.p.↔4 bars
-static constexpr int kXLBtnStepGen     = 51;   // bottom row 7 → toggle gen_seq_running (Step/Gen)
+static constexpr int kXLBtnStepGen     = 51;   // bottom row 7 → cycle seq_engine (Step → Phrase → Gen)
 static constexpr int kXLBtnPanic       = 52;   // bottom row 8 → MIDI panic (all notes off)
 static constexpr int kXLBtnPlay        = 116;  // ▶ left transport → toggle seq_running (transport)
-static constexpr int kXLBtnRecord      = 118;  // ● left transport → toggle gen_seq_running (Step/Gen)
+static constexpr int kXLBtnRecord      = 118;  // ● left transport → cycle seq_engine (Step → Phrase → Gen)
 
 void T5ynthProcessor::lightXLLeds()
 {
@@ -13292,17 +13953,17 @@ void T5ynthProcessor::lightXLLeds()
         sendMidiOutputMessage(LaunchControlXLLeds::ledOn(cc, LaunchControlXLLeds::kColorGen));            // Re-Prompt stance
     //
     // BOTTOM row CC 45-52: Snap 1-4 (gold = LFO) · Cache (amber = Env) · a.s.a.p./4 bars (red-orange = Drift) ·
-    // Step/Gen (violet = Filter) · Panic (red).
+    // Engine Step/Phrase/Gen (violet = Filter) · Panic (red).
     for (int cc = kXLSnapFirst; cc <= kXLSnapLast; ++cc)
         sendMidiOutputMessage(LaunchControlXLLeds::ledOn(cc, LaunchControlXLLeds::kColorLfo));            // Snap 1-4
     sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnCache,     LaunchControlXLLeds::kColorEnv));    // Cache 4/Off
     sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnGenTiming, LaunchControlXLLeds::kColorDrift));  // a.s.a.p./4 bars
-    sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnStepGen,   LaunchControlXLLeds::kColorFilter)); // Step/Gen
+    sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnStepGen,   LaunchControlXLLeds::kColorFilter)); // engine cycle
     sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnPanic,     lcxl3_detail::rgb(127, 0, 0)));      // Panic
     //
-    // LEFT transport buttons (unchanged): Play ▶ green, Record ● periwinkle (Step/Gen).
+    // LEFT transport buttons (unchanged): Play ▶ green, Record ● periwinkle (engine cycle).
     sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnPlay,   LaunchControlXLLeds::kColorVol));       // ▶ transport
-    sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnRecord, LaunchControlXLLeds::kColorGen));       // ● Step/Gen
+    sendMidiOutputMessage(LaunchControlXLLeds::ledOn(kXLBtnRecord, LaunchControlXLLeds::kColorGen));       // ● engine cycle
 }
 
 void T5ynthProcessor::handleXLButtonPress(int cc)
@@ -13341,7 +14002,7 @@ void T5ynthProcessor::handleXLButtonPress(int cc)
             xlGenTimingToggleReq_.store(true, std::memory_order_release);
             triggerAsyncUpdate();
             break;
-        case kXLBtnStepGen:   // dedicated bottom-row Step/Gen, same toggle as Record
+        case kXLBtnStepGen:   // dedicated bottom-row engine button, same cycle as Record
         case kXLBtnRecord:
             xlSeqModeToggleReq_.store(true, std::memory_order_release);
             triggerAsyncUpdate();

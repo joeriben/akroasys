@@ -50,8 +50,8 @@ private:
 
     // Row 1: Transport + step config
     juce::TextButton transportBtn { "PLAY" };
-    // Step | Gen mode switchbox — the visible control; drives genTransportBtn
-    // (the hidden APVTS bridge for PID::genSeqRunning, a STEP↔GEN toggle).
+    // Step | Gen mode switchbox — the visible control; drives engineHidden
+    // (the hidden APVTS bridge for PID::seqEngine).
     juce::TextButton modeStepBtn { "Step" }, modeGenBtn { "Gen" };
     juce::Rectangle<int> modeSwitchBounds;
     // Unified Steps slider (step mode, inline bar, no FIX). Manual write to
@@ -131,7 +131,7 @@ private:
     juce::Rectangle<int> gridArea;
 
     // Generative sequencer controls
-    juce::TextButton genTransportBtn { "GEN" };  // mode toggle, not transport
+    juce::ComboBox engineHidden;                 // hidden, for APVTS (seq_engine)
     // Euclidean + harmony controls as inline-label bars. Cyc binds genFieldRate
     // (Int) via a SliderAttachment; Range is a separate switchbox (see below).
     std::unique_ptr<SliderRow> genStepsRow, genPulsesRow, genRotationRow,
@@ -208,7 +208,7 @@ private:
                         genMutationA, genFieldRateA;
     std::unique_ptr<CA> divA, presetA, arpModeA, arpRateA, arpOctA, octShiftA,
                         genScaleRootA, genScaleTypeA, genRangeA;
-    std::unique_ptr<BA> genRunningA;
+    std::unique_ptr<CA> engineA;
     std::unique_ptr<BA> genFixStepsA, genFixPulsesA, genFixRotationA, genFixMutationA;
 
     // Polyphony attachments

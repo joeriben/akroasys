@@ -23,6 +23,7 @@
 #include "dsp/GeneratedPitch.h"
 #include "sequencer/StepSequencer.h"
 #include "sequencer/GenerativeSequencer.h"
+#include "sequencer/PhraseSequencer.h"
 #include "sequencer/Arpeggiator.h"
 #include "inference/PipeInference.h"
 #include "eventlog/EventLog.h"
@@ -697,6 +698,22 @@ public:
     // Sequencer
     T5ynthStepSequencer& getStepSequencer() { return stepSequencer; }
     T5ynthGenerativeSequencer& getGenerativeSequencer() { return generativeSequencer; }
+    /** GUI reads only: the *ForGui atomics and readView(). The stored-motif
+     *  actions go through phraseDice / phraseKeep / ... below. */
+    const T5ynthPhraseSequencer& getPhraseSequencer() const { return phraseSequencer; }
+
+    // Phrase sequencer actions (message thread; docs/PHRASE_SEQ_CONCEPT.md §3.8).
+    /** New seed, new motif for the current Part / grid / Pulses / Rotation. */
+    void phraseDice();
+    /** Stores the motif heard now, so the evolved motif stays as it is. */
+    void phraseKeep();
+    /** Analyses the step grid into a motif and writes Len / Pulses / Rotation
+     *  back so it plays as analysed. Returns false (nothing changed) when no
+     *  step is enabled in the bars the analysis reads (at most two). */
+    bool phraseFromSteps();
+    /** One level: the motif before the last Dice / Keep / From Step. */
+    bool phraseUndo();
+    bool canPhraseUndo() const { return phraseSequencer.canUndo(); }
     T5ynthArpeggiator& getArpeggiator() { return arpeggiator; }
     bool assignSequencerOneShotFromCurrentRegion(int step, int slot);
     bool assignSequencerOneShotFromRegion(int step, int slot, float regionStart, float regionEnd);
@@ -784,7 +801,8 @@ public:
     // keeps the previously-known tempo (rather than collapsing to default).
     // `hostPlayingNow` distinguishes a live transport from a frozen value.
     // Resolution priority: live host > running in-app sequencer >
-    // frozen host > seqBpm fallback.
+    // frozen host > seqBpm fallback. "Running" is the transport (seq_running);
+    // seq_engine only picks which engine runs.
     bool seqRunningNow() const;
     float resolveSyncBpm() const;
 
@@ -1436,8 +1454,23 @@ private:
     // Sequencer
     T5ynthStepSequencer stepSequencer;
     T5ynthGenerativeSequencer generativeSequencer;
+    T5ynthPhraseSequencer phraseSequencer;
     T5ynthArpeggiator arpeggiator;
-    bool genModeActiveInAudio = false;  // tracks which engine is currently running
+    // The engine processBlock runs (SeqEngine::Step / Phrase / Gen); follows
+    // PID::seqEngine at the next block. Audio thread.
+    int activeSeqEngine = SeqEngine::Step;
+    // A preset import or state restore that changes the engine brings its own
+    // patterns: the switch it causes flushes and stops the outgoing engine but
+    // carries nothing over. The switch may land in a block during the load or
+    // in the first block after it, so a load holds the transfer for its whole
+    // length (SeqTransferHold: a depth, since a replay start restores a state
+    // inside its own load) and its end marks the next block's switch as the
+    // load's (seqTransferSkipNext_). Both are written under the callback lock
+    // and read by processBlock, which holds it.
+    struct SeqTransferHold;
+    int seqTransferHoldDepth_ = 0;
+    bool seqTransferSkipNext_ = false;
+    PhraseModel::Config phraseConfigFromParams() const;
     int lastGenSteps = -1, lastGenPulses = -1, lastGenRotation = -1;
     float lastGenMutation = -1.0f;
 
@@ -1446,9 +1479,11 @@ private:
     // allocates. Merged with the external MIDI stream in processBlock.
     std::vector<VoiceEvent> internalNoteEvents_;
 
-    // Scratch buffer for the arp's external-MIDI filter (note-ons/offs consumed,
-    // everything else kept). A member, not a local, so it keeps its storage across
-    // blocks instead of allocating a fresh buffer on the audio thread every block.
+    // Scratch buffer for the filters that take messages out of the block's MIDI
+    // (DAW echo filter, phrase Keys routing, the arp's note filter): each fills
+    // it with the survivors and copies them back before the next one runs. A
+    // member, not a local, so it keeps its storage across blocks instead of
+    // allocating a fresh buffer on the audio thread every block.
     juce::MidiBuffer arpFilteredMidi_;
 
     struct SequencerOneShotSample
@@ -1970,12 +2005,12 @@ private:
     // automation, any thread) cannot leave the instrument in neither.
     void writeState (juce::MemoryBlock& destData, bool withLro);
 
-    // setStateInformation force-zeroes these three on every restore ("no acoustic
+    // setStateInformation force-zeroes these on every restore ("no acoustic
     // surprise on session reopen"). That rule is wrong for Stop Replay, which the
     // user reads as "give me back what I had" — so they are captured alongside the
-    // patch and re-applied after it.
+    // patch and re-applied after it. (seq_engine is not among them: the restore
+    // keeps it, so the patch itself gives it back.)
     float preReplaySeqRunning_      = 0.0f;
-    float preReplayGenSeqRunning_   = 0.0f;
     float preReplayRepromptStance_  = 0.0f;
     float preReplayDcoStance_       = 0.0f;   // the LCO twin; setStateInformation zeroes it too
 
@@ -2013,8 +2048,8 @@ private:
 
     // Tracks the previous-block transport state (PID::seqRunning) so the
     // processBlock can phase-align sync-mode LFO/Drift to beat 1 on a
-    // stop→start transition. PID::genSeqRunning is a mode toggle (STEP vs
-    // GEN engine), not transport — both engines' .start() is gated on
+    // stop→start transition. PID::seqEngine picks the engine (Step / Phrase /
+    // Gen), it is not transport — every engine's .start() is gated on
     // seqRunning alone. Audio thread only — not atomic.
     bool lastSeqRunning = false;
 
@@ -2122,6 +2157,40 @@ public:
     // resolveSyncBpm() (which itself runs on the audio thread).
     std::atomic<float> hostBpmLastSeen { 0.0f };
     std::atomic<bool>  hostPlayingNow  { false };
+    // The host position and time signature of the current block, for the
+    // phrase sequencer's bar arithmetic. Audio thread only — not atomic.
+    double hostPpq_     = 0.0;
+    bool   hostPpqValid_ = false;
+    int    hostTsNum_   = 4;
+    int    hostTsDen_   = 4;
+
+    // Phrase + Keys: while the Phrase engine runs with Harm = Keys, played
+    // notes set its chord instead of sounding (docs/PHRASE_SEQ_CONCEPT.md
+    // §3.3): they reach neither the voices nor the arpeggiator. Per note, the
+    // bit of each MIDI channel (0..15) whose note-on was taken that way, so
+    // its note-off is taken too even if the mode changed in between; and
+    // whether the computer keyboard holds it the same way. A note is down for
+    // the phrase sequencer while either holds it. All of it is written by
+    // processBlock or under the callback lock (computer keyboard), which
+    // processBlock holds, so the two never overlap.
+    std::array<std::uint16_t, 128> phraseKeyChannels_ {};
+    std::array<bool, 128> phraseKeyFromComputer_ {};
+    int phraseKeysDown_ = 0;             // notes down for the phrase sequencer
+    // Whether played notes go to the phrase sequencer right now.
+    bool phraseTakesKeys() const;
+    bool phraseKeyIsDown(int note) const
+    {
+        return phraseKeyChannels_[static_cast<size_t>(note)] != 0
+            || phraseKeyFromComputer_[static_cast<size_t>(note)];
+    }
+    // `channelBit` 0 = the computer keyboard. A note's first holder presses
+    // it on the phrase sequencer, its last one releases it.
+    void phraseKeyPress(int note, std::uint16_t channelBit);
+    void phraseKeyRelease(int note, std::uint16_t channelBit);
+    // Every key up (the latch keeps its chord): panic, CC 120/123, replay.
+    void releaseAllPhraseKeys();
+    // Takes the Keys notes out of the block's MIDI before the engines run.
+    void routePhraseKeys(juce::MidiBuffer& midi, bool replayActive);
 
     // MIDI panic flag — set by requestMidiPanic() on the GUI thread,
     // consumed/cleared in processBlock on the audio thread.
@@ -2506,9 +2575,9 @@ private:
     // thread). Panic uses the existing midiPanicRequested atomic.
     void handleXLButtonPress(int cc);
     juce::RangedAudioParameter* seqRunningParam_    = nullptr;  // resolved once (ctor)
-    juce::RangedAudioParameter* genSeqRunningParam_ = nullptr;
+    juce::RangedAudioParameter* seqEngineParam_     = nullptr;
     std::atomic<bool>           xlSeqToggleReq_     { false };  // audio→message: toggle seq_running
-    std::atomic<bool>           xlSeqModeToggleReq_ { false };  // audio→message: toggle gen_seq_running (Step/Gen)
+    std::atomic<bool>           xlSeqModeToggleReq_ { false };  // audio→message: cycle seq_engine Step → Phrase → Gen
     std::atomic<bool>           xlGenerateReq_      { false };  // audio→message: trigger generation (CC 37)
     std::atomic<int>            xlRepromptStanceReq_ { -1 };    // audio→message: set reprompt_stance to index 0-6 (CC 38-44); -1 = none
     std::atomic<int>            xlSnapshotReq_      { -1 };     // audio→message: recall snapshot slot 1-4 (CC 45-48); -1 = none

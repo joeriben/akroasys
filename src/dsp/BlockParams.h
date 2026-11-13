@@ -382,7 +382,10 @@ namespace PID {
     static constexpr const char* arpMode          = "arp_mode";
     static constexpr const char* arpRate          = "arp_rate";
     static constexpr const char* arpOctaves       = "arp_octaves";
-    static constexpr const char* genSeqRunning    = "gen_seq_running";
+    // Replaced the Step<->Gen bool "gen_seq_running"; state, replay tapes and
+    // presets that carry the old key are migrated where they are read
+    // (setStateInformation, startReplay, importJsonPreset).
+    static constexpr const char* seqEngine        = "seq_engine";
     static constexpr const char* genSteps         = "gen_steps";
     static constexpr const char* genPulses        = "gen_pulses";
     static constexpr const char* genRotation      = "gen_rotation";
@@ -394,6 +397,25 @@ namespace PID {
     static constexpr const char* genFixMutation   = "gen_fix_mutation";
     static constexpr const char* scaleRoot        = "scale_root";
     static constexpr const char* scaleType        = "scale_type";
+
+    // ── Phrase sequencer (docs/PHRASE_SEQ_CONCEPT.md) ──
+    static constexpr const char* phrPart          = "phr_part";
+    static constexpr const char* phrHarm          = "phr_harm";
+    static constexpr const char* phrChord1        = "phr_chord1";
+    static constexpr const char* phrChord2        = "phr_chord2";
+    static constexpr const char* phrChord3        = "phr_chord3";
+    static constexpr const char* phrChord4        = "phr_chord4";
+    static constexpr const char* phrChordRate     = "phr_chord_rate";
+    static constexpr const char* phrExt7          = "phr_ext7";
+    static constexpr const char* phrLen           = "phr_len";
+    static constexpr const char* phrPulses        = "phr_pulses";
+    static constexpr const char* phrRotation      = "phr_rotation";
+    static constexpr const char* phrBars          = "phr_bars";
+    static constexpr const char* phrForm          = "phr_form";
+    static constexpr const char* phrVariation     = "phr_variation";
+    static constexpr const char* phrEvolve        = "phr_evolve";
+    static constexpr const char* phrLayer         = "phr_layer";
+    static constexpr const char* phrSlide         = "phr_slide";
 
     // ── Polyphonic generative sequencer — shared pitch field ──
     static constexpr const char* genFieldMode     = "gen_field_mode";
@@ -1935,6 +1957,125 @@ namespace SeqMode {
     };
     static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
     static_assert(ArpRandom + 1 == kCount, "SeqMode out of sync.");
+}
+
+// ── Sequencer engine: the Step | Phrase | Gen switch ──
+// Replaces the bool gen_seq_running (Step<->Gen). Index order is the switch's
+// left-to-right order.
+namespace SeqEngine {
+    enum : int { Step = 0, Phrase = 1, Gen = 2 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "step",   "Step"   },
+        { "phrase", "Phrase" },
+        { "gen",    "Gen"    }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(Gen + 1 == kCount, "SeqEngine out of sync.");
+}
+
+// ── Phrase sequencer choices. Each index order equals the matching
+//    PhraseModel enum / value list; PluginProcessor.cpp static_asserts it. ──
+namespace PhrPart {
+    enum : int { Bass = 0, Riff = 1, Lead = 2, Stab = 3 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "bass", "Bass" },
+        { "riff", "Riff" },
+        { "lead", "Lead" },
+        { "stab", "Stab" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(Stab + 1 == kCount, "PhrPart out of sync.");
+}
+
+namespace PhrHarm {
+    enum : int { Pedal = 0, Keys = 1, Chords = 2 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "pedal",  "Pedal"  },
+        { "keys",   "Keys"   },
+        { "chords", "Chords" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(Chords + 1 == kCount, "PhrHarm out of sync.");
+}
+
+// A chord slot: the index IS the scale degree, 0 = empty slot. Roman numerals
+// depend on the scale, so the GUI derives them; the host sees the degree.
+namespace PhrChord {
+    enum : int { Off = 0, D7 = 7 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "off", "-" },
+        { "1",   "1" },
+        { "2",   "2" },
+        { "3",   "3" },
+        { "4",   "4" },
+        { "5",   "5" },
+        { "6",   "6" },
+        { "7",   "7" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(D7 + 1 == kCount, "PhrChord out of sync.");
+}
+
+// Harmonic rhythm: bars per chord.
+namespace PhrChordRate {
+    enum : int { B1 = 0, B2 = 1, B4 = 2 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "1", "1" },
+        { "2", "2" },
+        { "4", "4" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(B4 + 1 == kCount, "PhrChordRate out of sync.");
+    static constexpr int bars(int index) { return index == B4 ? 4 : index == B2 ? 2 : 1; }
+}
+
+// Motif length in bars.
+namespace PhrLen {
+    enum : int { B1 = 0, B2 = 1 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "1", "1" },
+        { "2", "2" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(B2 + 1 == kCount, "PhrLen out of sync.");
+    static constexpr int bars(int index) { return index == B2 ? 2 : 1; }
+}
+
+// Phrase length in bars.
+namespace PhrBars {
+    enum : int { B4 = 0, B8 = 1, B16 = 2 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "4",  "4"  },
+        { "8",  "8"  },
+        { "16", "16" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(B16 + 1 == kCount, "PhrBars out of sync.");
+    static constexpr int bars(int index) { return index == B16 ? 16 : index == B8 ? 8 : 4; }
+}
+
+namespace PhrForm {
+    enum : int { Loop = 0, AAAB = 1, AABA = 2, ABAB = 3 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "loop", "Loop" },
+        { "aaab", "AAAB" },
+        { "aaba", "AABA" },
+        { "abab", "ABAB" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(ABAB + 1 == kCount, "PhrForm out of sync.");
+}
+
+namespace PhrLayer {
+    enum : int { Off = 0, Octave = 1, Chord = 2, Answer = 3 };
+    static constexpr ChoiceEntry kEntries[] = {
+        { "off",    "Off"    },
+        { "octave", "Octave" },
+        { "chord",  "Chord"  },
+        { "answer", "Answer" }
+    };
+    static constexpr int kCount = sizeof(kEntries) / sizeof(kEntries[0]);
+    static_assert(Answer + 1 == kCount, "PhrLayer out of sync.");
 }
 
 // ── Sequencer note division ──

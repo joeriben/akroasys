@@ -111,7 +111,7 @@ namespace
     // this and not seeing it.
     void armSequencer (Rig& r, int note)
     {
-        r.set (PID::genSeqRunning, 0.0f);
+        r.set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
         r.run (2);
         auto& seq = r.proc.getStepSequencer();
         seq.setNumSteps (1);
@@ -146,11 +146,11 @@ namespace
                 r.set (PID::gen3Enable, 1.0f);
                 r.set (PID::gen4Enable, 1.0f);
             }
-            // genSeqRunning is the STEP<->GEN toggle, not the transport
-            // (PluginProcessor.cpp: "PID::genSeqRunning is a STEP/GEN toggle,
-            // not transport"). Without seqRunning as well, nothing plays and
-            // the probe measures an idle machine.
-            r.set (PID::genSeqRunning, 1.0f);
+            // seqEngine picks the engine (Step | Phrase | Gen), it is not the
+            // transport (PluginProcessor.cpp: "PID::seqEngine picks the
+            // engine, it is not transport"). Without seqRunning as well,
+            // nothing plays and the probe measures an idle machine.
+            r.set (PID::seqEngine, static_cast<float> (SeqEngine::Gen));
             r.set (PID::seqBpm, 40.0f);
             r.set (PID::seqRunning, 1.0f);
         }
@@ -187,7 +187,7 @@ namespace
 
         r.set (PID::arpMode, 0.0f);              // and off again
         r.set (PID::seqRunning, 0.0f);
-        r.set (PID::genSeqRunning, 0.0f);
+        r.set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
         r.run (400);                             // ~2.1 s with nothing playing
 
         int left = -1;

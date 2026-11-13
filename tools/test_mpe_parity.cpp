@@ -1943,7 +1943,7 @@ void caseGlidingStepTakesTheReadingWithIt()
     };
     // The generative sequencer mirrors its own pattern into the step data every
     // block, so the steps below only stay put with it off.
-    set (PID::genSeqRunning, 0.0f);
+    set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
     r.run (2);
 
     auto& seq = r.proc.getStepSequencer();
@@ -2105,7 +2105,7 @@ void caseGlidingStepArrivesAtItsNewPitchesPressure()
         if (auto* p = r.proc.getValueTreeState().getParameter (pid))
             p->setValueNotifyingHost (p->convertTo0to1 (v));
     };
-    set (PID::genSeqRunning, 0.0f);
+    set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
     r.run (2);
     auto& seq = r.proc.getStepSequencer();
     seq.setNumSteps (2);
@@ -2338,7 +2338,7 @@ void caseSeqNoteOffDoesNotEndAHeldKey()
             if (auto* p = r.proc.getValueTreeState().getParameter (pid))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
-        set (PID::genSeqRunning, 0.0f);
+        set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
         r.run (2);
         auto& seq = r.proc.getStepSequencer();
         seq.setNumSteps (2);
@@ -2982,7 +2982,7 @@ void casePanicEndsTheMachinesOwnNotesToo()
         if (auto* p = r.proc.getValueTreeState().getParameter (pid))
             p->setValueNotifyingHost (p->convertTo0to1 (v));
     };
-    set (PID::genSeqRunning, 0.0f);
+    set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
     r.run (2);
     auto& seq = r.proc.getStepSequencer();
     seq.setNumSteps (1);
@@ -3026,7 +3026,7 @@ void casePanicEndsTheMachinesOwnNotesToo()
         if (auto* p = h.proc.getValueTreeState().getParameter (pid))
             p->setValueNotifyingHost (p->convertTo0to1 (v));
     };
-    seth (PID::genSeqRunning, 0.0f);
+    seth (PID::seqEngine, static_cast<float> (SeqEngine::Step));
     h.run (2);
     auto& seq2 = h.proc.getStepSequencer();
     seq2.setNumSteps (1);
@@ -3076,7 +3076,7 @@ void caseSlidingStepDoesNotContinueAPanickedTail()
         if (auto* p = r.proc.getValueTreeState().getParameter (pid))
             p->setValueNotifyingHost (p->convertTo0to1 (v));
     };
-    set (PID::genSeqRunning, 0.0f);
+    set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
     r.run (2);
 
     auto& seq = r.proc.getStepSequencer();
@@ -3145,7 +3145,7 @@ void caseSlidingStepDoesNotContinueAPanickedTail()
             if (auto* p = q.proc.getValueTreeState().getParameter (pid))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
-        setq (PID::genSeqRunning, 0.0f);
+        setq (PID::seqEngine, static_cast<float> (SeqEngine::Step));
         q.run (2);
         auto& s2 = q.proc.getStepSequencer();
         s2.setNumSteps (2);
@@ -3278,7 +3278,7 @@ void caseMonoKnowsAHandFromTheMachine()
             if (auto* p = r.proc.getValueTreeState().getParameter (pid))
                 p->setValueNotifyingHost (p->convertTo0to1 (v));
         };
-        set (PID::genSeqRunning, 0.0f);
+        set (PID::seqEngine, static_cast<float> (SeqEngine::Step));
         r.run (2);
         auto& seq = r.proc.getStepSequencer();
         seq.setNumSteps (1);
@@ -3712,7 +3712,7 @@ void caseResetAllControllersZeroesASoundingMachineNote()
         if (auto* p = r.proc.getValueTreeState().getParameter (pid))
             p->setValueNotifyingHost (p->convertTo0to1 (v));
     };
-    set (PID::genSeqRunning, 0.0f);       // else it mirrors its own pattern in
+    set (PID::seqEngine, static_cast<float> (SeqEngine::Step));       // else it mirrors its own pattern in
     r.run (2);
 
     auto& seq = r.proc.getStepSequencer();
