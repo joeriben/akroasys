@@ -1077,6 +1077,9 @@ int main(int argc, char** argv)
               "from step, no step in the analysed bars: the stored motif stays");
         fs.undo();
         check(fs.getStoredMotif().seed == m0.seed, "from step, no step in the analysed bars: adds no undo level");
+        fs.undo();
+        check(fs.getStoredMotif().seed == before.seed && before.seed == 555u,
+              "from step, no step in the analysed bars: Undo still redoes the dice");
         steps[0].enabled = true;
         check(fs.fromSteps(steps.data(), 64, c) && fs.getStoredMotif().pulses == 1,
               "from step, one step in the analysed bars: stored with one pulse");
