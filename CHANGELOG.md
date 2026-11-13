@@ -108,6 +108,13 @@ unbroken.
   a load from the Library changed it under the tape, which Stop then restored
   only in part.
 
+- **Stopping a session log gives back your oscillator instrument.** If the T5
+  oscillator was shown when you pressed Play and the tape had been recorded
+  with the oscillator, Stop restored your patch but kept the tape's oscillator
+  instrument, its prompt and its knob names: switching back to the oscillator
+  played the tape's sound, and a save there stored it. Your instrument, its
+  prompt, its knobs and the settings it asked for now come back as they were.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
