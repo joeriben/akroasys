@@ -754,6 +754,9 @@ Motif fitMotif(const Motif& stored, const Config& cfg)
     m.part = cfg.part;
     m.seed = stored.seed;
     m.origin = stored.origin;
+    m.entryKept = stored.entryKept;
+    m.entryNote = stored.entryNote;
+    m.entryPrevNote = stored.entryPrevNote;
     setRhythm(m, sh.len, sh.spb, sh.pulses, sh.rotation);
     assignFunctions(m, cfg, &stored);
     computeAccents(m);
@@ -1476,6 +1479,13 @@ void renderBar(const RenderInput& in, BarRender& out)
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp)
 {
+    const int N = phraseBarsOf(cfg);
+    if (motif.entryKept && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin)
+    {
+        p = motif.entryNote;
+        pp = motif.entryPrevNote;
+        return;
+    }
     RenderInput in;
     in.cfg = &cfg;
     in.motif = &prevMotif;

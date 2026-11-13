@@ -74,6 +74,15 @@ struct Motif
     std::uint32_t seed        = 1;
     int           origin      = 0;    // phrase index evolution counts from (§3.8)
 
+    /** Pedal / Chords: the main line's last two notes before the origin
+     *  phrase, kept with the motif (Keep). A phrase before the origin plays
+     *  the motif itself, so the origin phrase's first bar would otherwise
+     *  enter from the motif's own last bar rather than from what preceded it
+     *  when it was heard. Off: it enters from the phrase before (entryNotes). */
+    bool          entryKept     = false;
+    int           entryNote     = -1;   // −1: no note, as entryNotes reports it
+    int           entryPrevNote = -1;
+
     int numSteps() const { return len * stepsPerBar; }
 };
 
@@ -302,7 +311,9 @@ struct RenderInput
 void renderBar(const RenderInput& in, BarRender& out);
 
 /** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
- *  of bar − 1 rendered on its own. Keeps continuous play and a locate equal. */
+ *  of bar − 1 rendered on its own. Keeps continuous play and a locate equal.
+ *  `motif` is the motif of bar's phrase: the first bar of its origin phrase
+ *  enters from the notes kept with it when it has them (Motif::entryKept). */
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp);
 

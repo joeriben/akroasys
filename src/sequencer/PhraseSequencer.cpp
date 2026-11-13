@@ -307,6 +307,7 @@ void T5ynthPhraseSequencer::rebuildEvolution(int phrase)
     if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
     evoPhrase = phrase;
     evoValid = true;
+    refreshHeardEntry();
     publishHeard();
 }
 
@@ -320,12 +321,26 @@ void T5ynthPhraseSequencer::advanceEvolution(int phrase)
     evoNext = evoCur;
     if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
     evoPhrase = phrase;
+    refreshHeardEntry();
     publishHeard();
+}
+
+void T5ynthPhraseSequencer::refreshHeardEntry()
+{
+    heardEntryKept = cfg.harm != Harm::Keys;
+    heardEntryNote = heardEntryPrevNote = -1;
+    if (heardEntryKept)
+        entryNotes(latchedConfig(), evoPrev, evoCur, evoPhrase * phraseBarsOf(cfg), barLenQ, scratch,
+                   heardEntryNote, heardEntryPrevNote);
 }
 
 void T5ynthPhraseSequencer::publishHeard()
 {
-    heard.write(evoCur, toAudioSeen, static_cast<std::uint32_t>(evoPhrase));
+    Motif h = evoCur;
+    h.entryKept = heardEntryKept;
+    h.entryNote = heardEntryNote;
+    h.entryPrevNote = heardEntryPrevNote;
+    heard.write(h, toAudioSeen, static_cast<std::uint32_t>(evoPhrase));
 }
 
 // ─── Bars ──────────────────────────────────────────────────────────────────
@@ -368,6 +383,16 @@ void T5ynthPhraseSequencer::renderCurrent()
         entryNotes(L, prev, cur, bar, barLenQ, scratch, ep, epp);
         in.prevNote = ep;
         in.prevPrevNote = epp;
+        // The phrase's first bar is heard entering from these notes: Keep
+        // stores them, so the kept motif enters its origin phrase the same way.
+        if (floorMod(bar, N) == 0
+            && (!heardEntryKept || ep != heardEntryNote || epp != heardEntryPrevNote))
+        {
+            heardEntryKept = true;
+            heardEntryNote = ep;
+            heardEntryPrevNote = epp;
+            publishHeard();
+        }
     }
     in.slideIn = heldNote[static_cast<size_t>(slotOf(-1))] >= 0;
     renderBar(in, render);
@@ -437,13 +462,12 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
     if (toAudio.sequence() != toAudioSeen)
     {
         Motif m;
-        std::uint32_t barStands = 0, unusedB = 0, seqRead = 0;
-        if (toAudio.tryRead(m, barStands, unusedB, seqRead))
+        std::uint32_t unusedA = 0, unusedB = 0, seqRead = 0;
+        if (toAudio.tryRead(m, unusedA, unusedB, seqRead))
         {
             liveMotif = m;
             toAudioSeen = seqRead;
-            motifDirty = true;
-            if (barStands == 0) renderDirty = true;
+            motifDirty = renderDirty = true;
         }
     }
 
@@ -499,17 +523,14 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         nextEvent = firstEventFrom(q0);
         positioned = true;
     }
-    else
+    else if (renderDirty)
     {
+        // A change inside the bar: re-render it and play on from where the
+        // last block stopped (a host may jitter q0 around that by < kJumpQ).
         if (motifDirty) rebuildEvolution(floorDiv(bar, phraseBarsOf(cfg)));
-        if (renderDirty)
-        {
-            // A change inside the bar: re-render it and play on from where the
-            // last block stopped (a host may jitter q0 around that by < kJumpQ).
-            renderCurrent();
-            nextEvent = firstEventNotPlayed(expectedQ);
-            releaseUnusedHeld(nextEvent, out, 0);
-        }
+        renderCurrent();
+        nextEvent = firstEventNotPlayed(expectedQ);
+        releaseUnusedHeld(nextEvent, out, 0);
     }
     motifDirty = renderDirty = false;
 
@@ -649,6 +670,9 @@ void T5ynthPhraseSequencer::MotifChannel::write(const Motif& m, std::uint32_t ta
     put(6, static_cast<std::uint32_t>(m.origin));
     put(7, tagA);
     put(8, tagB);
+    put(9, m.entryKept ? 1u : 0u);
+    put(10, static_cast<std::uint32_t>(m.entryNote));
+    put(11, static_cast<std::uint32_t>(m.entryPrevNote));
     seq.store(s + 2, std::memory_order_release);
 }
 
@@ -674,13 +698,16 @@ bool T5ynthPhraseSequencer::MotifChannel::tryRead(Motif& m, std::uint32_t& tagA,
     m.origin      = static_cast<int>(get(6));
     tagA = get(7);
     tagB = get(8);
+    m.entryKept     = get(9) != 0;
+    m.entryNote     = std::clamp(static_cast<int>(get(10)), -1, 127);
+    m.entryPrevNote = std::clamp(static_cast<int>(get(11)), -1, 127);
     seqRead = s1;
     return true;
 }
 
-void T5ynthPhraseSequencer::publish(const Motif& m, bool barStands)
+void T5ynthPhraseSequencer::publish(const Motif& m)
 {
-    toAudio.write(m, barStands ? 1u : 0u, 0);
+    toAudio.write(m, 0, 0);
 }
 
 bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase, std::uint32_t storedSeq) const
@@ -757,20 +784,27 @@ void T5ynthPhraseSequencer::keep()
     // at its own phrase plays on exactly as before, even when the next phrase
     // has begun meanwhile. Stopped: it starts from the phrase where playback
     // resumes.
+    // The heard motif carries the notes its phrase was entered from: kept
+    // with it, the origin phrase enters as it was heard, although the phrase
+    // before it now plays the kept motif itself. Before the origin the motif
+    // stays as stored, its own entry included.
     if (phrase >= m.origin)
+    {
         m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry
                        ? kOriginAtNextEntry
                        : phrase;
+    }
+    else
+    {
+        m.entryKept = stored.entryKept;
+        m.entryNote = stored.entryNote;
+        m.entryPrevNote = stored.entryPrevNote;
+    }
     adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo = true;
     stored = m;
-    // The bar playing stands. In the first bar of a phrase a re-render would
-    // lead its entry from the phrase before as the kept motif plays it — the
-    // kept motif itself — instead of from what was heard there, and re-voice
-    // the rest of the bar; from the next bar on the kept motif renders as
-    // what was heard.
-    publish(stored, true);
+    publish(stored);
 }
 
 void T5ynthPhraseSequencer::fromSteps(const StepInput* steps, int count, const Config& c)

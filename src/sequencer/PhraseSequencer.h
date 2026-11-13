@@ -119,24 +119,29 @@ private:
         /** The sequence number; even when no write is in progress. */
         std::uint32_t sequence() const { return seq.load(std::memory_order_relaxed); }
     private:
-        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 9;
+        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 12;
         std::atomic<std::uint32_t> seq { 0 };
         std::array<std::atomic<std::uint32_t>, kWords> words;
     };
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
     static_assert(std::atomic<int>::is_always_lock_free);
 
-    /** Message → audio: the stored motif. Tag A: 1 when the bar playing
-     *  stands (Keep): the audio thread adopts the motif without re-rendering
-     *  it. Tag B unused. */
+    /** Message → audio: the stored motif. Tags unused. */
     MotifChannel toAudio;
     std::uint32_t toAudioSeen = 0;       // audio thread: toAudio sequence of liveMotif
-    void publish(const PhraseModel::Motif& m, bool barStands = false);
+    void publish(const PhraseModel::Motif& m);
 
-    /** Audio → message: the motif heard in the current phrase (evoCur). Tag A
-     *  = the toAudio sequence it was derived from, tag B = its phrase. */
+    /** Audio → message: the motif heard in the current phrase (evoCur), with
+     *  the notes that phrase's first bar enters from (Motif::entryKept; off
+     *  for Keys, whose line continues live). Tag A = the toAudio sequence it
+     *  was derived from, tag B = its phrase. */
     MotifChannel heard;
     void publishHeard();
+    /** The entry the current phrase's first bar renders with; updated when
+     *  that bar is (re)rendered, so it is the one heard. */
+    bool heardEntryKept = false;
+    int heardEntryNote = -1, heardEntryPrevNote = -1;
+    void refreshHeardEntry();
     /** The heard motif, if it was derived from the stored motif of toAudio
      *  sequence `storedSeq`. */
     bool readHeard(PhraseModel::Motif& m, int& phrase, std::uint32_t storedSeq) const;

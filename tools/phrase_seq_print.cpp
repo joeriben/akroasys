@@ -773,7 +773,10 @@ int main(int argc, char** argv)
         // Keep in the first bar of a phrase after the origin. The bar's entry
         // is led from the phrase before; under the kept motif (origin = this
         // phrase) that phrase plays the kept motif itself, not what was heard
-        // there, so a re-render would re-voice the rest of the bar.
+        // there. The kept motif carries the entry it was heard with, so every
+        // later rendering of the bar — the re-render Keep itself causes, a
+        // render-only change, Undo + Redo, a stop and start on the spot, a
+        // locate back into the phrase (a host cycle) — plays it as heard.
         {
             Config cc = base();
             cc.part = Part::Lead;
@@ -798,29 +801,60 @@ int main(int argc, char** argv)
                   "keep in a phrase's first bar: its entry differs when led from the kept motif "
                   "(else the checks below prove nothing)");
 
-            int differ = 0, runs = 0;
-            std::string firstWhy;
+            struct Tally { int differ = 0; std::string why; };
+            Tally plain, gate, redo, spot, locate;
+            int runs = 0;
+            auto tally = [&](Tally& t, const Run& a, const Run& b, int from, int to, double fromQ) {
+                std::string why;
+                if (!sameOns(onsInBars(a, B, from, to, fromQ), onsInBars(b, B, from, to, fromQ), why))
+                    if (t.differ++ == 0) t.why = why;
+            };
+            const Act undo = [](T5ynthPhraseSequencer& s) { s.undo(); };
+            const Act stopStart = [](T5ynthPhraseSequencer& s) { s.stop(); s.start(); };
             for (Harm h : { Harm::Pedal, Harm::Chords })
                 for (std::uint32_t seed : { 2293u, 777u, 4242u, 31337u })
                 {
                     Config hc = cc;
                     hc.harm = h;
+                    Config gc = hc;
+                    gc.gate = 0.5f;   // renders the bar again, moves no pitch
+                    const Act gateHalf = [gc](T5ynthPhraseSequencer& s) { s.setConfig(gc); };
                     const Motif at1 = generateMotif(seed, 1, hc);
                     const Act load1 = [at1](T5ynthPhraseSequencer& s) { s.setStoredMotif(at1); };
                     const Run ref = play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 } }));
                     for (double off = 0.0; off < B; off += 0.25)
                     {
                         const double kq = 8 * B + off;   // bar 8 = first bar of phrase 2
-                        const Run k = play(hc, 0.0, 12 * B, 4, 4, {}, 0,
-                                           acts({ { 0.0, load1 }, { kq, keepSeen } }));
-                        std::string why;
                         ++runs;
-                        if (!sameOns(onsInBars(ref, B, 8, 12, kq), onsInBars(k, B, 8, 12, kq), why))
-                            if (differ++ == 0) firstWhy = why;
+                        tally(plain, ref, play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 }, { kq, keepSeen } })),
+                              8, 12, kq);
+                        const Motif keptHere = kept;
+                        tally(gate,
+                              play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 }, { kq + 1.0, gateHalf } })),
+                              play(hc, 0.0, 12 * B, 4, 4, {}, 0,
+                                   acts({ { 0.0, load1 }, { kq, keepSeen }, { kq + 1.0, gateHalf } })),
+                              8, 12, kq);
+                        tally(redo, ref,
+                              play(hc, 0.0, 12 * B, 4, 4, {}, 0,
+                                   acts({ { 0.0, load1 }, { kq, keepSeen }, { kq + 0.25, undo }, { kq + 0.5, undo } })),
+                              8, 12, kq);
+                        tally(spot, play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 }, { kq, stopStart } })),
+                              play(hc, 0.0, 12 * B, 4, 4, {}, 0, acts({ { 0.0, load1 }, { kq, stopKeep } })), 8, 12, kq);
+                        tally(locate, ref,
+                              play(hc, 8 * B, 12 * B, 4, 4, {}, 0, acts({ { 0.0, [keptHere](T5ynthPhraseSequencer& s) {
+                                       s.setStoredMotif(keptHere); } } })),
+                              8, 12, 8 * B);
                     }
                 }
-            check(differ == 0, "keep in a phrase's first bar: the rest of the bar and the phrase play on unchanged ("
-                                   + std::to_string(differ) + " of " + std::to_string(runs) + " differ) " + firstWhy);
+            auto report = [&](const Tally& t, const std::string& what) {
+                check(t.differ == 0, "keep in a phrase's first bar, " + what + " (" + std::to_string(t.differ) + " of "
+                                         + std::to_string(runs) + " differ) " + t.why);
+            };
+            report(plain, "the rest of the bar and the phrase play on unchanged");
+            report(gate, "then Gate later in the bar: as with Gate alone");
+            report(redo, "then Undo, Redo: unchanged");
+            report(spot, "stop, keep, start on the spot: as a stop and start");
+            report(locate, "a locate back into the phrase plays it as heard");
         }
 
         // Dice while stopped, playback resumes at bar 20 (phrase 5): the new
