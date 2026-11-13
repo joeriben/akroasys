@@ -834,6 +834,7 @@ void evolveOnce(Motif& m, const Config& cfg, int phrase)
 Motif evolvedMotif(const Motif& fitted, const Config& cfg, int phrase)
 {
     Motif m = fitted;
+    if (fitted.origin == kOriginAtNextEntry) return m;   // not heard yet: nothing evolved
     for (int p = fitted.origin + 1; p <= phrase; ++p)
         evolveOnce(m, cfg, p);
     return m;

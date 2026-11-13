@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <limits>
 
 /**
  * Phrase sequencer — the pure model (docs/PHRASE_SEQ_CONCEPT.md §3).
@@ -75,6 +76,12 @@ struct Motif
 
     int numSteps() const { return len * stepsPerBar; }
 };
+
+/** Motif::origin of a motif stored while the transport is stopped: it starts
+ *  evolving from the phrase where it is first heard, which the scheduler
+ *  fills in when the next start reads the motif (§3.8). Where playback
+ *  resumes is the host's choice, so it cannot be known earlier. */
+static constexpr int kOriginAtNextEntry = std::numeric_limits<int>::min();
 
 /** Every parameter the model reads. Filled from APVTS once per block. */
 struct Config
@@ -210,7 +217,8 @@ Motif answerMotif(const Motif& main, const Config& cfg);
 void evolveOnce(Motif& m, const Config& cfg, int phrase);
 
 /** The heard motif at `phrase`: fit, then the evolution changes of every
- *  phrase in (origin, phrase]. Before origin the fitted motif plays. */
+ *  phrase in (origin, phrase]. Before origin the fitted motif plays, and so it
+ *  does for an origin of kOriginAtNextEntry. */
 Motif evolvedMotif(const Motif& fitted, const Config& cfg, int phrase);
 
 /** True when `a` and `b` yield the same heard motif in every phrase, Evolve

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <thread>
 
 using namespace PhraseModel;
 
@@ -50,7 +51,6 @@ std::uint32_t packChord(const Chord& c)
 
 T5ynthPhraseSequencer::T5ynthPhraseSequencer()
 {
-    for (auto& w : motifWords) w.store(0, std::memory_order_relaxed);
     for (auto& w : viewWords) w.store(0, std::memory_order_relaxed);
     heldNote.fill(-1);
     publish(stored);
@@ -161,6 +161,7 @@ void T5ynthPhraseSequencer::stop()
 {
     running = false;
     positioned = false;
+    editOrigin.store(kOriginAtNextEntry, std::memory_order_relaxed);
     currentStepForGui.store(-1, std::memory_order_relaxed);
     currentPhraseForGui.store(0, std::memory_order_relaxed);
 }
@@ -284,6 +285,7 @@ void T5ynthPhraseSequencer::rebuildEvolution(int phrase)
     if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
     evoPhrase = phrase;
     evoValid = true;
+    publishHeard();
 }
 
 void T5ynthPhraseSequencer::advanceEvolution(int phrase)
@@ -296,6 +298,12 @@ void T5ynthPhraseSequencer::advanceEvolution(int phrase)
     evoNext = evoCur;
     if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
     evoPhrase = phrase;
+    publishHeard();
+}
+
+void T5ynthPhraseSequencer::publishHeard()
+{
+    heard.write(evoCur, toAudioSeen, static_cast<std::uint32_t>(evoPhrase));
 }
 
 // ─── Bars ──────────────────────────────────────────────────────────────────
@@ -345,6 +353,7 @@ void T5ynthPhraseSequencer::renderCurrent()
     chordForGui.store(packChord(render.chord), std::memory_order_relaxed);
     currentBarForGui.store(bar, std::memory_order_relaxed);
     currentPhraseForGui.store(p, std::memory_order_relaxed);
+    editOrigin.store(p, std::memory_order_relaxed);
 }
 
 void T5ynthPhraseSequencer::enterBar(int newBar, bool continuous)
@@ -403,10 +412,16 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
 {
     if (!running || numSamples <= 0 || !cfgValid || !(bpm > 0.0)) return;
 
-    if (motifSeq.load(std::memory_order_relaxed) != motifSeqSeen)
+    if (toAudio.sequence() != toAudioSeen)
     {
         Motif m;
-        if (tryReadMotif(m)) { liveMotif = m; motifDirty = renderDirty = true; }
+        std::uint32_t unusedA = 0, unusedB = 0, seqRead = 0;
+        if (toAudio.tryRead(m, unusedA, unusedB, seqRead))
+        {
+            liveMotif = m;
+            toAudioSeen = seqRead;
+            motifDirty = renderDirty = true;
+        }
     }
 
     const double dq = static_cast<double>(numSamples) * bpm / (60.0 * sampleRate);
@@ -425,6 +440,16 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
     if (hostSync != lastHostSync) positioned = false;
     if (positioned && hostSync && std::abs(q0 - expectedQ) > kJumpQ) positioned = false;
     lastHostSync = hostSync;
+
+    if (liveMotif.origin == kOriginAtNextEntry)
+    {
+        // Stored while stopped: the motif starts evolving from the phrase
+        // where it is first heard — the bar this block enters, or the bar
+        // playing (§3.8).
+        const int heardBar = positioned ? bar : static_cast<int>(std::floor(q0 / barLenQ));
+        liveMotif.origin = floorDiv(heardBar, phraseBarsOf(cfg));
+        motifDirty = renderDirty = true;
+    }
 
     if (motifDirty)
     {
@@ -563,15 +588,20 @@ int T5ynthPhraseSequencer::readView(std::array<StepView, kMaxBarSteps>& outView)
 
 // ─── Motif hand-off ────────────────────────────────────────────────────────
 
-void T5ynthPhraseSequencer::publish(const Motif& m)
+T5ynthPhraseSequencer::MotifChannel::MotifChannel()
 {
-    // Single writer (message thread). Odd sequence = write in progress.
-    const std::uint32_t s = motifSeq.load(std::memory_order_relaxed);
-    motifSeq.store(s + 1, std::memory_order_relaxed);
+    for (auto& w : words) w.store(0, std::memory_order_relaxed);
+}
+
+void T5ynthPhraseSequencer::MotifChannel::write(const Motif& m, std::uint32_t tagA, std::uint32_t tagB)
+{
+    // Single writer. Odd sequence = write in progress.
+    const std::uint32_t s = seq.load(std::memory_order_relaxed);
+    seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
     for (int i = 0; i < kMaxMotifSteps; ++i)
-        motifWords[static_cast<size_t>(i)].store(packSlot(m.slots[static_cast<size_t>(i)]), std::memory_order_relaxed);
-    auto put = [&](int i, std::uint32_t v) { motifWords[static_cast<size_t>(kMaxMotifSteps + i)].store(v, std::memory_order_relaxed); };
+        words[static_cast<size_t>(i)].store(packSlot(m.slots[static_cast<size_t>(i)]), std::memory_order_relaxed);
+    auto put = [&](int i, std::uint32_t v) { words[static_cast<size_t>(kMaxMotifSteps + i)].store(v, std::memory_order_relaxed); };
     put(0, static_cast<std::uint32_t>(m.len));
     put(1, static_cast<std::uint32_t>(m.stepsPerBar));
     put(2, static_cast<std::uint32_t>(m.pulses));
@@ -579,18 +609,21 @@ void T5ynthPhraseSequencer::publish(const Motif& m)
     put(4, static_cast<std::uint32_t>(m.part));
     put(5, m.seed);
     put(6, static_cast<std::uint32_t>(m.origin));
-    motifSeq.store(s + 2, std::memory_order_release);
+    put(7, tagA);
+    put(8, tagB);
+    seq.store(s + 2, std::memory_order_release);
 }
 
-bool T5ynthPhraseSequencer::tryReadMotif(Motif& m)
+bool T5ynthPhraseSequencer::MotifChannel::tryRead(Motif& m, std::uint32_t& tagA, std::uint32_t& tagB,
+                                                  std::uint32_t& seqRead) const
 {
-    const std::uint32_t s1 = motifSeq.load(std::memory_order_acquire);
+    const std::uint32_t s1 = seq.load(std::memory_order_acquire);
     if (s1 & 1u) return false;
-    std::array<std::uint32_t, kMotifWords> w {};
-    for (int i = 0; i < kMotifWords; ++i)
-        w[static_cast<size_t>(i)] = motifWords[static_cast<size_t>(i)].load(std::memory_order_relaxed);
+    std::array<std::uint32_t, kWords> w {};
+    for (int i = 0; i < kWords; ++i)
+        w[static_cast<size_t>(i)] = words[static_cast<size_t>(i)].load(std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_acquire);
-    if (motifSeq.load(std::memory_order_relaxed) != s1) return false;
+    if (seq.load(std::memory_order_relaxed) != s1) return false;
 
     for (int i = 0; i < kMaxMotifSteps; ++i) m.slots[static_cast<size_t>(i)] = unpackSlot(w[static_cast<size_t>(i)]);
     auto get = [&](int i) { return w[static_cast<size_t>(kMaxMotifSteps + i)]; };
@@ -601,15 +634,49 @@ bool T5ynthPhraseSequencer::tryReadMotif(Motif& m)
     m.part        = static_cast<Part>(std::clamp(static_cast<int>(get(4)), 0, 3));
     m.seed        = get(5);
     m.origin      = static_cast<int>(get(6));
-    motifSeqSeen = s1;
+    tagA = get(7);
+    tagB = get(8);
+    seqRead = s1;
+    return true;
+}
+
+void T5ynthPhraseSequencer::publish(const Motif& m)
+{
+    toAudio.write(m, 0, 0);
+}
+
+bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase) const
+{
+    std::uint32_t source = 0, ph = 0, unusedSeq = 0;
+    // The audio thread writes this channel at most once per block, briefly:
+    // a read that catches it mid-write succeeds on a retry.
+    while (!heard.tryRead(m, source, ph, unusedSeq))
+        std::this_thread::yield();
+    if (source != toAudio.sequence()) return false;   // from an earlier stored motif
+    phrase = static_cast<int>(ph);
     return true;
 }
 
 // ─── Message thread: the stored motif ──────────────────────────────────────
 
-int T5ynthPhraseSequencer::originNow() const
+int T5ynthPhraseSequencer::resolvedStoredOrigin() const
 {
-    return currentPhraseForGui.load(std::memory_order_relaxed);
+    if (stored.origin != kOriginAtNextEntry) return stored.origin;
+    Motif h;
+    int phrase = 0;
+    return readHeard(h, phrase) ? h.origin : kOriginAtNextEntry;
+}
+
+void T5ynthPhraseSequencer::adoptResolvedOrigin()
+{
+    stored.origin = resolvedStoredOrigin();
+}
+
+Motif T5ynthPhraseSequencer::getStoredMotif() const
+{
+    Motif m = stored;
+    m.origin = resolvedStoredOrigin();
+    return m;
 }
 
 void T5ynthPhraseSequencer::setStoredMotif(const Motif& m)
@@ -621,34 +688,42 @@ void T5ynthPhraseSequencer::setStoredMotif(const Motif& m)
 
 void T5ynthPhraseSequencer::dice(const Config& c, std::uint32_t newSeed)
 {
+    adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo = true;
-    stored = generateMotif(newSeed, originNow(), c);
+    stored = generateMotif(newSeed, editOrigin.load(std::memory_order_relaxed), c);
     publish(stored);
 }
 
-void T5ynthPhraseSequencer::keep(const Config& c)
+void T5ynthPhraseSequencer::keep()
 {
-    const int p = originNow();
-    Motif heard = evolvedMotif(fitMotif(stored, c), c, p);
-    heard.origin = p;
+    Motif m;
+    int phrase = 0;
+    if (!readHeard(m, phrase)) return;
+    // Running: the heard motif anchored at its own phrase plays on exactly as
+    // before, even when the next phrase has begun meanwhile. Stopped: it
+    // starts from the phrase where playback resumes.
+    m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry ? kOriginAtNextEntry : phrase;
+    adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo = true;
-    stored = heard;
+    stored = m;
     publish(stored);
 }
 
 void T5ynthPhraseSequencer::fromSteps(const StepInput* steps, int count, const Config& c)
 {
+    adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo = true;
-    stored = motifFromSteps(steps, count, c, stored.seed, originNow());
+    stored = motifFromSteps(steps, count, c, stored.seed, editOrigin.load(std::memory_order_relaxed));
     publish(stored);
 }
 
 bool T5ynthPhraseSequencer::undo()
 {
     if (!hasUndo) return false;
+    adoptResolvedOrigin();
     std::swap(stored, undoMotif);   // a second Undo redoes
     publish(stored);
     return true;

@@ -15,6 +15,9 @@
 //   F. Evolve 0 repeats every phrase exactly; Evolve > 0 changes the motif
 //      across phrases.
 //   G. Glide: every Glide note-on continues a held note on its own strand.
+//   H. Keep stores the motif heard (latched Evolve, current phrase), so
+//      playback goes on unchanged; a motif diced while stopped is heard as
+//      itself where playback starts.
 //
 // Build (JUCE-free, the sequencer has no dependencies), from the repo root:
 //   g++ -std=c++17 -O1 -Isrc tools/phrase_seq_print.cpp
@@ -28,7 +31,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -135,11 +140,14 @@ struct VoiceSim
     }
 };
 
+/** Called before every block with the block's start position. */
+using Hook = std::function<void(T5ynthPhraseSequencer&, double)>;
+
 /** Runs `bars` bars. startQ ≥ 0 → host-synced from that position (a locate);
  *  the sequencer is fresh either way. */
 Run play(const Config& cfg, double startQ, double untilQ, int tsNum = 4, int tsDen = 4,
          const std::vector<std::pair<double, std::vector<int>>>& keys = {},
-         std::uint32_t diceSeed = 0)
+         std::uint32_t diceSeed = 0, const Hook& hook = {})
 {
     T5ynthPhraseSequencer seq;
     seq.prepare(kSr);
@@ -166,6 +174,7 @@ Run play(const Config& cfg, double startQ, double untilQ, int tsNum = 4, int tsD
             for (int n : keys[keyIdx].second) seq.keyOff(n);   // the latch keeps it
             ++keyIdx;
         }
+        if (hook) hook(seq, q);
         out.clear();
         seq.processBlock(kBlock, kBpm, true, q, out);
         // Dispatch order as the processor: by offset, note-off first on a tie.
@@ -630,6 +639,83 @@ int main(int argc, char** argv)
             }
             check(same, std::string("shuffle: ") + k.tag + ": onsets per bar unchanged at Shuffle 0.5 / 0.75");
         }
+    }
+
+    std::printf("\n== 11. Keep and Dice anchor to what plays (Bass, 4-bar phrases, Evolve 1)\n");
+    {
+        Config c = base();
+        c.phraseBars = 4;
+        c.form = Form::Loop;
+        c.evolve = 1.0f;
+        Config c0 = c;
+        c0.evolve = 0.0f;
+        const double end = 28 * B;
+        // A run's actions, each taken once, at the first block at or after its
+        // position. Built fresh for every run.
+        using Act = std::function<void(T5ynthPhraseSequencer&)>;
+        auto acts = [](std::vector<std::pair<double, Act>> list) {
+            auto done = std::make_shared<std::vector<bool>>(list.size(), false);
+            return Hook([list, done](T5ynthPhraseSequencer& s, double q) {
+                for (size_t i = 0; i < list.size(); ++i)
+                    if (!(*done)[i] && q >= list[i].first) { list[i].second(s); (*done)[i] = true; }
+            });
+        };
+        const Act dice777  = [&](T5ynthPhraseSequencer& s) { s.dice(c, 777); };
+        const Act keep     = [](T5ynthPhraseSequencer& s) { s.keep(); };
+        const Act stopKeep = [](T5ynthPhraseSequencer& s) { s.stop(); s.keep(); s.start(); };
+        const Act evoOff   = [&](T5ynthPhraseSequencer& s) { s.setConfig(c0); };
+        const Act diceStop = [&](T5ynthPhraseSequencer& s) { s.stop(); s.dice(c, 4242); s.start(); };
+        const double keepQ = 21 * B + 1.0;   // phrase 5, mid-bar; the dice at bar 4 has origin 1
+        auto same = [&](const Run& a, const Run& b, int from, int to, double fromQ, const std::string& what) {
+            std::string why;
+            const bool ok = sameOns(onsInBars(a, B, from, to, fromQ), onsInBars(b, B, from, to, fromQ), why);
+            check(ok, what + " " + why);
+        };
+
+        const Run cont = play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 } }));
+        same(cont, play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { keepQ, keep } })),
+             21, 28, keepQ, "keep while running: this phrase and the next play on unchanged");
+        same(cont, play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { keepQ, stopKeep } })),
+             21, 28, keepQ, "stop, keep, play on from the same bar: unchanged");
+
+        // Evolve turned to 0 mid-phrase is latched at the next phrase entry:
+        // Keep stores the motif evolved under 1, the one that plays.
+        same(play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { 21 * B, evoOff } })),
+             play(c, 0.0, end, 4, 4, {}, 0, acts({ { 4 * B, dice777 }, { 21 * B, evoOff }, { keepQ, keep } })),
+             21, 24, keepQ, "keep after Evolve changed mid-phrase: stores the motif heard under the latched Evolve");
+
+        // Dice while stopped, playback resumes at bar 20 (phrase 5): the new
+        // motif is heard as itself there, so Evolve cannot have touched it yet.
+        Motif resolved;
+        const Hook diced = acts({ { 20 * B, diceStop } });
+        const Run dicedEvo = play(c, 0.0, end, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+            diced(s, q);
+            resolved = s.getStoredMotif();
+        });
+        same(play(c0, 0.0, 24 * B, 4, 4, {}, 0, acts({ { 20 * B, diceStop } })), dicedEvo,
+             20, 24, -1e9, "dice while stopped, start at bar 20: the new motif plays unevolved");
+        check(resolved.origin == 5, "dice while stopped: origin resolves to the phrase first heard (5), got "
+                                        + std::to_string(resolved.origin));
+
+        // Dice again and Undo it: the first motif comes back with the origin
+        // it was heard from (5), not anchored anew at the phrase of the Undo.
+        // Compared from the next bar on: in the bar of the Undo the replaced
+        // motif's held note still slides into the re-rendered line.
+        const double undoQ = 25 * B + 1.0;
+        same(dicedEvo,
+             play(c, 0.0, end, 4, 4, {}, 0, acts({ { 20 * B, diceStop },
+                                                   { 22 * B, [&](T5ynthPhraseSequencer& s) { s.dice(c, 31337); } },
+                                                   { undoQ, [](T5ynthPhraseSequencer& s) { s.undo(); } } })),
+             26, 28, -1e9, "undo after a later dice: the motif diced while stopped evolves on from its own origin");
+
+        T5ynthPhraseSequencer seq;
+        const Motif m0 = seq.getStoredMotif();
+        seq.dice(c, 4242);
+        check(seq.getStoredMotif().origin == kOriginAtNextEntry, "dice before any start: origin waits for the next entry");
+        seq.keep();
+        check(seq.getStoredMotif().seed == 4242, "keep before the motif was heard: the stored motif stays");
+        seq.undo();
+        check(seq.getStoredMotif().seed == m0.seed, "keep before the motif was heard: adds no undo level");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

@@ -23,7 +23,9 @@
  *  - Message thread: the stored-motif API (dice / keep / fromSteps / undo /
  *    setStoredMotif). The stored motif reaches the audio thread through a
  *    seqlock of relaxed atomic words; the audio thread tries once per block
- *    and keeps the previous motif when it catches a write in progress.
+ *    and keeps the previous motif when it catches a write in progress. The
+ *    motif the audio thread plays goes back the same way, so Keep stores
+ *    what was heard and not a message-thread recomputation of it.
  *  - GUI: the *ForGui atomics and readView().
  *
  * Strands: the main line is strand −1 (like the step sequencer, so the
@@ -67,13 +69,18 @@ public:
     // ── Message thread: the stored motif ─────────────────────────────────
     /** Publishes `m` as the stored motif (no undo entry; preset / state load). */
     void setStoredMotif(const PhraseModel::Motif& m);
-    PhraseModel::Motif getStoredMotif() const { return stored; }
+    /** The stored motif; its origin is kOriginAtNextEntry until it was heard. */
+    PhraseModel::Motif getStoredMotif() const;
 
-    /** New seed, new motif from it; origin = the phrase now playing. */
+    /** New seed, new motif from it. Origin: the phrase now playing, or the
+     *  phrase where playback next starts when the transport is stopped. */
     void dice(const PhraseModel::Config& cfg, std::uint32_t newSeed);
-    /** Stores the motif heard now (fitted and evolved) as the new motif. */
-    void keep(const PhraseModel::Config& cfg);
-    /** Stores the motif analysed from step-sequencer steps. */
+    /** Stores the motif heard in the phrase now playing (or last played) as
+     *  the new motif, so playback goes on unchanged; after a stop it starts
+     *  from the phrase where playback resumes. Does nothing while the stored
+     *  motif has not been heard yet: it is then itself what would be kept. */
+    void keep();
+    /** Stores the motif analysed from step-sequencer steps; origin as dice. */
     void fromSteps(const PhraseModel::StepInput* steps, int count, const PhraseModel::Config& cfg);
     /** One level: returns to the motif before the last dice / keep / fromSteps. */
     bool undo();
@@ -95,18 +102,52 @@ public:
     int readView(std::array<PhraseModel::StepView, PhraseModel::kMaxBarSteps>& out) const;
 
 private:
-    // ── Motif hand-off (seqlock) ─────────────────────────────────────────
-    static constexpr int kMotifWords = PhraseModel::kMaxMotifSteps + 7;
-    std::atomic<std::uint32_t> motifSeq { 0 };
-    std::array<std::atomic<std::uint32_t>, kMotifWords> motifWords;
+    // ── Motif hand-off ───────────────────────────────────────────────────
+    /** A motif plus two tag words behind a seqlock of relaxed atomic words.
+     *  One writer thread, one reader thread; a read that catches a write in
+     *  progress fails and is retried by the caller. */
+    class MotifChannel
+    {
+    public:
+        MotifChannel();
+        void write(const PhraseModel::Motif& m, std::uint32_t tagA, std::uint32_t tagB);
+        bool tryRead(PhraseModel::Motif& m, std::uint32_t& tagA, std::uint32_t& tagB,
+                     std::uint32_t& seqRead) const;
+        /** The sequence number; even when no write is in progress. */
+        std::uint32_t sequence() const { return seq.load(std::memory_order_relaxed); }
+    private:
+        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 9;
+        std::atomic<std::uint32_t> seq { 0 };
+        std::array<std::atomic<std::uint32_t>, kWords> words;
+    };
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+    static_assert(std::atomic<int>::is_always_lock_free);
+
+    /** Message → audio: the stored motif. Tags unused. */
+    MotifChannel toAudio;
+    std::uint32_t toAudioSeen = 0;       // audio thread: toAudio sequence of liveMotif
     void publish(const PhraseModel::Motif& m);
-    bool tryReadMotif(PhraseModel::Motif& m);
-    std::uint32_t motifSeqSeen = 0;
+
+    /** Audio → message: the motif heard in the current phrase (evoCur). Tag A
+     *  = the toAudio sequence it was derived from, tag B = its phrase. */
+    MotifChannel heard;
+    void publishHeard();
+    /** Message thread: the heard motif, if it was derived from the stored one. */
+    bool readHeard(PhraseModel::Motif& m, int& phrase) const;
+
+    /** The phrase the motif heard now belongs to (audio thread writes);
+     *  kOriginAtNextEntry while stopped. */
+    std::atomic<int> editOrigin { PhraseModel::kOriginAtNextEntry };
 
     // Message-thread copies
     PhraseModel::Motif stored, undoMotif;
     bool hasUndo = false;
-    int originNow() const;
+    /** A stored motif published as kOriginAtNextEntry gets its origin when it
+     *  is first heard. The stored origin with that applied, and the adoption
+     *  of it before every edit, so Undo republishes a motif as it was heard
+     *  rather than anchoring it anew. */
+    int resolvedStoredOrigin() const;
+    void adoptResolvedOrigin();
 
     // ── Audio-thread state ───────────────────────────────────────────────
     double sampleRate = 44100.0;
