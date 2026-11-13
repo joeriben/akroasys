@@ -974,27 +974,6 @@ public:
     juce::String getDisplayValue() const { return currentValueText(); }
     int getPreferredWidth() const { return getLayoutProfile(false).preferredWidth; }
     int getMinimumWidth() const { return getLayoutProfile(true).minimumWidth; }
-    // Layout-only override for cross-row column alignment. Any code deriving a new
-    // forced width must start from getNaturalLabelWidthForAvailableWidth(), not
-    // from the currently forced width, otherwise resize passes can feed back into
-    // themselves and grow the reserved label column on each relayout.
-    void setForcedLabelWidth(int width) { forcedLabelWidth = juce::jmax(0, width); }
-    void clearForcedLabelWidth() { forcedLabelWidth = -1; }
-    /** Force the value-text column to a fixed pixel width. Use this on rate
-     *  and division rows that swap visibility so the slider track keeps the
-     *  same on-screen position regardless of which formatter is active. */
-    void setForcedValueWidth(int width) { forcedValueWidth = juce::jmax(0, width); }
-    void clearForcedValueWidth() { forcedValueWidth = -1; }
-    int getNaturalLabelWidthForAvailableWidth(int totalWidth) const
-    {
-        const int resolvedHeight = juce::jmax(18, getHeight() > 0 ? getHeight() : 22);
-        return chooseLayout(totalWidth, resolvedHeight, false).labelWidth;
-    }
-    int getLabelWidthForAvailableWidth(int totalWidth) const
-    {
-        const int resolvedHeight = juce::jmax(18, getHeight() > 0 ? getHeight() : 22);
-        return chooseLayout(totalWidth, resolvedHeight).labelWidth;
-    }
 
     void setTrackColor(juce::Colour c)
     {
@@ -1311,8 +1290,6 @@ private:
     float ghostTarget   = NaN_;
     float ghostSmoothed = NaN_;
     float lastGhostPx   = -100.0f;
-    int forcedLabelWidth = -1;
-    int forcedValueWidth = -1;
 
     // getLabelBadgeBounds() result cache. See the function for why these inputs
     // are sufficient. Message-thread-only access — paint() is the sole caller.
@@ -1392,7 +1369,7 @@ private:
         g.drawRect(b, 1.0f);
     }
 
-    SliderLayoutProfile getLayoutProfile(bool compact, bool applyForcedLabelWidth = true) const
+    SliderLayoutProfile getLayoutProfile(bool compact) const
     {
         const int resolvedHeight = juce::jmax(18, getHeight() > 0 ? getHeight() : 22);
         const float maxFs = static_cast<float>(resolvedHeight) * 0.74f;
@@ -1406,10 +1383,6 @@ private:
         profile.valueFontSize = valueFs;
         profile.labelWidth = label.getText().isEmpty() ? 0 : measureTextWidth(label.getText(), labelFs) + labelPadding;
         profile.valueWidth = currentValueText().isEmpty() ? 0 : measureTextWidth(currentValueText(), valueFs) + valuePadding;
-        if (applyForcedLabelWidth && forcedLabelWidth >= 0)
-            profile.labelWidth = forcedLabelWidth;
-        if (applyForcedLabelWidth && forcedValueWidth >= 0)
-            profile.valueWidth = forcedValueWidth;
         // Inline rows overlay label+value on the bar — no side cells reserved.
         if (inlineLabel) { profile.labelWidth = 0; profile.valueWidth = 0; }
         profile.minTrackWidth = compact ? 40 : 64;
@@ -1419,30 +1392,21 @@ private:
         return profile;
     }
 
-    SliderLayoutProfile chooseLayout(int totalWidth, int height, bool applyForcedLabelWidth = true) const
+    SliderLayoutProfile chooseLayout(int totalWidth, int height) const
     {
         juce::ignoreUnused(height);
 
-        auto profile = getLayoutProfile(false, applyForcedLabelWidth);
+        auto profile = getLayoutProfile(false);
         if (totalWidth > 0 && totalWidth < profile.preferredWidth)
-            profile = getLayoutProfile(true, applyForcedLabelWidth);
+            profile = getLayoutProfile(true);
 
         int overflow = profile.minimumWidth - totalWidth;
         if (overflow > 0)
         {
-            // CRITICAL for cross-row column alignment: when label/value widths
-            // are FORCED, the row is part of a coordinated multi-row column.
-            // Empty-label rows (e.g. delay Time/Division with a clock button
-            // overlay) must shrink to the SAME minimum as their non-empty
-            // siblings (e.g. Damp). Otherwise the empty row's label can
-            // shrink to 0 while the non-empty row's label only shrinks to
-            // ~"M"+2 px, drifting the slider track X by the difference.
-            const bool labelForced = applyForcedLabelWidth && forcedLabelWidth >= 0;
-            const bool valueForced = applyForcedLabelWidth && forcedValueWidth >= 0;
-            const int minLabelWidth = (label.getText().isEmpty() && !labelForced)
+            const int minLabelWidth = label.getText().isEmpty()
                 ? 0
                 : measureTextWidth("M", profile.labelFontSize) + 2;
-            const int minValueWidth = (currentValueText().isEmpty() && !valueForced)
+            const int minValueWidth = currentValueText().isEmpty()
                 ? 0
                 : measureTextWidth("00", profile.valueFontSize) + 2;
             const int labelShrink = juce::jmin(overflow / 2 + overflow % 2,
