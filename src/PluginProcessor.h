@@ -790,6 +790,11 @@ public:
      *  no pattern over: from Gen or Phrase, the step grid stays as Init from
      *  Step leaves it. Message thread. */
     void resetParametersToDefaults();
+    /** A legacy XML preset (an APVTS dump, the .t5p format of 2026-03/04)
+     *  replaces the parameter state as a load (SeqTransferHold): the engine
+     *  switch it causes carries no pattern over. Not migrated (see
+     *  PresetFormat::loadFromFile). Message thread. */
+    void importLegacyXmlPreset(const juce::ValueTree& state);
 
     // Sampler/oscillator access for preset import and UI queries
     SamplePlayer& getSampler() { return masterSampler; }

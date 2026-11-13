@@ -20,7 +20,9 @@
 // the block: a load made while silent that leaves the engine as it is keeps
 // the instrument idle (docs/PERFORMANCE_GUIDE.md, the audioIdle gate).
 // Init (resetParametersToDefaults) is such a load: from Gen or Phrase it sets
-// the engine to Step and leaves the step grid as Init from Step leaves it.
+// the engine to Step and leaves the step grid as Init from Step leaves it. So
+// is a legacy XML preset (an APVTS dump of 2026-03/04, which predates
+// seq_engine, so its load puts the engine at Step).
 //
 // Each case runs the same switch awake and in deep idle; the awake run is the
 // control, and `audioIdle` is asserted before an idle switch, so an idle case
@@ -31,6 +33,7 @@
 #include "JuceHeader.h"
 #include "PluginProcessor.h"
 #include "dsp/BlockParams.h"
+#include "presets/PresetFormat.h"
 
 #include <array>
 #include <cstdio>
@@ -209,13 +212,17 @@ bool importedSwitchCarriesNothing(bool idle)
     std::printf("    engine %d, gen steps %d (preset 11, step grid 8)\n", engine, genSteps);
     return engine == SeqEngine::Gen && genSteps == 11;
 }
+enum class Load { Init, LegacyXml };
+
 /** `from` (Gen or Phrase) plays for a moment and stops, so it has a pattern
  *  to carry (the phrase view stays filled after a stop); then a step grid
- *  that differs from that pattern, then Init's parameters
- *  (resetParametersToDefaults), in deep idle or awake. Init sets the engine
- *  to Step. Returns whether the step grid kept its notes, i.e. that switch
- *  carried nothing over; false also when the case could not show a copy. */
-bool initCarriesNothing(int from, bool idle)
+ *  that differs from that pattern, then, in deep idle or awake, a load that
+ *  sets the engine to Step: Init's parameters (resetParametersToDefaults),
+ *  or a legacy XML preset through PresetFormat::loadFromFile, dumped from
+ *  this state without seq_engine. Returns whether the step grid kept its
+ *  notes, i.e. that switch carried nothing over; false also when the case
+ *  could not show a copy or the load failed. */
+bool loadToStepCarriesNothing(int from, Load load, bool idle)
 {
     T5ynthProcessor proc;
     proc.prepareToPlay(kRate, kBlock);
@@ -239,7 +246,7 @@ bool initCarriesNothing(int from, bool idle)
         blocks(proc, kIdleBlocks);
         if (! proc.audioIdle.load())
         {
-            std::printf("    did not reach deep idle before Init\n");
+            std::printf("    did not reach deep idle before the load\n");
             return false;
         }
     }
@@ -273,7 +280,20 @@ bool initCarriesNothing(int from, bool idle)
         return false;
     }
 
-    proc.resetParametersToDefaults();
+    if (load == Load::Init)
+        proc.resetParametersToDefaults();
+    else
+    {
+        auto state = proc.getValueTreeState().copyState();
+        state.removeChild(state.getChildWithProperty("id", PID::seqEngine), nullptr);
+        const juce::TemporaryFile file(".t5p");
+        if (! file.getFile().replaceWithText(state.createXml()->toString())
+            || ! PresetFormat::loadFromFile(file.getFile(), proc).success)
+        {
+            std::printf("    the legacy XML load failed\n");
+            return false;
+        }
+    }
     blocks(proc, 3);
     const int engine = static_cast<int>(
         proc.getValueTreeState().getRawParameterValue(PID::seqEngine)->load());
@@ -341,13 +361,21 @@ int main()
           idleImportStaysIdle());
     const int gen = SeqEngine::Gen;
     check("Init from Gen, awake: the step grid keeps its notes",
-          initCarriesNothing(gen, false));
+          loadToStepCarriesNothing(gen, Load::Init, false));
     check("Init from Gen, deep idle: the step grid keeps its notes",
-          initCarriesNothing(gen, true));
+          loadToStepCarriesNothing(gen, Load::Init, true));
     check("Init from Phrase, awake: the step grid keeps its notes",
-          initCarriesNothing(phrase, false));
+          loadToStepCarriesNothing(phrase, Load::Init, false));
     check("Init from Phrase, deep idle: the step grid keeps its notes",
-          initCarriesNothing(phrase, true));
+          loadToStepCarriesNothing(phrase, Load::Init, true));
+    check("Legacy XML preset from Gen, awake: the step grid keeps its notes",
+          loadToStepCarriesNothing(gen, Load::LegacyXml, false));
+    check("Legacy XML preset from Gen, deep idle: the grid keeps its notes",
+          loadToStepCarriesNothing(gen, Load::LegacyXml, true));
+    check("Legacy XML preset from Phrase, awake: the grid keeps its notes",
+          loadToStepCarriesNothing(phrase, Load::LegacyXml, false));
+    check("Legacy XML preset from Phrase, deep idle: grid keeps its notes",
+          loadToStepCarriesNothing(phrase, Load::LegacyXml, true));
 
     std::printf("failures=%d\n", failures);
     return failures == 0 ? 0 : 1;

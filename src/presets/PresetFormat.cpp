@@ -971,7 +971,9 @@ PresetFormat::LoadResult PresetFormat::loadFromFile(const juce::File& file, T5yn
                     // Migrating here would only do damage; fixing it properly means
                     // remapping the old target indices first, which is unwritten
                     // work for a format nothing has produced since April 2026.
-                    processor.getValueTreeState().replaceState(state);
+                    // Nor does it need the gen_seq_running -> seq_engine fold:
+                    // the Gen sequencer came after the format (dda37ea1).
+                    processor.importLegacyXmlPreset(state);
                     result.presetName = file.getFileNameWithoutExtension();
                     result.success = true;
                 }

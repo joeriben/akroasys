@@ -12150,6 +12150,14 @@ void T5ynthProcessor::resetParametersToDefaults()
             param->setValueNotifyingHost(param->getDefaultValue());
 }
 
+void T5ynthProcessor::importLegacyXmlPreset(const juce::ValueTree& state)
+{
+    // A load like a JSON preset import: the dump predates seq_engine, so the
+    // engine goes to Step, and that switch is not the user's.
+    SeqTransferHold seqTransferHold(*this);
+    parameters.replaceState(state);
+}
+
 bool T5ynthProcessor::importJsonPreset(const juce::String& json)
 {
     // Suppresses the per-param ParamEvent flood every setParam() call below would
