@@ -454,9 +454,20 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         const double f = (q - q0) / dq * static_cast<double>(numSamples);
         return std::clamp(static_cast<int>(f), 0, numSamples - 1);
     };
+    // A locate: the first event at or after q, where an onset within
+    // rounding before q counts as at q, so a locate onto a step plays it.
     auto firstEventFrom = [&](double q) {
         int i = 0;
         while (i < render.count && barStartQ + render.events[static_cast<size_t>(i)].onQ < q - kEpsQ) ++i;
+        return i;
+    };
+    // A re-render in play: the first event not yet emitted once playback has
+    // reached q. The loop below emits every onset before the time it reaches
+    // (t < q1), so the same strict test resumes exactly behind the last onset
+    // played and never repeats one that lies just before q.
+    auto firstEventNotPlayed = [&](double q) {
+        int i = 0;
+        while (i < render.count && barStartQ + render.events[static_cast<size_t>(i)].onQ < q) ++i;
         return i;
     };
 
@@ -493,9 +504,10 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         if (motifDirty) rebuildEvolution(floorDiv(bar, phraseBarsOf(cfg)));
         if (renderDirty)
         {
-            // A change inside the bar: re-render it and play on from here.
+            // A change inside the bar: re-render it and play on from where the
+            // last block stopped (a host may jitter q0 around that by < kJumpQ).
             renderCurrent();
-            nextEvent = firstEventFrom(q0);
+            nextEvent = firstEventNotPlayed(expectedQ);
             releaseUnusedHeld(nextEvent, out, 0);
         }
     }
@@ -557,7 +569,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             keysEverSet = true;
             keysChanged = false;
             renderCurrent();
-            nextEvent = firstEventFrom(t);
+            nextEvent = firstEventNotPlayed(t);
             releaseUnusedHeld(nextEvent, out, offset);
             continue;
         }

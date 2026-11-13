@@ -1006,6 +1006,44 @@ int main(int argc, char** argv)
                   + std::to_string(glidesOff) + " without)");
     }
 
+    std::printf("\n== 15. A change in play never repeats an onset the last block played\n");
+    {
+        // A block that starts a hair past an onset: the block before played
+        // it, and a re-render (here Gate, which moves no onset) must resume
+        // behind it. Host positions are arbitrary doubles; so is an internal
+        // clock that sums block lengths.
+        const double dq = kBlock * kBpm / (60.0 * kSr);
+        int dup = 0, runs = 0, errs = 0;
+        for (Part part : { Part::Bass, Part::Lead, Part::Stab })
+            for (double past : { 1.0e-12, 1.0e-10, 5.0e-10 })
+                for (int bar : { 8, 9, 13 })
+                {
+                    Config c = base();
+                    c.part = part;
+                    c.rotation = 0;   // step 0 is a pulse: an onset on every bar start
+                    Config g = c;
+                    g.gate = 0.5f;
+                    const double at = bar * B;
+                    const double startQ = at - 40 * dq + past;
+                    bool changed = false;
+                    const Run ref = play(c, startQ, at + 2 * B);
+                    const Run k = play(c, startQ, at + 2 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                        if (!changed && q > at) { s.setConfig(g); changed = true; }
+                    });
+                    const auto a = onsInBars(ref, B, bar, bar + 2, at), b = onsInBars(k, B, bar, bar + 2, at);
+                    bool downbeat = false;
+                    for (const auto& p : a) downbeat = downbeat || (p.ev.strandId == -1 && std::abs(p.q - at) < 2 * kOneSampleQ);
+                    std::string why;
+                    ++runs;
+                    if (!downbeat || !sameOns(a, b, why)) ++dup;
+                    errs += (part == Part::Stab ? 0 : k.polyMain) + k.sounding + k.orphanOffs + k.badGlides;
+                }
+        check(dup == 0, "a re-render a hair past an onset plays the same onsets (" + std::to_string(dup) + " of "
+                            + std::to_string(runs) + " differ or lack the downbeat)");
+        check(errs == 0, "a re-render a hair past an onset: no doubled, hanging or orphan note ("
+                             + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
