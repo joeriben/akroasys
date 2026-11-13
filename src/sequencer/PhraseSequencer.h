@@ -86,8 +86,10 @@ public:
      *  running or stopped. Does nothing while the stored motif has not been
      *  heard yet: it is then itself what would be kept. */
     void keep();
-    /** Stores the motif analysed from step-sequencer steps; origin as dice. */
-    void fromSteps(const PhraseModel::StepInput* steps, int count, const PhraseModel::Config& cfg);
+    /** Stores the motif analysed from step-sequencer steps; origin as dice.
+     *  Returns false and changes nothing when no step in the bars the
+     *  analysis reads is enabled (motifFromSteps: at most two bars). */
+    bool fromSteps(const PhraseModel::StepInput* steps, int count, const PhraseModel::Config& cfg);
     /** One level: returns to the motif before the last dice / keep / fromSteps. */
     bool undo();
     bool canUndo() const { return hasUndo.load(std::memory_order_relaxed); }

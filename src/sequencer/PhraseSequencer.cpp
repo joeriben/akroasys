@@ -819,14 +819,17 @@ void T5ynthPhraseSequencer::keep()
     publish(stored);
 }
 
-void T5ynthPhraseSequencer::fromSteps(const StepInput* steps, int count, const Config& c)
+bool T5ynthPhraseSequencer::fromSteps(const StepInput* steps, int count, const Config& c)
 {
     const std::lock_guard<std::mutex> lock(editMutex);
+    const Motif m = motifFromSteps(steps, count, c, stored.seed, editOrigin.load(std::memory_order_relaxed));
+    if (m.pulses == 0) return false;   // no step in the analysed bars
     adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo.store(true, std::memory_order_relaxed);
-    stored = motifFromSteps(steps, count, c, stored.seed, editOrigin.load(std::memory_order_relaxed));
+    stored = m;
     publish(stored);
+    return true;
 }
 
 bool T5ynthPhraseSequencer::undo()

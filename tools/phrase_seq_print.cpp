@@ -922,6 +922,26 @@ int main(int argc, char** argv)
         check(seq.getStoredMotif().seed == 4242, "keep before the motif was heard: the stored motif stays");
         seq.undo();
         check(seq.getStoredMotif().seed == m0.seed, "keep before the motif was heard: adds no undo level");
+
+        // From Step reads at most two bars of the grid. Steps enabled only
+        // beyond them give it nothing to analyse: it changes nothing, adds
+        // no undo level, and says so.
+        T5ynthPhraseSequencer fs;
+        fs.dice(c, 555);
+        fs.undo();                                   // back to the initial motif, Undo now redoes the dice
+        fs.undo();                                   // the diced motif again
+        const Motif before = fs.getStoredMotif();
+        std::array<StepInput, 64> steps {};
+        for (int i = 0; i < 64; ++i) steps[static_cast<size_t>(i)] = { 57, i >= 2 * c.stepsPerBar, false, 0.8f };
+        check(!fs.fromSteps(steps.data(), 64, c), "from step, no step in the analysed bars: refused");
+        check(fs.getStoredMotif().seed == before.seed && fs.getStoredMotif().len == before.len
+                  && fs.getStoredMotif().pulses == before.pulses,
+              "from step, no step in the analysed bars: the stored motif stays");
+        fs.undo();
+        check(fs.getStoredMotif().seed == m0.seed, "from step, no step in the analysed bars: adds no undo level");
+        steps[0].enabled = true;
+        check(fs.fromSteps(steps.data(), 64, c) && fs.getStoredMotif().pulses == 1,
+              "from step, one step in the analysed bars: stored with one pulse");
     }
 
     std::printf("\n== 12. A held slide note meets a Stab chord (Part switched mid-line)\n");
