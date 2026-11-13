@@ -648,8 +648,9 @@ void T5ynthPhraseSequencer::publish(const Motif& m)
 bool T5ynthPhraseSequencer::readHeard(Motif& m, int& phrase) const
 {
     std::uint32_t source = 0, ph = 0, unusedSeq = 0;
-    // The audio thread writes this channel at most once per block, briefly:
-    // a read that catches it mid-write succeeds on a retry.
+    // The audio thread writes this channel only around a refit or a bar
+    // crossing, a few words at a time: a read that catches it mid-write
+    // succeeds on a retry.
     while (!heard.tryRead(m, source, ph, unusedSeq))
         std::this_thread::yield();
     if (source != toAudio.sequence()) return false;   // from an earlier stored motif
@@ -701,9 +702,14 @@ void T5ynthPhraseSequencer::keep()
     int phrase = 0;
     if (!readHeard(m, phrase)) return;
     // Running: the heard motif anchored at its own phrase plays on exactly as
-    // before, even when the next phrase has begun meanwhile. Stopped: it
-    // starts from the phrase where playback resumes.
-    m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry ? kOriginAtNextEntry : phrase;
+    // before, even when the next phrase has begun meanwhile. m.origin is the
+    // stored motif's origin as the audio thread resolved it (fitMotif carries
+    // it); a phrase before it plays the motif unevolved, so there the origin
+    // stays, or the phrases up to it would start evolving. Stopped: it starts
+    // from the phrase where playback resumes.
+    m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry
+                   ? kOriginAtNextEntry
+                   : std::max(phrase, m.origin);
     adoptResolvedOrigin();
     undoMotif = stored;
     hasUndo = true;

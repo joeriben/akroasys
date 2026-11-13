@@ -728,6 +728,17 @@ int main(int argc, char** argv)
                  s.setStoredMotif(heard5); } } })),
              keptEvoOff, 24, 28, -1e9, "keep, then Evolve 0 from the next phrase: the kept motif plays on");
 
+        // Keep in a phrase before the stored motif's origin (a Dice further on,
+        // then a rewind): the motif plays unevolved there, and Keep must not
+        // pull the origin back, or the phrases up to it would start evolving.
+        const Motif at4 = generateMotif(777, 4, c);
+        const Act load4 = [at4](T5ynthPhraseSequencer& s) { s.setStoredMotif(at4); };
+        const double earlyQ = 9 * B + 1.0;   // phrase 2
+        same(play(c, 0.0, end, 4, 4, {}, 0, acts({ { 0.0, load4 } })),
+             play(c, 0.0, end, 4, 4, {}, 0, acts({ { 0.0, load4 }, { earlyQ, keepSeen } })),
+             9, 28, earlyQ, "keep before the origin: every phrase plays on unchanged");
+        check(kept.origin == 4, "keep before the origin: the origin stays 4, got " + std::to_string(kept.origin));
+
         // Dice while stopped, playback resumes at bar 20 (phrase 5): the new
         // motif is heard as itself there, so Evolve cannot have touched it yet.
         Motif resolved;
