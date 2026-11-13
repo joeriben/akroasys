@@ -122,7 +122,7 @@ private:
         /** The sequence number; even when no write is in progress. */
         std::uint32_t sequence() const { return seq.load(std::memory_order_relaxed); }
     private:
-        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 12;
+        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 13;
         std::atomic<std::uint32_t> seq { 0 };
         std::array<std::atomic<std::uint32_t>, kWords> words;
     };
@@ -140,10 +140,12 @@ private:
      *  was derived from, tag B = its phrase. */
     MotifChannel heard;
     void publishHeard();
-    /** The entry the current phrase's first bar renders with; updated when
-     *  that bar is (re)rendered, so it is the one heard. */
+    /** The entry the current phrase's first bar renders with, and the frame
+     *  it renders in; updated when that bar is (re)rendered, so it is the one
+     *  heard. */
     bool heardEntryKept = false;
     int heardEntryNote = -1, heardEntryPrevNote = -1;
+    std::uint32_t heardEntryFrame = 0;
     void refreshHeardEntry();
     /** The heard motif, if it was derived from the stored motif of toAudio
      *  sequence `storedSeq`. */

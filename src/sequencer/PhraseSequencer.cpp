@@ -327,10 +327,12 @@ void T5ynthPhraseSequencer::advanceEvolution(int phrase)
 
 void T5ynthPhraseSequencer::refreshHeardEntry()
 {
+    const Config L = latchedConfig();
     heardEntryKept = cfg.harm != Harm::Keys;
     heardEntryNote = heardEntryPrevNote = -1;
+    heardEntryFrame = entryFrameOf(L);
     if (heardEntryKept)
-        entryNotes(latchedConfig(), evoPrev, evoCur, evoPhrase * phraseBarsOf(cfg), barLenQ, scratch,
+        entryNotes(L, evoPrev, evoCur, evoPhrase * phraseBarsOf(cfg), barLenQ, scratch,
                    heardEntryNote, heardEntryPrevNote);
 }
 
@@ -340,6 +342,7 @@ void T5ynthPhraseSequencer::publishHeard()
     h.entryKept = heardEntryKept;
     h.entryNote = heardEntryNote;
     h.entryPrevNote = heardEntryPrevNote;
+    h.entryFrame = heardEntryFrame;
     heard.write(h, toAudioSeen, static_cast<std::uint32_t>(evoPhrase));
 }
 
@@ -385,12 +388,15 @@ void T5ynthPhraseSequencer::renderCurrent()
         in.prevPrevNote = epp;
         // The phrase's first bar is heard entering from these notes: Keep
         // stores them, so the kept motif enters its origin phrase the same way.
+        const std::uint32_t frame = entryFrameOf(L);
         if (floorMod(bar, N) == 0
-            && (!heardEntryKept || ep != heardEntryNote || epp != heardEntryPrevNote))
+            && (!heardEntryKept || ep != heardEntryNote || epp != heardEntryPrevNote
+                || frame != heardEntryFrame))
         {
             heardEntryKept = true;
             heardEntryNote = ep;
             heardEntryPrevNote = epp;
+            heardEntryFrame = frame;
             publishHeard();
         }
     }
@@ -673,6 +679,7 @@ void T5ynthPhraseSequencer::MotifChannel::write(const Motif& m, std::uint32_t ta
     put(9, m.entryKept ? 1u : 0u);
     put(10, static_cast<std::uint32_t>(m.entryNote));
     put(11, static_cast<std::uint32_t>(m.entryPrevNote));
+    put(12, m.entryFrame);
     seq.store(s + 2, std::memory_order_release);
 }
 
@@ -701,6 +708,7 @@ bool T5ynthPhraseSequencer::MotifChannel::tryRead(Motif& m, std::uint32_t& tagA,
     m.entryKept     = get(9) != 0;
     m.entryNote     = std::clamp(static_cast<int>(get(10)), -1, 127);
     m.entryPrevNote = std::clamp(static_cast<int>(get(11)), -1, 127);
+    m.entryFrame    = get(12);
     seqRead = s1;
     return true;
 }
@@ -802,6 +810,7 @@ void T5ynthPhraseSequencer::keep()
         m.entryKept = stored.entryKept;
         m.entryNote = stored.entryNote;
         m.entryPrevNote = stored.entryPrevNote;
+        m.entryFrame = stored.entryFrame;
     }
     adoptResolvedOrigin();
     undoMotif = stored;

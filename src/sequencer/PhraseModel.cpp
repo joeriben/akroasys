@@ -757,6 +757,7 @@ Motif fitMotif(const Motif& stored, const Config& cfg)
     m.entryKept = stored.entryKept;
     m.entryNote = stored.entryNote;
     m.entryPrevNote = stored.entryPrevNote;
+    m.entryFrame = stored.entryFrame;
     setRhythm(m, sh.len, sh.spb, sh.pulses, sh.rotation);
     assignFunctions(m, cfg, &stored);
     computeAccents(m);
@@ -1476,11 +1477,33 @@ void renderBar(const RenderInput& in, BarRender& out)
     out.lastVoicingCount = nv;
 }
 
+std::uint32_t entryFrameOf(const Config& cfg)
+{
+    // Every field in its valid range fits its bits, so the packing is exact.
+    static_assert(ScaleQuantizer::COUNT <= 32, "scale type needs 5 bits");
+    std::uint32_t w = 0;
+    int shift = 0;
+    auto put = [&](int v, int bits) {
+        w |= static_cast<std::uint32_t>(std::clamp(v, 0, (1 << bits) - 1)) << shift;
+        shift += bits;
+    };
+    put(static_cast<int>(cfg.part), 2);
+    put(static_cast<int>(cfg.harm), 2);
+    for (int d : cfg.chordDegrees) put(d, 3);   // 0 = empty, 1..7
+    put(cfg.chordRateBars, 3);                  // 1 | 2 | 4
+    put(cfg.ext7 ? 1 : 0, 1);
+    put(phraseBarsOf(cfg) / 8, 2);              // 4 | 8 | 16
+    put(cfg.scaleType, 5);
+    put(cfg.scaleRoot, 4);
+    return w;
+}
+
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp)
 {
     const int N = phraseBarsOf(cfg);
-    if (motif.entryKept && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin)
+    if (motif.entryKept && motif.entryFrame == entryFrameOf(cfg)
+        && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin)
     {
         p = motif.entryNote;
         pp = motif.entryPrevNote;

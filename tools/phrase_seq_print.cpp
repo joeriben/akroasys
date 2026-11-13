@@ -802,7 +802,7 @@ int main(int argc, char** argv)
                   "(else the checks below prove nothing)");
 
             struct Tally { int differ = 0; std::string why; };
-            Tally plain, gate, redo, spot, locate;
+            Tally plain, gate, redo, spot, locate, frameOff, frameForced;
             int runs = 0;
             auto tally = [&](Tally& t, const Run& a, const Run& b, int from, int to, double fromQ) {
                 std::string why;
@@ -844,6 +844,32 @@ int main(int argc, char** argv)
                               play(hc, 8 * B, 12 * B, 4, 4, {}, 0, acts({ { 0.0, [keptHere](T5ynthPhraseSequencer& s) {
                                        s.setStoredMotif(keptHere); } } })),
                               8, 12, 8 * B);
+
+                        // The entry is absolute notes heard in hc's frame. In
+                        // another key, Part, chord loop or Harm the origin
+                        // phrase enters from the phrase before, exactly as
+                        // the same motif without a kept entry does.
+                        Motif noEntry = keptHere;
+                        noEntry.entryKept = false;
+                        Config key = hc, part = hc, loop = hc, harm = hc;
+                        key.scaleRoot = 0;
+                        part.part = Part::Bass;
+                        loop.chordDegrees = { 1, 4, 5, 1 };
+                        harm.harm = h == Harm::Pedal ? Harm::Chords : Harm::Pedal;
+                        for (const Config& vc : { key, part, loop, harm })
+                        {
+                            auto from = [&](const Motif& m) {
+                                return play(vc, 8 * B, 12 * B, 4, 4, {}, 0,
+                                            acts({ { 0.0, [m](T5ynthPhraseSequencer& s) { s.setStoredMotif(m); } } }));
+                            };
+                            const Run without = from(noEntry);
+                            tally(frameOff, without, from(keptHere), 8, 12, 8 * B);
+                            // The same entry claimed for vc's frame does apply
+                            // there: else the check above proves nothing.
+                            Motif forced = keptHere;
+                            forced.entryFrame = entryFrameOf(vc);
+                            tally(frameForced, without, from(forced), 8, 12, 8 * B);
+                        }
                     }
                 }
             auto report = [&](const Tally& t, const std::string& what) {
@@ -855,6 +881,13 @@ int main(int argc, char** argv)
             report(redo, "then Undo, Redo: unchanged");
             report(spot, "stop, keep, start on the spot: as a stop and start");
             report(locate, "a locate back into the phrase plays it as heard");
+            check(frameOff.differ == 0,
+                  "keep in a phrase's first bar, then another key / Part / chord loop / Harm: it enters as without "
+                  "the kept entry (" + std::to_string(frameOff.differ) + " of " + std::to_string(4 * runs)
+                      + " differ) " + frameOff.why);
+            check(frameForced.differ > 0,
+                  "keep in a phrase's first bar: the kept entry, claimed for the changed frame, would change it ("
+                      + std::to_string(frameForced.differ) + " of " + std::to_string(4 * runs) + " differ)");
         }
 
         // Dice while stopped, playback resumes at bar 20 (phrase 5): the new

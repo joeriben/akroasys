@@ -78,10 +78,14 @@ struct Motif
      *  phrase, kept with the motif (Keep). A phrase before the origin plays
      *  the motif itself, so the origin phrase's first bar would otherwise
      *  enter from the motif's own last bar rather than from what preceded it
-     *  when it was heard. Off: it enters from the phrase before (entryNotes). */
+     *  when it was heard. Off: it enters from the phrase before (entryNotes).
+     *  The notes are absolute, so they hold only in the frame they were heard
+     *  in (entryFrame); in another one the phrase before leads in, as for a
+     *  motif without a kept entry. */
     bool          entryKept     = false;
     int           entryNote     = -1;   // −1: no note, as entryNotes reports it
     int           entryPrevNote = -1;
+    std::uint32_t entryFrame    = 0;    // entryFrameOf() of the config they were heard in
 
     int numSteps() const { return len * stepsPerBar; }
 };
@@ -310,10 +314,17 @@ struct RenderInput
  *  bar and the scheduler plays the events from the current position on. */
 void renderBar(const RenderInput& in, BarRender& out);
 
+/** The frame a kept entry belongs to: the fields that decide which notes the
+ *  main line can sound and where phrases begin — Part, Harm, the chord loop,
+ *  chord rate, 7ths, scale and phrase length. An exact packing, not a hash:
+ *  two configs the processor can build share a word iff these fields agree. */
+std::uint32_t entryFrameOf(const Config& cfg);
+
 /** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
  *  of bar − 1 rendered on its own. Keeps continuous play and a locate equal.
  *  `motif` is the motif of bar's phrase: the first bar of its origin phrase
- *  enters from the notes kept with it when it has them (Motif::entryKept). */
+ *  enters from the notes kept with it when it has them (Motif::entryKept) and
+ *  `cfg` is the frame they were heard in (Motif::entryFrame). */
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp);
 
