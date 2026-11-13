@@ -79,6 +79,13 @@ unbroken.
   A preset without an oscillator sound and a T5 oscillator snapshot leave it
   alone.
 
+- **An instrument that lands while the T5 oscillator is shown no longer clears
+  a neural preset's name.** It is only kept for when you switch back to the
+  oscillator, so the preset has not changed, yet Save stopped offering to
+  replace the loaded file. The name still goes when the oscillator is shown as
+  the instrument lands, when the instrument goes into the oscillator cache, or
+  when the loaded preset has an oscillator sound of its own.
+
 - **An oscillator snapshot holding only a prompt now waits while an instrument
   is being written,** like one holding a sound already did. Recalled during a
   Re-Prompt rewrite, the rewrite of the previous prompt replaced the recalled
