@@ -260,11 +260,13 @@ def _render_into(d, body, dur, freq, glide, preroll):
     # system Csound at all it does not render. `_csound_child_env` sets
     # OPCODE6DIR64 for the CHILD only, from the same vendored payload
     # CsoundEngine.cpp points the engine at. BJ 2026-08-05: "wir arbeiten nicht
-    # mit der homebrew-installation".
+    # mit der homebrew-installation". Only for a `csound` that runs as that
+    # payload's architecture: an x86_64 one (Rosetta Homebrew on Apple Silicon)
+    # cannot load its modules, gets none, and renders with its own install's.
     r = subprocess.run(["csound", "-W", "--format=float", "-o", str(d / "o.wav"),
                         "-m0", "-d", str(d / "x.csd")],
                        capture_output=True, text=True, timeout=120,
-                       env=W._csound_child_env())
+                       env=W._csound_child_env("csound"))
     err = re.sub(r"\x1b\[[0-9;]*m", "", r.stderr)
     if r.returncode != 0:
         bad = " | ".join(l for l in err.splitlines() if "error" in l.lower())
@@ -428,7 +430,7 @@ def _clip_transfer():
         (d / "c.csd").write_text(csd)
         r = subprocess.run(["csound", "-n", "-d", str(d / "c.csd")],
                            capture_output=True, text=True, timeout=60,
-                           env=W._csound_child_env())
+                           env=W._csound_child_env("csound"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
     rows = []

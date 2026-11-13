@@ -30,6 +30,7 @@ import ctypes.util
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -2280,6 +2281,64 @@ def _csound_binary():
     return None
 
 
+# Mach-O cputype values (mach/machine.h): CPU_ARCH_ABI64 | CPU_TYPE_X86, and
+# CPU_ARCH_ABI64 | CPU_TYPE_ARM. arm64e shares arm64's cputype.
+_MACHO_CPU = {0x01000007: "x86_64", 0x0100000C: "arm64"}
+
+
+def _macho_archs(path):
+    """The architectures a Mach-O file carries, as a frozenset of "arm64" /
+    "x86_64", or None when the file is not Mach-O (a script, a Windows DLL, an
+    ELF library, nothing at all). Read from the header (mach-o/loader.h,
+    mach-o/fat.h) rather than from `lipo`, which is an Xcode tool and not on
+    every Mac."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            if len(head) < 8:
+                return None
+            magic = int.from_bytes(head[:4], "big")
+            if magic in (0xCAFEBABE, 0xCAFEBABF):       # fat: FAT_MAGIC, FAT_MAGIC_64
+                entry = 20 if magic == 0xCAFEBABE else 32
+                count = int.from_bytes(head[4:8], "big")
+                # A real universal binary has a handful of slices. 0xCAFEBABE
+                # is also a Java class file's magic, whose next word is a
+                # version, and a corrupt file can claim up to 2**32 entries,
+                # which read() would try to allocate whole.
+                if count > 32:
+                    return None
+                table = fh.read(count * entry)
+                cpus = [int.from_bytes(table[i:i + 4], "big")
+                        for i in range(0, len(table) - entry + 1, entry)]
+            elif magic in (0xCFFAEDFE, 0xCEFAEDFE):     # thin: MH_MAGIC_64, MH_MAGIC
+                cpus = [int.from_bytes(head[4:8], "little")]
+            else:
+                return None
+    except OSError:
+        return None
+    return frozenset(_MACHO_CPU[c] for c in cpus if c in _MACHO_CPU)
+
+
+def _spawned_arch(executable):
+    """The architecture `executable` runs as when this process starts it, or
+    None when that cannot be told (not macOS, not found, not Mach-O).
+
+    A thin binary runs as its one slice; on Apple Silicon an x86_64 one runs
+    under Rosetta. A universal binary runs as THIS process does: a child started
+    by a translated process stays translated, universal or not (Apple Developer
+    Forums thread 701913), and a native process starts the native slice.
+    platform.machine() is that architecture: it reports x86_64 under Rosetta."""
+    if sys.platform != "darwin" or not executable:
+        return None
+    archs = _macho_archs(shutil.which(executable) or executable)
+    if not archs:
+        return None
+    if len(archs) == 1:
+        return next(iter(archs))
+    here = platform.machine()
+    return here if here in archs else None
+
+
 def _bundled_csound_libs():
     """The Csound the HOST ships, if the backend runs from inside one.
 
@@ -2318,7 +2377,17 @@ def _bundled_csound_libs():
     libs/libcsound64.so.6.0 + libs/Opcodes64 is a host payload, not a vendored
     one, and reaches the backend only via T5YNTH_CSOUND_LIB — which
     PipeInference.cpp exports on macOS and Linux from the library the engine
-    actually mapped (dladdr on csoundCreate)."""
+    actually mapped (dladdr on csoundCreate).
+
+    The ARCHITECTURE is not decided here, because one candidate serves consumers
+    of different architectures: this process through ctypes, a CLI child, the
+    --lro-render child. The macOS payload is arm64 only (CMakeLists.txt gates it
+    so), but its rawwaves are data any of them can read. So each consumer checks
+    the part that is code: ctypes refuses a library of the wrong architecture,
+    and _csound_opcodedir() hands a child only an Opcodes64 that loads into the
+    architecture that child runs as (_spawned_arch). An x86_64 csound pointed at
+    the arm64 Opcodes64 loads none of it and runs on built-in opcodes, silently —
+    the Fedora measurement above, on an Intel Mac or under Rosetta."""
     here = Path(getattr(sys, "_MEIPASS", "") or os.path.abspath(sys.argv[0]))
     ancestors = [here] + list(here.parents)
     for parent in ancestors:
@@ -2391,19 +2460,31 @@ def _rawwavedir_beside(lib_path):
     return None
 
 
-def _csound_opcodedir():
-    """The bundled opcode dir the CLI must be pointed at, or None. Derived from
+def _csound_opcodedir(arch):
+    """The bundled opcode dir a child must be pointed at, or None. Derived from
     the library the host handed us (T5YNTH_CSOUND_LIB) even when the check itself
-    runs through the CLI: the CLI and the library must see one vocabulary."""
+    runs through the CLI: the CLI and the library must see one vocabulary.
+
+    `arch` is the architecture the child runs as (_spawned_arch), None when it
+    cannot be told. A library whose header shows it lacks that architecture is
+    passed over, and its Opcodes64 with it: the modules beside it are built with
+    it, and a child of another architecture loads none of them. Where either side
+    cannot be read the candidate stands, as it did before the check existed."""
     for path in [os.environ.get("T5YNTH_CSOUND_LIB")] + list(_bundled_csound_libs()):
         found = _opcodedir_beside(path)
-        if found:
+        if not found:
+            continue
+        archs = _macho_archs(path) if arch else None
+        if archs is None or arch in archs:
             return found
     return None
 
 
 def _csound_rawwavedir():
-    """The bundled STK rawwave dir, or None. Same search order as the opcode dir."""
+    """The bundled STK rawwave dir, or None. The opcode dir's candidates in the
+    same order, without its architecture check: the rawwaves are data files a
+    child of any architecture reads, so this and the opcode dir can come from
+    different candidates."""
     for path in [os.environ.get("T5YNTH_CSOUND_LIB")] + list(_bundled_csound_libs()):
         found = _rawwavedir_beside(path)
         if found:
@@ -2411,15 +2492,21 @@ def _csound_rawwavedir():
     return None
 
 
-def _csound_child_env():
-    """Environment for a Csound CLI child. OPCODE6DIR64 is set for the CHILD only
-    — never in this process, where it would also redirect any other Csound that
-    happens to be loaded here. RAWWAVE_PATH rides along for the same reason it is
-    set at all: without it a child renders an orchestra with 27 fewer opcodes than
-    the plugin has, which is the divergence between gate and engine this whole
-    lookup exists to close."""
+def _csound_child_env(executable):
+    """Environment for a Csound child that runs `executable` (the CLI, or this
+    app re-run with --lro-render: argv[0] of the command). OPCODE6DIR64 is set
+    for the CHILD only — never in this process, where it would also redirect any
+    other Csound that happens to be loaded here — and not to modules of an
+    architecture the child does not run as. Where that architecture cannot be
+    told (a wrapper script, a file that is not Mach-O, any platform but macOS)
+    the first candidate is used unchecked, as before the check existed: a
+    script that re-launches csound under another architecture still gets the
+    wrong modules. RAWWAVE_PATH rides along for the same reason
+    it is set at all: without it a child renders an orchestra with 27 fewer
+    opcodes than the plugin has, which is the divergence between gate and engine
+    this whole lookup exists to close. It is data, so it goes to every child."""
     env = dict(os.environ)
-    opcodedir = _csound_opcodedir()
+    opcodedir = _csound_opcodedir(_spawned_arch(executable))
     if opcodedir:
         env["OPCODE6DIR64"] = opcodedir
     rawwaves = _csound_rawwavedir()
@@ -2934,7 +3021,7 @@ def perform_check(orchestra):
         # -n: render nothing to a device. -d: no graphs. -m0: no per-note stats.
         r = subprocess.run(command + ["-n", "-d", "-m0", path],
                            capture_output=True, timeout=90,
-                           env=_csound_child_env())
+                           env=_csound_child_env(command[0]))
         if r.returncode == 0:
             return True, ""
         if r.returncode in _RENDER_ENV_FAULT:
@@ -3193,7 +3280,7 @@ def _knob_render(command, orchestra, overrides, point):
         # both children get the identical argument list.
         r = subprocess.run(command + ["-d", "-m0", "-h", "-f", f"-o{raw_path}",
                             csd_path], capture_output=True,
-                           timeout=90, env=_csound_child_env())
+                           timeout=90, env=_csound_child_env(command[0]))
         if r.returncode != 0:
             return None
         return _fingerprint(raw_path)
@@ -3384,7 +3471,7 @@ def _check_via_cli(binary, csd, orchestra):
             fh.write(csd)
         r = subprocess.run([binary, "--syntax-check-only", path],
                            capture_output=True, timeout=90,
-                           env=_csound_child_env())
+                           env=_csound_child_env(binary))
         if r.returncode == 0:
             return True, ""
         return False, _explain(_decode(r.stderr) + _decode(r.stdout), orchestra)
