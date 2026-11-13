@@ -305,9 +305,9 @@ void T5ynthPhraseSequencer::rebuildEvolution(int phrase)
     if (phrase > fitted.origin) evolveOnce(evoCur, L, phrase);
     evoNext = evoCur;
     if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
+    if (leadsInto(phrase)) evoPrev = fittedLeadIn;
     evoPhrase = phrase;
     evoValid = true;
-    refreshHeardEntry();
     publishHeard();
 }
 
@@ -316,42 +316,25 @@ void T5ynthPhraseSequencer::advanceEvolution(int phrase)
     if (evoValid && phrase == evoPhrase) return;
     if (!evoValid || phrase != evoPhrase + 1) { rebuildEvolution(phrase); return; }
     const Config L = latchedConfig();
-    evoPrev = evoCur;
+    evoPrev = leadsInto(phrase) ? fittedLeadIn : evoCur;
     evoCur = evoNext;
     evoNext = evoCur;
     if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
     evoPhrase = phrase;
-    refreshHeardEntry();
     publishHeard();
 }
 
-bool T5ynthPhraseSequencer::refreshHeardEntry()
+bool T5ynthPhraseSequencer::leadsInto(int phrase) const
 {
-    const Config L = latchedConfig();
-    const int entryBar = evoPhrase * phraseBarsOf(cfg);
-    const bool kept = cfg.harm != Harm::Keys;
-    int note = -1, prevNote = -1;
-    if (kept)
-        entryNotes(L, evoPrev, evoCur, entryBar, barLenQ, scratch, note, prevNote);
-    const std::uint32_t frame = entryFrameOf(L, entryBar);
-    if (kept == heardEntryKept && note == heardEntryNote && prevNote == heardEntryPrevNote
-        && frame == heardEntryFrame)
-        return false;
-    heardEntryKept = kept;
-    heardEntryNote = note;
-    heardEntryPrevNote = prevNote;
-    heardEntryFrame = frame;
-    return true;
+    return fitted.leadInKept && fitted.origin == phrase && fitted.leadInPhrase == phrase;
 }
 
 void T5ynthPhraseSequencer::publishHeard()
 {
     Motif h = evoCur;
-    h.entryKept = heardEntryKept;
-    h.entryNote = heardEntryNote;
-    h.entryPrevNote = heardEntryPrevNote;
-    h.entryFrame = heardEntryFrame;
-    h.entryPhrase = evoPhrase;
+    h.leadInKept = true;
+    h.leadIn = evoPrev;
+    h.leadInPhrase = evoPhrase;
     heard.write(h, toAudioSeen, static_cast<std::uint32_t>(evoPhrase));
 }
 
@@ -396,12 +379,6 @@ void T5ynthPhraseSequencer::renderCurrent()
         in.prevNote = ep;
         in.prevPrevNote = epp;
     }
-    // The heard channel carries the notes the phrase's first bar enters from
-    // in the config now: Keep stores them, so the kept motif enters its
-    // origin phrase as the phrase enters without it. Recomputed on every
-    // render, as a key change already did through rebuildEvolution, so a
-    // Harm, chord-loop or Variation change inside the phrase moves them too.
-    if (refreshHeardEntry()) publishHeard();
     in.slideIn = heldNote[static_cast<size_t>(slotOf(-1))] >= 0;
     renderBar(in, render);
     publishView();
@@ -520,6 +497,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
     if (motifDirty)
     {
         fitted = fitMotif(liveMotif, cfg);
+        if (fitted.leadInKept) fittedLeadIn = fitMotif(leadInMotif(fitted), cfg);
         evoValid = false;
     }
 
@@ -666,23 +644,28 @@ void T5ynthPhraseSequencer::MotifChannel::write(const Motif& m, std::uint32_t ta
     const std::uint32_t s = seq.load(std::memory_order_relaxed);
     seq.store(s + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    for (int i = 0; i < kMaxMotifSteps; ++i)
-        words[static_cast<size_t>(i)].store(packSlot(m.slots[static_cast<size_t>(i)]), std::memory_order_relaxed);
-    auto put = [&](int i, std::uint32_t v) { words[static_cast<size_t>(kMaxMotifSteps + i)].store(v, std::memory_order_relaxed); };
-    put(0, static_cast<std::uint32_t>(m.len));
-    put(1, static_cast<std::uint32_t>(m.stepsPerBar));
-    put(2, static_cast<std::uint32_t>(m.pulses));
-    put(3, static_cast<std::uint32_t>(m.rotation));
-    put(4, static_cast<std::uint32_t>(m.part));
-    put(5, m.seed);
-    put(6, static_cast<std::uint32_t>(m.origin));
-    put(7, tagA);
-    put(8, tagB);
-    put(9, m.entryKept ? 1u : 0u);
-    put(10, static_cast<std::uint32_t>(m.entryNote));
-    put(11, static_cast<std::uint32_t>(m.entryPrevNote));
-    put(12, m.entryFrame);
-    put(13, static_cast<std::uint32_t>(m.entryPhrase));
+    // Words: the motif's slots, the lead-in's slots, then the header —
+    // 0..5 the motif's shape, 6..11 the lead-in's, 12 origin, 13 lead-in
+    // kept, 14 lead-in phrase, 15..16 the tags.
+    auto put = [&](int i, std::uint32_t v) { words[static_cast<size_t>(i)].store(v, std::memory_order_relaxed); };
+    auto putBody = [&](const MotifBody& b, int slotsAt, int shapeAt) {
+        for (int i = 0; i < kMaxMotifSteps; ++i) put(slotsAt + i, packSlot(b.slots[static_cast<size_t>(i)]));
+        put(shapeAt + 0, static_cast<std::uint32_t>(b.len));
+        put(shapeAt + 1, static_cast<std::uint32_t>(b.stepsPerBar));
+        put(shapeAt + 2, static_cast<std::uint32_t>(b.pulses));
+        put(shapeAt + 3, static_cast<std::uint32_t>(b.rotation));
+        put(shapeAt + 4, static_cast<std::uint32_t>(b.part));
+        put(shapeAt + 5, b.seed);
+    };
+    constexpr int H = 2 * kMaxMotifSteps;
+    putBody(m, 0, H);
+    putBody(m.leadIn, kMaxMotifSteps, H + 6);
+    put(H + 12, static_cast<std::uint32_t>(m.origin));
+    put(H + 13, m.leadInKept ? 1u : 0u);
+    put(H + 14, static_cast<std::uint32_t>(m.leadInPhrase));
+    put(H + 15, tagA);
+    put(H + 16, tagB);
+    static_assert(kHeader == 17, "header words as written above");
     seq.store(s + 2, std::memory_order_release);
 }
 
@@ -697,22 +680,24 @@ bool T5ynthPhraseSequencer::MotifChannel::tryRead(Motif& m, std::uint32_t& tagA,
     std::atomic_thread_fence(std::memory_order_acquire);
     if (seq.load(std::memory_order_relaxed) != s1) return false;
 
-    for (int i = 0; i < kMaxMotifSteps; ++i) m.slots[static_cast<size_t>(i)] = unpackSlot(w[static_cast<size_t>(i)]);
-    auto get = [&](int i) { return w[static_cast<size_t>(kMaxMotifSteps + i)]; };
-    m.len         = std::clamp(static_cast<int>(get(0)), 0, 2);
-    m.stepsPerBar = std::clamp(static_cast<int>(get(1)), 1, kMaxBarSteps);
-    m.pulses      = static_cast<int>(get(2));
-    m.rotation    = static_cast<int>(get(3));
-    m.part        = static_cast<Part>(std::clamp(static_cast<int>(get(4)), 0, 3));
-    m.seed        = get(5);
-    m.origin      = static_cast<int>(get(6));
-    tagA = get(7);
-    tagB = get(8);
-    m.entryKept     = get(9) != 0;
-    m.entryNote     = std::clamp(static_cast<int>(get(10)), -1, 127);
-    m.entryPrevNote = std::clamp(static_cast<int>(get(11)), -1, 127);
-    m.entryFrame    = get(12);
-    m.entryPhrase   = static_cast<int>(get(13));
+    auto get = [&](int i) { return w[static_cast<size_t>(i)]; };
+    auto getBody = [&](MotifBody& b, int slotsAt, int shapeAt) {
+        for (int i = 0; i < kMaxMotifSteps; ++i) b.slots[static_cast<size_t>(i)] = unpackSlot(get(slotsAt + i));
+        b.len         = std::clamp(static_cast<int>(get(shapeAt + 0)), 0, 2);
+        b.stepsPerBar = std::clamp(static_cast<int>(get(shapeAt + 1)), 1, kMaxBarSteps);
+        b.pulses      = static_cast<int>(get(shapeAt + 2));
+        b.rotation    = static_cast<int>(get(shapeAt + 3));
+        b.part        = static_cast<Part>(std::clamp(static_cast<int>(get(shapeAt + 4)), 0, 3));
+        b.seed        = get(shapeAt + 5);
+    };
+    constexpr int H = 2 * kMaxMotifSteps;
+    getBody(m, 0, H);
+    getBody(m.leadIn, kMaxMotifSteps, H + 6);
+    m.origin       = static_cast<int>(get(H + 12));
+    m.leadInKept   = get(H + 13) != 0;
+    m.leadInPhrase = static_cast<int>(get(H + 14));
+    tagA = get(H + 15);
+    tagB = get(H + 16);
     seqRead = s1;
     return true;
 }
@@ -799,12 +784,13 @@ void T5ynthPhraseSequencer::keep()
     // at its own phrase plays on exactly as before, even when the next phrase
     // has begun meanwhile. Stopped: it starts from the phrase where playback
     // resumes.
-    // The heard motif carries the notes its phrase was entered from: kept
-    // with it, the origin phrase enters as it was heard, although the phrase
-    // before it now plays the kept motif itself. The entry names that phrase,
-    // so after a stop it applies only when playback resumes there; anywhere
-    // else the phrase before leads in. Before the origin the motif stays as
-    // stored, its own entry included.
+    // The heard motif carries the motif its phrase was entered from as its
+    // lead-in: kept with it, the origin phrase enters as without the Keep,
+    // in this config and every later one, although the phrase before it now
+    // plays the kept motif itself. The lead-in names that phrase, so after a
+    // stop it applies only when playback resumes there; anywhere else the
+    // phrase before leads in. Before the origin the motif stays as stored,
+    // its own lead-in included.
     if (phrase >= m.origin)
     {
         m.origin = editOrigin.load(std::memory_order_relaxed) == kOriginAtNextEntry
@@ -813,11 +799,9 @@ void T5ynthPhraseSequencer::keep()
     }
     else
     {
-        m.entryKept = stored.entryKept;
-        m.entryNote = stored.entryNote;
-        m.entryPrevNote = stored.entryPrevNote;
-        m.entryFrame = stored.entryFrame;
-        m.entryPhrase = stored.entryPhrase;
+        m.leadInKept = stored.leadInKept;
+        m.leadIn = stored.leadIn;
+        m.leadInPhrase = stored.leadInPhrase;
     }
     adoptResolvedOrigin();
     undoMotif = stored;

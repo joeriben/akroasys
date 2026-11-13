@@ -112,7 +112,8 @@ public:
 
 private:
     // ── Motif hand-off ───────────────────────────────────────────────────
-    /** A motif plus two tag words behind a seqlock of relaxed atomic words.
+    /** A motif (its lead-in included) plus two tag words behind a seqlock of
+     *  relaxed atomic words.
      *  Writers must be serialised by the caller (toAudio: editMutex, so the
      *  message thread and a host's state-restore thread can both write;
      *  heard: the audio thread alone). Any number of readers on any threads;
@@ -128,7 +129,8 @@ private:
         /** The sequence number; even when no write is in progress. */
         std::uint32_t sequence() const { return seq.load(std::memory_order_relaxed); }
     private:
-        static constexpr int kWords = PhraseModel::kMaxMotifSteps + 14;
+        static constexpr int kHeader = 17;   // see write()
+        static constexpr int kWords = 2 * PhraseModel::kMaxMotifSteps + kHeader;
         std::atomic<std::uint32_t> seq { 0 };
         std::array<std::atomic<std::uint32_t>, kWords> words;
     };
@@ -141,19 +143,10 @@ private:
     void publish(const PhraseModel::Motif& m);
 
     /** Audio → message: the motif heard in the current phrase (evoCur), with
-     *  the notes that phrase's first bar enters from (Motif::entryKept; off
-     *  for Keys, whose line continues live). Tag A = the toAudio sequence it
-     *  was derived from, tag B = its phrase. */
+     *  the motif its first bar enters from (evoPrev) as the lead-in. Tag A =
+     *  the toAudio sequence it was derived from, tag B = its phrase. */
     MotifChannel heard;
     void publishHeard();
-    /** The entry the current phrase's first bar renders with in the config
-     *  now, and its frame; recomputed on every evolution step and every
-     *  render, so a Keep stores the entry a locate there would play. */
-    bool heardEntryKept = false;
-    int heardEntryNote = -1, heardEntryPrevNote = -1;
-    std::uint32_t heardEntryFrame = 0;
-    /** Recomputes the heard entry; true when it changed. */
-    bool refreshHeardEntry();
     /** The heard motif, if it was derived from the stored motif of toAudio
      *  sequence `storedSeq`. */
     bool readHeard(PhraseModel::Motif& m, int& phrase, std::uint32_t storedSeq) const;
@@ -184,16 +177,22 @@ private:
 
     PhraseModel::Motif liveMotif;        // stored motif as the audio thread knows it
     PhraseModel::Motif fitted;
+    PhraseModel::Motif fittedLeadIn;     // fitted's lead-in, fitted (when it has one)
     bool motifDirty = false;             // the heard motif may differ: refit, rebuild evolution
     bool renderDirty = false;            // the bar renders differently: re-render it
     float latchedEvolve = 0.0f;          // Evolve as of the current phrase entry
 
-    // Heard motifs of the phrases around the current bar
+    // Heard motifs of the phrases around the current bar; evoPrev is the
+    // motif the current phrase enters from, which for the origin phrase is
+    // the kept lead-in when it has one (leadsInto).
     PhraseModel::Motif evoPrev, evoCur, evoNext;
     int evoPhrase = 0;
     bool evoValid = false;
     void rebuildEvolution(int phrase);
     void advanceEvolution(int phrase);
+    /** The kept lead-in leads into `phrase`: it is the origin, and the phrase
+     *  the lead-in preceded when it was heard. */
+    bool leadsInto(int phrase) const;
     PhraseModel::Config latchedConfig() const;
 
     // Keys

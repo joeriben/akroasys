@@ -60,10 +60,10 @@ struct Slot
     bool         slide  = false;    // forced slide (From Step); generated motifs leave it off
 };
 
-/** The stored asset. Besides the slots it records the shape it was made for;
- *  when the parameters still match that shape the slots play verbatim, and
- *  when they do not, fitMotif() derives the heard motif without touching it. */
-struct Motif
+/** A motif's slots and the shape they were made for; when the parameters
+ *  still match that shape the slots play verbatim, and when they do not,
+ *  fitMotif() derives the heard motif without touching them. */
+struct MotifBody
 {
     std::array<Slot, kMaxMotifSteps> slots {};
     int           len         = 0;    // bars, 1 | 2; 0 = empty record (fits nothing)
@@ -72,25 +72,32 @@ struct Motif
     int           rotation    = 0;
     Part          part        = Part::Bass;
     std::uint32_t seed        = 1;
-    int           origin      = 0;    // phrase index evolution counts from (§3.8)
-
-    /** Pedal / Chords: the main line's last two notes before the origin
-     *  phrase, kept with the motif (Keep). A phrase before the origin plays
-     *  the motif itself, so the origin phrase's first bar would otherwise
-     *  enter from the motif's own last bar rather than from what preceded it
-     *  when it was heard. Off: it enters from the phrase before (entryNotes).
-     *  The notes are what preceded one phrase (entryPhrase) in one frame
-     *  (entryFrame); they apply only while that phrase is the origin and the
-     *  config has that frame. Otherwise the phrase before leads in, as for a
-     *  motif without a kept entry. */
-    bool          entryKept     = false;
-    int           entryNote     = -1;   // −1: no note, as entryNotes reports it
-    int           entryPrevNote = -1;
-    std::uint32_t entryFrame    = 0;    // entryFrameOf() of the config and bar they were heard in
-    int           entryPhrase   = 0;    // the phrase whose first bar entered from them
 
     int numSteps() const { return len * stepsPerBar; }
 };
+
+/** The stored asset. */
+struct Motif : MotifBody
+{
+    int           origin      = 0;    // phrase index evolution counts from (§3.8)
+
+    /** Keep: the motif heard in the phrase before the one it was kept in.
+     *  A phrase before the origin plays the motif itself, so without it the
+     *  origin phrase's first bar would enter from the motif's own last bar
+     *  rather than from what preceded it when it was heard. The first bar of
+     *  the origin phrase enters from it (Pedal / Chords: entryNotes renders
+     *  the bar before with it), so the entry follows every later change of
+     *  the config as it would without the Keep. It names the phrase it
+     *  preceded (leadInPhrase) and applies only while that phrase is the
+     *  origin; otherwise the phrase before leads in, as for a motif without
+     *  one. */
+    bool          leadInKept   = false;
+    MotifBody     leadIn;
+    int           leadInPhrase = 0;
+};
+
+/** A kept lead-in as a motif of its own, to fit and render it. */
+Motif leadInMotif(const Motif& m);
 
 /** Motif::origin of a motif stored while the transport is stopped: it starts
  *  evolving from the phrase where it is first heard, which the scheduler
@@ -321,23 +328,10 @@ struct RenderInput
  *  bar and the scheduler plays the events from the current position on. */
 void renderBar(const RenderInput& in, BarRender& out);
 
-/** The frame of a kept entry into `bar`: what entryNotes reads from the
- *  config besides the motifs — the chords of bar − 1 and of bar (the line
- *  looks ahead into the next bar) as chordDegreeForBar plays them, the Harm
- *  source (a cadence in bar − 1 differs for Pedal and Chords), 7ths, scale,
- *  Part and phrase length. So a chord-loop edit that leaves those two chords
- *  alone keeps the frame: under Pedal any loop edit, under Chords the chord
- *  rate of a one-chord loop, the place of empty slots, the slots the two
- *  bars do not play. An exact packing, not a hash: two configs the
- *  processor can build share a word iff these agree. */
-std::uint32_t entryFrameOf(const Config& cfg, int bar);
-
 /** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
- *  of bar − 1 rendered on its own. Keeps continuous play and a locate equal.
- *  `motif` is the motif of bar's phrase: the first bar of its origin phrase
- *  enters from the notes kept with it when it has them (Motif::entryKept),
- *  they preceded that phrase (Motif::entryPhrase) and `cfg` is the frame
- *  they were heard in (Motif::entryFrame). */
+ *  of bar − 1, rendered on its own with `prevMotif` (the motif of bar − 1's
+ *  phrase, or the kept lead-in into an origin phrase) leading into `motif`
+ *  (bar's). Keeps continuous play and a locate equal. */
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp);
 

@@ -752,15 +752,20 @@ Motif fitMotif(const Motif& stored, const Config& cfg)
     m.part = cfg.part;
     m.seed = stored.seed;
     m.origin = stored.origin;
-    m.entryKept = stored.entryKept;
-    m.entryNote = stored.entryNote;
-    m.entryPrevNote = stored.entryPrevNote;
-    m.entryFrame = stored.entryFrame;
-    m.entryPhrase = stored.entryPhrase;
+    m.leadInKept = stored.leadInKept;
+    m.leadIn = stored.leadIn;
+    m.leadInPhrase = stored.leadInPhrase;
     setRhythm(m, sh.len, sh.spb, sh.pulses, sh.rotation);
     assignFunctions(m, cfg, &stored);
     computeAccents(m);
     return m;
+}
+
+Motif leadInMotif(const Motif& m)
+{
+    Motif l;
+    static_cast<MotifBody&>(l) = m.leadIn;
+    return l;
 }
 
 Motif generateMotif(std::uint32_t seed, int origin, const Config& cfg)
@@ -1488,39 +1493,9 @@ void renderBar(const RenderInput& in, BarRender& out)
     out.lastVoicingCount = nv;
 }
 
-std::uint32_t entryFrameOf(const Config& cfg, int bar)
-{
-    // Every field in its valid range fits its bits, so the packing is exact.
-    static_assert(ScaleQuantizer::COUNT <= 32, "scale type needs 5 bits");
-    std::uint32_t w = 0;
-    int shift = 0;
-    auto put = [&](int v, int bits) {
-        w |= static_cast<std::uint32_t>(std::clamp(v, 0, (1 << bits) - 1)) << shift;
-        shift += bits;
-    };
-    put(static_cast<int>(cfg.part), 2);
-    put(static_cast<int>(cfg.harm), 2);         // the cadence reads it too
-    put(chordDegreeForBar(cfg, bar - 1), 3);    // 0..6
-    put(chordDegreeForBar(cfg, bar), 3);
-    put(cfg.ext7 ? 1 : 0, 1);
-    put(phraseBarsOf(cfg) / 8, 2);              // 4 | 8 | 16
-    put(cfg.scaleType, 5);
-    put(cfg.scaleRoot, 4);
-    return w;
-}
-
 void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp)
 {
-    const int N = phraseBarsOf(cfg);
-    if (motif.entryKept && motif.entryFrame == entryFrameOf(cfg, bar)
-        && floorMod(bar, N) == 0 && floorDiv(bar, N) == motif.origin
-        && motif.entryPhrase == motif.origin)
-    {
-        p = motif.entryNote;
-        pp = motif.entryPrevNote;
-        return;
-    }
     RenderInput in;
     in.cfg = &cfg;
     in.motif = &prevMotif;
