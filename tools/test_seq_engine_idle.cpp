@@ -11,6 +11,13 @@
 // phrase sequencer and sounded nothing, in the standalone without a MIDI
 // device for as long as nothing else started a block.
 //
+// The same holds for the mark a preset load leaves (SeqTransferHold): the
+// switch a load causes carries no pattern over, and the load's end marks the
+// next block's switch as the load's. A load made while silent must have that
+// next block run at once; otherwise the mark outlives the load, and the
+// user's own next switch carries nothing over (Gen -> Step did not copy the
+// pattern into the step grid).
+//
 // Each case runs the same switch awake and in deep idle; the awake run is the
 // control, and `audioIdle` is asserted before an idle switch, so an idle case
 // that never reached idle fails instead of passing vacuously.
@@ -22,6 +29,7 @@
 #include "dsp/BlockParams.h"
 
 #include <cstdio>
+#include <vector>
 
 namespace
 {
@@ -86,6 +94,116 @@ int keyAfterSwitch(int fromEngine, int fromHarm, int toEngine, int toHarm, bool 
     blocks(proc, 2);
     return voices;
 }
+/** Gen live, a step grid that differs from Gen's pattern, then (optionally)
+ *  a preset import that leaves the engine at Gen, in deep idle or awake.
+ *  Then the user picks Step. Returns whether the Gen pattern was copied into
+ *  the step grid; false also when the case could not show the copy. */
+bool genToStepCopiesAfterImport(bool import, bool idle)
+{
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    setPlain(proc, PID::seqEngine, static_cast<float>(SeqEngine::Gen));
+    blocks(proc, 2);
+    {
+        const juce::ScopedLock sl(proc.getCallbackLock());
+        auto& st = proc.getStepSequencer();
+        st.setNumSteps(8);
+        for (int i = 0; i < 8; ++i) { st.setStepNote(i, 50); st.setStepEnabled(i, true); }
+    }
+    setPlain(proc, PID::seqSteps, 8.0f);
+    blocks(proc, 2);
+    if (idle)
+    {
+        blocks(proc, kIdleBlocks);
+        if (! proc.audioIdle.load())
+        {
+            std::printf("    did not reach deep idle before the import\n");
+            return false;
+        }
+    }
+    if (import && ! proc.importJsonPreset(proc.exportJsonPreset()))
+    {
+        std::printf("    import failed\n");
+        return false;
+    }
+    blocks(proc, 3);
+
+    const auto& gs = proc.getGenerativeSequencer();
+    const int genN = gs.numStepsForGui.load();
+    std::vector<int> pattern;
+    bool differs = genN != 8;
+    for (int i = 0; i < genN; ++i)
+    {
+        pattern.push_back(gs.notePatternForGui[static_cast<size_t>(i)].load());
+        differs = differs || pattern.back() != 50;
+    }
+    if (genN <= 0 || ! differs)
+    {
+        std::printf("    Gen's pattern cannot show a copy (%d steps)\n", genN);
+        return false;
+    }
+
+    setPlain(proc, PID::seqEngine, static_cast<float>(SeqEngine::Step));
+    blocks(proc, 2);
+    auto& st = proc.getStepSequencer();
+    bool copied = st.getNumSteps() == genN;
+    for (int i = 0; copied && i < genN; ++i)
+    {
+        const auto& step = st.getStep(i);
+        copied = pattern[static_cast<size_t>(i)] > 0
+            ? step.enabled && step.note == pattern[static_cast<size_t>(i)]
+            : ! step.enabled;
+    }
+    std::printf("    Gen pattern %d steps, step grid %d steps, copied: %s\n",
+                genN, st.getNumSteps(), copied ? "yes" : "no");
+    return copied;
+}
+
+/** A preset whose engine is Gen, imported into a processor running Step, in
+ *  deep idle or awake. The switch is the load's: Gen keeps the preset's step
+ *  count instead of being seeded from the step grid. The preset fixes Gen's
+ *  steps, so Gen's drift does not write its own count back over the param. */
+bool importedSwitchCarriesNothing(bool idle)
+{
+    juce::String json;
+    {
+        T5ynthProcessor src;
+        src.prepareToPlay(kRate, kBlock);
+        blocks(src, 4);
+        // The switch first: Step -> Gen seeds Gen's step count from the grid.
+        setPlain(src, PID::seqEngine, static_cast<float>(SeqEngine::Gen));
+        blocks(src, 2);
+        setPlain(src, PID::genFixSteps, 1.0f);
+        setPlain(src, PID::genSteps, 11.0f);
+        setPlain(src, PID::seqSteps, 8.0f);
+        blocks(src, 2);
+        json = src.exportJsonPreset();
+    }
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    if (idle)
+    {
+        blocks(proc, kIdleBlocks);
+        if (! proc.audioIdle.load())
+        {
+            std::printf("    did not reach deep idle before the import\n");
+            return false;
+        }
+    }
+    if (! proc.importJsonPreset(json))
+    {
+        std::printf("    import failed\n");
+        return false;
+    }
+    blocks(proc, 3);
+    auto& apvts = proc.getValueTreeState();
+    const int engine = static_cast<int>(apvts.getRawParameterValue(PID::seqEngine)->load());
+    const int genSteps = static_cast<int>(apvts.getRawParameterValue(PID::genSteps)->load());
+    std::printf("    engine %d, gen steps %d (preset 11, step grid 8)\n", engine, genSteps);
+    return engine == SeqEngine::Gen && genSteps == 11;
+}
 } // namespace
 
 int main()
@@ -103,6 +221,18 @@ int main()
           keyAfterSwitch(step, pedal, phrase, keys, false) == 0);
     check("Step -> Phrase+Keys, deep idle: the key is chord input, no voice",
           keyAfterSwitch(step, pedal, phrase, keys, true) == 0);
+
+    std::printf("A preset load's transfer mark ends with the load\n");
+    check("no import, Gen -> Step: the pattern is copied",
+          genToStepCopiesAfterImport(false, true));
+    check("import awake, then Gen -> Step: the pattern is copied",
+          genToStepCopiesAfterImport(true, false));
+    check("import in deep idle, then Gen -> Step: the pattern is copied",
+          genToStepCopiesAfterImport(true, true));
+    check("Gen preset into Step, awake: the load's switch seeds nothing",
+          importedSwitchCarriesNothing(false));
+    check("Gen preset into Step, deep idle: the load's switch seeds nothing",
+          importedSwitchCarriesNothing(true));
 
     std::printf("failures=%d\n", failures);
     return failures == 0 ? 0 : 1;

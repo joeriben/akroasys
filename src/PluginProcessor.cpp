@@ -4237,6 +4237,12 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     const int seqEngineWanted = juce::jlimit(0, SeqEngine::kCount - 1,
                                              static_cast<int>(paramCache.seqEngine->load()));
     const bool seqEnginePending = seqEngineWanted != activeSeqEngine;
+    // A load that ended marks the next block's engine switch as its own
+    // (seqTransferSkipNext_), and that block clears the mark below the idle
+    // gate. A load made while silent wakes nothing (it syncs lastSeqPreset),
+    // so without this term the mark outlives it and the user's own next
+    // switch carries no pattern over. Self-clearing: that next block clears it.
+    const bool seqLoadMarkPending = seqTransferSkipNext_;
     // Read the arp's enable state HERE, above the idle gate, not down at the arp
     // stage: the deep-idle branch returns before the arp stage ever runs, and
     // arpWasEnabled has to be kept honest across that return (see below).
@@ -4276,6 +4282,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                        || seqRunning
                        || seqPresetPending
                        || seqEnginePending
+                       || seqLoadMarkPending
                        || arpHoldingKeys
                        || csoundSwapOutstanding
                        || replayActive;   // the tape must never idle out mid-playback
