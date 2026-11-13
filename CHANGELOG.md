@@ -129,6 +129,13 @@ unbroken.
   render of your prompts that switching off asks for. The same holds across a
   session log: its Play switches Re-Prompt off, and Stop switches it back on.
 
+- **The session log has its own button in the status bar.** Session holds
+  Record, Save Session Log… and Play Session Log…; recording was a switch on the
+  Settings tab, and the other two sat in the Export menu. While the log
+  records, the button carries an accent dot; a replay is never recorded, so
+  the dot is off while a tape plays. Record and the Settings tab's Record Event
+  Log are the same setting. Export writes a WAV again with one click.
+
 ### Sample engine
 
 - **Loop and ping-pong seams are found and faded the way sample editors do
