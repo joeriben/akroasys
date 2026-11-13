@@ -1878,8 +1878,10 @@ private:
     // start restore and cleared BEFORE the stop restore, so it is provably false at
     // the exact moment endBulkParamLoad and the counting in setStateInformation run.
     bool inReplayTransportRestore_ = false;
-    // Message thread. Snapshots current APVTS as the replay start state, gated by the
-    // flag above. Idempotent; safe to call from any start-of-session hook.
+    // Snapshots the replay start state (getStateInformation: live APVTS, or the
+    // user's patch beneath a running replay), gated by eventLogRealEventLogged_.
+    // Message thread, except the prepareToPlay fallback. Idempotent; safe to call
+    // from any start-of-session hook.
     void captureEventLogStartStateIfPending();
 
     // ── R2: Replay Transport — internals ──────────────────────────────────────

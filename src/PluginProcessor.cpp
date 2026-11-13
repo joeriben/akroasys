@@ -1200,15 +1200,27 @@ void T5ynthProcessor::endBulkParamLoad(const juce::String& presetName)
 
 void T5ynthProcessor::captureEventLogStartStateIfPending()
 {
-    // Message thread only. Captures the current APVTS patch as the replay start
-    // state, but only until the first real event is logged — after that, the
-    // running patch no longer equals the tape's t=0 patch. getStateInformation
-    // reads live APVTS, so every hook that calls this (enable toggle, preset/state
-    // load, prepareToPlay) captures whatever is loaded at that moment; the last one
-    // before the first event wins.
+    // Captures the replay start state, but only until the first real event is
+    // logged — after that, the running patch no longer equals the tape's t=0
+    // patch. Every hook that calls this (enable toggle, preset/state load,
+    // prepareToPlay) takes what getStateInformation hands back at that moment,
+    // which outside a replay is the live APVTS patch. The last one before the
+    // writer opens the file wins: it stamps the header on its first entry of any
+    // kind, a preset marker included, which does not set the latch; a capture
+    // after that changes only the in-memory header. Message thread, except
+    // prepareToPlay, which the Standalone wrapper may run on the audio-device
+    // setup thread and which therefore skips this during a replay (see there).
+    //
+    // During a replay too: the live APVTS then holds the tape's patch, but
+    // getStateInformation hands back the user's (preReplayPatch_), which is the
+    // patch Stop puts back. That is the live log's start patch when Record is
+    // switched on during a tape, and it has to be taken then: at Stop, the
+    // transport values setStateInformation zeroes after its bulk-load guard are
+    // logged as the live log's first events, which freeze the start patch
+    // before anything after the restore could take it, and the tape opened with
+    // none, which Play refuses.
     if (eventLogWriter_ == nullptr
         || ! eventLogEnabled_.load(std::memory_order_relaxed)
-        || replayModeActive_.load(std::memory_order_relaxed)
         || eventLogRealEventLogged_.load(std::memory_order_relaxed))
         return;
 
@@ -1249,7 +1261,8 @@ void T5ynthProcessor::setEventLogEnabled(bool enabled)
     }
 
     // R0: capture the current patch as the replay start state (self-contained
-    // .t5evt). On a runtime toggle this grabs exactly what the user is looking at.
+    // .t5evt). On a runtime toggle this grabs exactly what the user is looking at;
+    // during a replay, the user's patch beneath the tape, the one Stop gives back.
     if (enabled)
         captureEventLogStartStateIfPending();
 }
@@ -2725,7 +2738,14 @@ void T5ynthProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     // Fallback start-state capture: if recording is enabled but nothing has loaded a
     // patch (user just plays from the init patch), the header would otherwise carry
     // no start-state. Reads live APVTS, so it's also correct after a host restore.
-    captureEventLogStartStateIfPending();
+    // Not during a replay: getStateInformation then copies preReplayPatch_, and
+    // this may run on the audio-device setup thread (see the Csound comment
+    // below), where that copy would race stopReplay moving the block out. A
+    // replay needs no fallback here: Record switched on during the tape takes
+    // its start patch in setEventLogEnabled, and Record already on took one
+    // before Play (the transport restores do not capture).
+    if (! isReplayActive())
+        captureEventLogStartStateIfPending();
 
     masterOsc.prepare(sampleRate, samplesPerBlock);
 
