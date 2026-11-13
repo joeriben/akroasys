@@ -1465,8 +1465,9 @@ private:
     // in the first block after it, so a load holds the transfer for its whole
     // length (SeqTransferHold: a depth, since a replay start restores a state
     // inside its own load) and its end marks the next block's switch as the
-    // load's (seqTransferSkipNext_). Both are written under the callback lock
-    // and read by processBlock, which holds it.
+    // load's (seqTransferSkipNext_), which that block consumes above its idle
+    // gate. Both are written under the callback lock and read by
+    // processBlock, which holds it.
     struct SeqTransferHold;
     int seqTransferHoldDepth_ = 0;
     bool seqTransferSkipNext_ = false;

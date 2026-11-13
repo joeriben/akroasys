@@ -11,12 +11,14 @@
 // phrase sequencer and sounded nothing, in the standalone without a MIDI
 // device for as long as nothing else started a block.
 //
-// The same holds for the mark a preset load leaves (SeqTransferHold): the
-// switch a load causes carries no pattern over, and the load's end marks the
-// next block's switch as the load's. A load made while silent must have that
-// next block run at once; otherwise the mark outlives the load, and the
-// user's own next switch carries nothing over (Gen -> Step did not copy the
-// pattern into the step grid).
+// The mark a preset load leaves (SeqTransferHold) is the other side of it:
+// the switch a load causes carries no pattern over, and the load's end marks
+// the next block's switch as the load's. That next block must consume the
+// mark even when it returns at the idle gate; otherwise the mark outlives
+// the load, and the user's own next switch carries nothing over (Gen -> Step
+// did not copy the pattern into the step grid). Consuming it must not wake
+// the block: a load made while silent that leaves the engine as it is keeps
+// the instrument idle (docs/PERFORMANCE_GUIDE.md, the audioIdle gate).
 //
 // Each case runs the same switch awake and in deep idle; the awake run is the
 // control, and `audioIdle` is asserted before an idle switch, so an idle case
@@ -204,6 +206,29 @@ bool importedSwitchCarriesNothing(bool idle)
     std::printf("    engine %d, gen steps %d (preset 11, step grid 8)\n", engine, genSteps);
     return engine == SeqEngine::Gen && genSteps == 11;
 }
+/** A preset import made in deep idle that leaves the engine as it is.
+ *  Returns whether the block is still idle after it; false also when the
+ *  case did not reach idle before the import. */
+bool idleImportStaysIdle()
+{
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4 + kIdleBlocks);
+    if (! proc.audioIdle.load())
+    {
+        std::printf("    did not reach deep idle before the import\n");
+        return false;
+    }
+    if (! proc.importJsonPreset(proc.exportJsonPreset()))
+    {
+        std::printf("    import failed\n");
+        return false;
+    }
+    blocks(proc, 3);
+    const bool idle = proc.audioIdle.load();
+    std::printf("    idle after the import: %s\n", idle ? "yes" : "no");
+    return idle;
+}
 } // namespace
 
 int main()
@@ -233,6 +258,8 @@ int main()
           importedSwitchCarriesNothing(false));
     check("Gen preset into Step, deep idle: the load's switch seeds nothing",
           importedSwitchCarriesNothing(true));
+    check("import in deep idle, engine unchanged: the block stays idle",
+          idleImportStaysIdle());
 
     std::printf("failures=%d\n", failures);
     return failures == 0 ? 0 : 1;

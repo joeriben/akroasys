@@ -4237,12 +4237,17 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     const int seqEngineWanted = juce::jlimit(0, SeqEngine::kCount - 1,
                                              static_cast<int>(paramCache.seqEngine->load()));
     const bool seqEnginePending = seqEngineWanted != activeSeqEngine;
-    // A load that ended marks the next block's engine switch as its own
-    // (seqTransferSkipNext_), and that block clears the mark below the idle
-    // gate. A load made while silent wakes nothing (it syncs lastSeqPreset),
-    // so without this term the mark outlives it and the user's own next
-    // switch carries no pattern over. Self-clearing: that next block clears it.
-    const bool seqLoadMarkPending = seqTransferSkipNext_;
+    // Whether a switch this block makes is a load's (SeqTransferHold): a load
+    // is in progress, or the one that just ended marked this block's switch
+    // as its own. The first block after the load consumes the mark here,
+    // above the idle gate, whichever way that block goes: a load that leaves
+    // the engine as it is makes no switch, and a mark that outlived it would
+    // take the user's own next switch for the load's (Gen -> Step would copy
+    // nothing). Consuming it here needs no wake, so a load made while silent
+    // keeps the instrument idle. A load still in progress marks again when
+    // it ends.
+    const bool seqSwitchByLoad = seqTransferHoldDepth_ > 0 || seqTransferSkipNext_;
+    seqTransferSkipNext_ = false;
     // Read the arp's enable state HERE, above the idle gate, not down at the arp
     // stage: the deep-idle branch returns before the arp stage ever runs, and
     // arpWasEnabled has to be kept honest across that return (see below).
@@ -4282,7 +4287,6 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                        || seqRunning
                        || seqPresetPending
                        || seqEnginePending
-                       || seqLoadMarkPending
                        || arpHoldingKeys
                        || csoundSwapOutstanding
                        || replayActive;   // the tape must never idle out mid-playback
@@ -4893,15 +4897,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // Gen → Step and Phrase → Step copy into the step grid), then the
     // outgoing engine's sounding notes end and it stops. A switch a preset
     // import or state restore causes carries nothing over (SeqTransferHold):
-    // the load brings its own patterns. seqEngineWanted is read above the
-    // idle gate.
+    // the load brings its own patterns. seqEngineWanted and seqSwitchByLoad
+    // are read above the idle gate.
     int seqDivision = static_cast<int>(paramCache.seqDivision->load());
 
     if (seqEnginePending)
     {
         const int from = activeSeqEngine;
         const int to = seqEngineWanted;
-        const bool transfer = seqTransferHoldDepth_ == 0 && ! seqTransferSkipNext_;
+        const bool transfer = ! seqSwitchByLoad;
 
         if (transfer && from == SeqEngine::Step && to == SeqEngine::Gen)
         {
@@ -5022,8 +5026,6 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         }
         activeSeqEngine = to;
     }
-    if (seqTransferHoldDepth_ == 0)
-        seqTransferSkipNext_ = false;
 
     // Phrase + Keys: the played notes set the phrase chord and leave the
     // buffer here, before the engine reads the chord and before the arp and
