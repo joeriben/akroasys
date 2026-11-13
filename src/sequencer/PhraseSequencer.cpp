@@ -295,6 +295,29 @@ void T5ynthPhraseSequencer::releaseUnusedHeld(int fromIndex, std::vector<VoiceEv
     }
 }
 
+void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
+{
+    // A note keeps the off its render gave it, bounded by its line's next
+    // onset in THAT render (finishLine). A re-render in the bar can put its
+    // line's next onset sooner — a denser grid, another motif — and the note
+    // would sound on under the new render's notes: it ends at that onset
+    // instead. The main line (strand −1, Stab's chord included) and the layer
+    // (its strands ≥ 0) are a line each, as the renderer bounds them.
+    constexpr double inf = std::numeric_limits<double>::infinity();
+    double nextMain = inf, nextLayer = inf;
+    for (int i = fromIndex; i < render.count && (nextMain == inf || nextLayer == inf); ++i)
+    {
+        const Event& e = render.events[static_cast<size_t>(i)];
+        double& next = e.strand < 0 ? nextMain : nextLayer;
+        if (next == inf) next = barStartQ + e.onQ;   // sorted by onset: the first is the next
+    }
+    for (int i = 0; i < pendingCount; ++i)
+    {
+        auto& p = pending[static_cast<size_t>(i)];
+        p.q = std::min(p.q, p.strand < 0 ? nextMain : nextLayer);
+    }
+}
+
 // ─── Evolution cache ───────────────────────────────────────────────────────
 
 void T5ynthPhraseSequencer::rebuildEvolution(int phrase)
@@ -517,6 +540,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         renderCurrent();
         nextEvent = firstEventNotPlayed(expectedQ);
         releaseUnusedHeld(nextEvent, out, 0);
+        endPendingByNextOnset(nextEvent);
     }
     motifDirty = renderDirty = false;
 
@@ -578,6 +602,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             renderCurrent();
             nextEvent = firstEventNotPlayed(t);
             releaseUnusedHeld(nextEvent, out, offset);
+            endPendingByNextOnset(nextEvent);
             continue;
         }
         emitOn(nextEvent, out, offset);

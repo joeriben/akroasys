@@ -238,6 +238,7 @@ private:
     void enterBar(int newBar, bool continuous);
     void renderCurrent();
     void releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset);
+    void endPendingByNextOnset(int fromIndex);
     /** Another event of the same strand starts at render.events[index]'s onset. */
     bool sharesOnset(int index) const;
     void emitOn(int index, std::vector<VoiceEvent>& out, int offset);

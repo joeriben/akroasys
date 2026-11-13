@@ -1409,6 +1409,110 @@ int main(int argc, char** argv)
                              + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 18. A change in play ends the replaced render's notes at the new render's next onset\n");
+    {
+        // One step per bar at Gate 1: the bar-start note lasts the bar. A
+        // change in the bar to 16 steps re-renders it with onsets the old
+        // render did not have; the note the old render started must end at
+        // the first of them, on the main line and on the layer alike (a line
+        // is one voice or one chord at a time; Stab's chord is the main line).
+        int under = 0, errs = 0, runs = 0, newOns = 0, notLegato = 0;
+        std::string why, whyEnd;
+        auto soundsUnder = [&](const Run& r, double fromQ, const std::string& tag) {
+            struct V { int note, strand; double onQ; };
+            std::vector<V> live;
+            for (const auto& p : r.events)
+            {
+                const VoiceEvent& e = p.ev;
+                if (e.type == VoiceEvent::Type::NoteOff)
+                {
+                    for (auto it = live.begin(); it != live.end(); ++it)
+                        if (it->note == e.note && it->strand == e.strandId) { live.erase(it); break; }
+                    continue;
+                }
+                if (e.artic == VoiceEvent::Articulation::Glide)
+                {
+                    for (auto it = live.rbegin(); it != live.rend(); ++it)
+                        if (it->strand == e.strandId) { it->note = e.note; it->onQ = p.q; break; }
+                    continue;
+                }
+                if (p.q > fromQ) newOns += e.strandId == -1;
+                for (const auto& v : live)
+                    if ((v.strand < 0) == (e.strandId < 0) && v.onQ < p.q - 2 * kOneSampleQ)
+                    {
+                        if (under++ == 0)
+                            why = tag + ": note " + std::to_string(v.note) + " strand " + std::to_string(v.strand)
+                                + " from q " + std::to_string(v.onQ).substr(0, 6) + " under note "
+                                + std::to_string(e.note) + " strand " + std::to_string(e.strandId) + " at q "
+                                + std::to_string(p.q).substr(0, 6);
+                        break;
+                    }
+                live.push_back({ e.note, e.strandId, p.q });
+            }
+        };
+        // The change falls in bar 3, a B unit of ABAB, where the Answer layer
+        // plays a rhythm of its own.
+        for (Part part : { Part::Bass, Part::Riff, Part::Lead, Part::Stab })
+            for (Layer layer : { Layer::Off, Layer::Octave, Layer::Chord, Layer::Answer })
+                for (int pulses : { 16, 5 })
+                    for (double beat : { 1.0, 2.5 })
+                    {
+                        Config c = base();
+                        c.part = part;
+                        c.layer = layer;
+                        c.stepsPerBar = 1;
+                        c.pulses = 1;
+                        c.rotation = 0;
+                        c.form = Form::ABAB;
+                        c.variation = 0.0f;
+                        c.slide = 0.0f;
+                        c.gate = 1.0f;
+                        Config d = c;
+                        d.stepsPerBar = 16;
+                        d.pulses = pulses;
+                        const double barQ = 3 * B, at = barQ + beat;
+                        const std::string tag = "part " + std::to_string(static_cast<int>(part)) + " layer "
+                                              + std::to_string(static_cast<int>(layer)) + " pulses "
+                                              + std::to_string(pulses) + " beat " + std::to_string(beat).substr(0, 3);
+                        bool changed = false;
+                        const Run r = play(c, 0.0, 5 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                            if (!changed && q >= at) { s.setConfig(d); changed = true; }
+                        });
+                        ++runs;
+                        soundsUnder(r, at, tag);
+                        errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+                        // Gate 1: the bar-start note (Stab: each voice of the
+                        // chord) ends on the main line's next onset — not
+                        // later, under it, and not sooner, at the change.
+                        double nextOn = -1.0;
+                        for (const auto& p : r.events)
+                            if (p.ev.strandId == -1 && p.ev.type == VoiceEvent::Type::NoteOn
+                                && p.q > barQ + 2 * kOneSampleQ) { nextOn = p.q; break; }
+                        for (size_t i = 0; i < r.events.size(); ++i)
+                        {
+                            const auto& p = r.events[i];
+                            if (p.ev.strandId != -1 || p.ev.type != VoiceEvent::Type::NoteOn
+                                || std::abs(p.q - barQ) > 2 * kOneSampleQ) continue;
+                            double offQ = -1.0;
+                            for (size_t j = i + 1; j < r.events.size() && offQ < 0.0; ++j)
+                                if (r.events[j].ev.type == VoiceEvent::Type::NoteOff && r.events[j].ev.strandId == -1
+                                    && r.events[j].ev.note == p.ev.note) offQ = r.events[j].q;
+                            if (nextOn < 0.0 || std::abs(offQ - nextOn) > 2 * kOneSampleQ)
+                                if (notLegato++ == 0)
+                                    whyEnd = tag + ": note " + std::to_string(p.ev.note) + " ends at q "
+                                           + std::to_string(offQ).substr(0, 6) + ", next onset at q "
+                                           + std::to_string(nextOn).substr(0, 6);
+                        }
+                    }
+        check(newOns > 0, "change in play: the denser grid plays after the change (" + std::to_string(newOns)
+                              + " main-line onsets)");
+        check(under == 0, "change in play: no note of the replaced render sounds under the new one ("
+                              + std::to_string(under) + " over " + std::to_string(runs) + " runs) " + why);
+        check(notLegato == 0, "change in play: the replaced render's note ends on the new render's next onset ("
+                                  + std::to_string(notLegato) + " do not) " + whyEnd);
+        check(errs == 0, "change in play: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
