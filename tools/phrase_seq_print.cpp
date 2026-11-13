@@ -1272,6 +1272,92 @@ int main(int argc, char** argv)
                              + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 16. A slide holds only into a step the next bar plays\n");
+    {
+        // One step per bar, in the last beat, with a forced slide (From
+        // Step). The B bar (AAAB, a bar per unit) varies it: its Fill runs on
+        // the free 16ths of that beat, its Drop silences the beat. The slide
+        // before it finds no step onset to glide into — a Fill note comes
+        // first, or nothing — so its note ends at its gated length. Into a bar
+        // that plays the step first it glides.
+        const float fillVel = 72.0f / 127.0f;   // PhraseModel's kVelFill
+        int fillGlides = 0, stepGlides = 0, fillNotes = 0, silentBars = 0, heldIntoNothing = 0, errs = 0, runs = 0;
+        std::string whyFill, whyHeld;
+        for (int k : { 12, 13, 14, 15 })
+            for (float var : { 0.6f, 1.0f })        // Fill; Fill or Drop by the seed's coin
+                for (float sh : { 0.0f, 0.6f })
+                    for (std::uint32_t seed : { 11u, 2293u, 777u, 4242u })
+                    {
+                        Config c = base();
+                        c.part = Part::Lead;
+                        c.stepsPerBar = 16;
+                        c.len = 1;
+                        c.pulses = 1;
+                        c.rotation = 0;
+                        c.phraseBars = 4;
+                        c.form = Form::AAAB;
+                        c.variation = var;
+                        c.shuffle = sh;
+                        c.slide = 0.0f;
+                        c.gate = 0.5f;
+                        c.layer = Layer::Off;
+                        std::array<StepInput, 16> steps {};
+                        for (int i = 0; i < 16; ++i) steps[static_cast<size_t>(i)] = { 69, i == k, i == k, 0.8f };
+                        const Motif m = motifFromSteps(steps.data(), 16, c, seed, 0);
+                        bool loaded = false;
+                        ++runs;
+                        const Run r = play(c, 0.0, 8 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double) {
+                            if (!loaded) { s.setStoredMotif(m); loaded = true; }
+                        });
+                        errs += r.polyMain + r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+                        // A glide continues the sounding note; a note-off ends
+                        // it. Ended more than a slot after its onset, it was
+                        // held for a glide that never came.
+                        int noteOn = -1;
+                        double onQ = 0.0;
+                        std::array<bool, 8> barPlays {};
+                        for (const auto& p : r.events)
+                        {
+                            if (p.ev.strandId != -1) continue;
+                            if (p.ev.type == VoiceEvent::Type::NoteOn)
+                            {
+                                const bool fill = std::abs(p.ev.velocity - fillVel) < 1.0e-4f;
+                                fillNotes += fill;
+                                const int b = static_cast<int>(std::floor(p.q / B + 1.0e-9));
+                                if (b >= 0 && b < 8) barPlays[static_cast<size_t>(b)] = true;
+                                if (p.ev.artic == VoiceEvent::Articulation::Glide)
+                                {
+                                    if (fill && fillGlides++ == 0)
+                                        whyFill = "#1 k " + std::to_string(k) + " var " + std::to_string(var).substr(0, 3)
+                                              + " seed " + std::to_string(seed) + ": glide into a fill note at q "
+                                              + std::to_string(p.q);
+                                    stepGlides += !fill;
+                                }
+                                noteOn = p.ev.note;
+                                onQ = p.q;
+                            }
+                            else if (p.ev.note == noteOn)
+                            {
+                                if (p.q - onQ > 0.25 + 1.0e-6 && heldIntoNothing++ == 0)
+                                    whyHeld = "#1 k " + std::to_string(k) + " var " + std::to_string(var).substr(0, 3)
+                                          + " seed " + std::to_string(seed) + ": note from q " + std::to_string(onQ)
+                                          + " ends at q " + std::to_string(p.q);
+                                noteOn = -1;
+                            }
+                        }
+                        silentBars += !barPlays[3] + !barPlays[7];
+                    }
+        check(fillNotes > 0 && silentBars > 0 && stepGlides > 0,
+              "slide into the next bar: the runs meet Fill (" + std::to_string(fillNotes) + " notes), Drop ("
+                  + std::to_string(silentBars) + " silent bars) and gliding steps (" + std::to_string(stepGlides) + ")");
+        check(fillGlides == 0, "slide into the next bar: never into a Fill note (" + std::to_string(fillGlides)
+                                   + " glides over " + std::to_string(runs) + " runs) " + whyFill);
+        check(heldIntoNothing == 0, "slide into the next bar: no note held into a bar that does not take it ("
+                                        + std::to_string(heldIntoNothing) + ") " + whyHeld);
+        check(errs == 0, "slide into the next bar: no doubled, hanging or orphan note, no bad glide ("
+                             + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

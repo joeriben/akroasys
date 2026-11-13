@@ -1256,24 +1256,36 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     }
 }
 
-/** First onset of the next bar (quarters from this bar's start) and whether it
- *  is a head. +inf when the next bar is silent. */
-void nextBarOnset(const LineCtx& x, double& onQ, bool& head)
+/** The next bar's first onset as that bar plays it, in quarters from this
+ *  bar's start (+inf when it plays nothing), and whether it is a step onset
+ *  and a head. Collected by the code that renders the next bar, so a step its
+ *  Drop removes does not count and a Fill note before its first step does.
+ *  Onset times and kinds follow from that bar's motif and variation alone;
+ *  the pitches, which also read the bar after it (taken here from the same
+ *  motif, as renderBar does without a next motif), are not used. A line
+ *  rendered without variation (the Answer) has none in the next bar either. */
+void nextBarOnset(const LineCtx& x, double& onQ, bool& step, bool& head)
 {
-    const Motif& nm = *x.nextMotif;
-    const int spb = nm.stepsPerBar;
-    const int mb = floorMod(x.bar + 1, nm.len);
-    const int steps = barStepsFor(spb, x.barLenQ);
-    for (int k = 0; k < steps; ++k)
+    LineCtx n = x;
+    n.motif = x.nextMotif;
+    n.heads = x.nextHeads;
+    n.bar = x.bar + 1;
+    BarVariation var;
+    if (x.var) var = variationForBar(*n.motif, n.heads, *x.cfg, n.bar);
+    n.var = x.var ? &var : nullptr;
+    int P = -1, PP = -1;
+    OnsetList l;
+    collectLine(n, P, PP, l, nullptr);
+    if (l.n == 0)
     {
-        const int s = mb * spb + k;
-        if (nm.slots[static_cast<size_t>(s)].fn == Fn::Rest) continue;
-        onQ = x.barLenQ + shuffled(k, 4.0 / spb, x.cfg->shuffle, x.barLenQ);
-        head = x.nextHeads[static_cast<size_t>(s)];
+        onQ = std::numeric_limits<double>::infinity();
+        step = head = false;
         return;
     }
-    onQ = std::numeric_limits<double>::infinity();
-    head = false;
+    const Onset& first = l.a[0];
+    onQ = x.barLenQ + first.onQ;
+    step = first.step >= 0 && !first.ratchetTail;
+    head = first.head;
 }
 
 /** Durations, slides and glides of a monophonic line. A slide holds its note
@@ -1282,8 +1294,8 @@ void nextBarOnset(const LineCtx& x, double& onQ, bool& head)
  *  note or a ratchet repeat. */
 void finishLine(OnsetList& l, const LineCtx& x, bool slideIn, bool allowSlides, bool& endsHeld)
 {
-    double nbOn; bool nbHead;
-    nextBarOnset(x, nbOn, nbHead);
+    double nbOn; bool nbStep, nbHead;
+    nextBarOnset(x, nbOn, nbStep, nbHead);
     endsHeld = false;
     const double gate = std::clamp(static_cast<double>(x.cfg->gate), 0.1, 1.0);
     for (int i = 0; i < l.n; ++i)
@@ -1292,7 +1304,7 @@ void finishLine(OnsetList& l, const LineCtx& x, bool slideIn, bool allowSlides, 
         const bool last = i == l.n - 1;
         const Onset* next = last ? nullptr : &l.a[static_cast<size_t>(i + 1)];
         const double nextOn = last ? nbOn : next->onQ;
-        const bool nextIsStep = last ? std::isfinite(nbOn) : (next->step >= 0 && !next->ratchetTail);
+        const bool nextIsStep = last ? nbStep : (next->step >= 0 && !next->ratchetTail);
         const bool nextHead = last ? nbHead : next->head;
         if (i == 0 && slideIn) o.glide = true;
         if (allowSlides && o.slideWanted && nextIsStep && (o.forcedSlide || nextHead))
