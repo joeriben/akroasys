@@ -209,6 +209,7 @@ private:
     // Transport
     double posQ = 0.0;                   // internal position (quarters)
     double expectedQ = 0.0;              // where the next block should start
+    double playedQ = 0.0;                // how far playback has reached since it entered
     bool positioned = false;             // false → (re)enter at the next block
     bool lastHostSync = false;
 

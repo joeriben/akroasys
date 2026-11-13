@@ -1874,6 +1874,114 @@ int main(int argc, char** argv)
         check(errs == 0, "several changes: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 22. A host reporting blocks behind where playback reached: a change after it replays no onset\n");
+    {
+        // A host may report a block a little before where the last one ended
+        // (under the locate threshold). With small blocks that is more than a
+        // block, so the blocks after it start behind onsets already played
+        // too, and a change in one of them (a Keys chord at the next beat, a
+        // config change) re-renders the bar there. It must play on from where
+        // playback reached, not from that block's start. Each run is compared
+        // with the same block positions and no change: the main line's onsets
+        // must be the same, and the change must take effect.
+        const double end = 0.004;   // the last block before the jitter ends this far past the beat
+        int differ = 0, unchanged = 0, errs = 0, runs = 0;
+        std::string why;
+        for (int block : { 32, 64, 128 })
+            for (double beatQ : { 7.0, 8.0 })   // a beat inside the bar, a bar start
+                for (double back : { 0.005, 0.009 })
+                    for (int delay : { 0, 1, 2, 3 })
+                        for (bool keys : { true, false })
+                        {
+                            const double dq = block * kBpm / (60.0 * kSr);
+                            std::vector<double> starts;
+                            for (int b = static_cast<int>(std::ceil(1.0 / dq)); b >= 1; --b)
+                                starts.push_back(beatQ + end - b * dq);
+                            const size_t changeAt = starts.size() + static_cast<size_t>(delay);
+                            for (int b = 0; b < static_cast<int>(std::ceil(1.5 / dq)); ++b)
+                                starts.push_back(beatQ + end - back + b * dq);
+                            // Main-line onsets and offs: (quarters, note).
+                            struct Main { std::vector<std::pair<double, int>> ons, offs; };
+                            auto run = [&](bool change, Main& m) {
+                                Config c = base();
+                                c.harm = Harm::Keys;
+                                c.form = Form::Loop;
+                                c.pulses = 16;
+                                c.variation = 0.0f;
+                                c.slide = 0.0f;
+                                c.layer = Layer::Off;
+                                T5ynthPhraseSequencer seq;
+                                seq.prepare(kSr);
+                                seq.setTimeSignature(4, 4);
+                                seq.setConfig(c);
+                                seq.start();
+                                auto latch = [&](std::initializer_list<int> notes) {
+                                    seq.clearKeys();
+                                    for (int n : notes) seq.keyOn(n);
+                                    for (int n : notes) seq.keyOff(n);
+                                };
+                                latch({ 45, 48, 52 });   // A minor
+                                std::vector<VoiceEvent> out;
+                                out.reserve(1024);
+                                VoiceSim sim;
+                                for (size_t b = 0; b < starts.size(); ++b)
+                                {
+                                    if (change && b == changeAt)
+                                    {
+                                        if (keys) latch({ 50, 53, 57 });   // D minor
+                                        else { Config d = c; d.gate = 0.4f; seq.setConfig(d); }
+                                    }
+                                    out.clear();
+                                    seq.processBlock(block, kBpm, true, starts[b], out);
+                                    std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& x, const VoiceEvent& y) {
+                                        if (x.sampleOffset != y.sampleOffset) return x.sampleOffset < y.sampleOffset;
+                                        return x.type == VoiceEvent::Type::NoteOff && y.type == VoiceEvent::Type::NoteOn;
+                                    });
+                                    for (const auto& e : out)
+                                    {
+                                        if (e.type == VoiceEvent::Type::NoteOn) sim.on(e); else sim.off(e);
+                                        if (e.strandId != -1) continue;
+                                        const double q = starts[b] + e.sampleOffset * kOneSampleQ;
+                                        (e.type == VoiceEvent::Type::NoteOn ? m.ons : m.offs).push_back({ q, e.note });
+                                    }
+                                }
+                                out.clear();
+                                seq.allNotesOff(out, 0);
+                                for (const auto& e : out) sim.off(e);
+                                return static_cast<int>(sim.live.size()) + sim.orphanOffs + sim.badGlides;
+                            };
+                            Main got, ref;
+                            errs += run(true, got) + run(false, ref);
+                            ++runs;
+                            bool same = got.ons.size() == ref.ons.size();
+                            for (size_t i = 0; same && i < got.ons.size(); ++i)
+                                same = std::abs(got.ons[i].first - ref.ons[i].first) <= 2 * kOneSampleQ;
+                            char tag[128];
+                            std::snprintf(tag, sizeof tag, "%d-sample blocks, beat %g, %g q back, change %d blocks on, %s",
+                                          block, beatQ, back, delay, keys ? "Keys chord" : "gate");
+                            if (!same && differ++ < 3)
+                                why += std::string(differ > 1 ? "; " : "") + tag + ": " + std::to_string(got.ons.size())
+                                     + " onsets, " + std::to_string(ref.ons.size()) + " without the change";
+                            // The change took effect: a note (Keys) or an off (gate) after it differs.
+                            const double after = starts[changeAt] + 2 * kOneSampleQ;
+                            bool took = false;
+                            if (keys)
+                                for (size_t i = 0; same && i < got.ons.size(); ++i)
+                                    took = took || (got.ons[i].first > after && got.ons[i].second != ref.ons[i].second);
+                            else
+                                for (size_t i = 0; same && i < got.offs.size() && i < ref.offs.size(); ++i)
+                                    took = took || (got.offs[i].first > after
+                                                    && std::abs(got.offs[i].first - ref.offs[i].first) > 2 * kOneSampleQ);
+                            unchanged += same && !took;
+                        }
+        check(differ == 0, "host behind where playback reached: the onsets of the run without the change ("
+                               + std::to_string(differ) + " of " + std::to_string(runs) + " differ) " + why);
+        check(unchanged == 0, "host behind where playback reached: the change takes effect ("
+                                  + std::to_string(unchanged) + " runs without it)");
+        check(errs == 0, "host behind where playback reached: no hanging or orphan note, no bad glide ("
+                             + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

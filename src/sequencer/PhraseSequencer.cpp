@@ -497,8 +497,11 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
     // Where this block takes over playback: every onset before it lies
     // behind, played by the blocks before or before the point a start or
     // locate enters at. A locate counts an onset within rounding before its
-    // point as at it, so a locate onto a step plays it.
-    double resumeQ = expectedQ;
+    // point as at it, so a locate onto a step plays it. Not this block's
+    // start: a host may report a block a little before where the last one
+    // ended (under kJumpQ), and when that is more than a block, the next
+    // block starts behind onsets already played too.
+    double resumeQ = playedQ;
     // The first event not yet emitted once playback has reached q. The loop
     // below emits every onset before the time it reaches (t < q1), so the
     // same strict test resumes exactly behind the last onset played and never
@@ -541,8 +544,8 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
     }
     else if (renderDirty)
     {
-        // A change inside the bar: re-render it and play on from where the
-        // last block stopped (a host may jitter q0 around that by < kJumpQ).
+        // A change inside the bar: re-render it and play on from where
+        // playback has reached (a host may jitter q0 around that by < kJumpQ).
         if (motifDirty) rebuildEvolution(floorDiv(bar, phraseBarsOf(cfg)));
         renderCurrent();
         nextEvent = firstEventNotPlayed(resumeQ);
@@ -616,8 +619,9 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             renderCurrent();
             // The chord takes effect at the beat. A beat that lies before
             // resumeQ (this block starts a hair past it, inside the beat
-            // rounding above, or a host reports it a little before where the
-            // last one ended) brings back no onset the blocks before played.
+            // rounding above, or a host reports it a little before where
+            // playback has reached) brings back no onset the blocks before
+            // played.
             nextEvent = firstEventNotPlayed(std::max(t, resumeQ));
             releaseUnusedHeld(nextEvent, out, offset);
             endPendingByNextOnset(nextEvent);
@@ -629,6 +633,7 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
 
     if (!hostSync) posQ = q1;
     expectedQ = q1;
+    playedQ = std::max(resumeQ, q1);
 
     const int spb = std::clamp(cfg.stepsPerBar, 1, kMaxBarSteps);
     const double stepQ = 4.0 / spb;
