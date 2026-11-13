@@ -315,8 +315,11 @@ int voicingForBar(const Config& cfg, int bar, int anchor, int* out);
 struct StepInput { int note; bool enabled; bool slide; float velocity; };
 
 /** Analyses step-grid notes against the chord of bar 0: heads → nearest chord
- *  member, other steps → the embellishment that explains them. The result is
- *  shaped to cfg's Len / grid with pulses = the enabled steps, rotation 0. */
+ *  member, other steps → the embellishment that explains them. The result has
+ *  cfg's grid; its Len follows the step count (1 bar, 2 when the steps exceed
+ *  one bar of the grid; later steps are dropped), pulses = the enabled steps
+ *  within that length, rotation 0. The caller writes Len / Pulses / Rotation
+ *  back so fitMotif keeps the analysed motif as it is. */
 Motif motifFromSteps(const StepInput* steps, int count, const Config& cfg,
                      std::uint32_t seed, int origin);
 
