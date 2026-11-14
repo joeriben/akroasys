@@ -3540,8 +3540,10 @@ int main(int argc, char** argv)
             // Fill: from the bar's last note before its last beat, else from
             // the note the bar entered with (the last of the bar before, in
             // the line under the Lift), into the next bar's first sounding
-            // head; the run sounds with the Lift (not Bass).
-            for (int b = 1; b + 2 < kBars; ++b)
+            // head; the run sounds with the Lift (not Bass). That head is
+            // looked for from bar b + 1 up to two bars on, so the last bar the
+            // loop reaches is b + 3.
+            for (int b = 1; b + 3 < kBars; ++b)
             {
                 const Target h = nextHead(line, b + 1, -1);
                 if (h.note < 0) continue;
