@@ -2840,7 +2840,9 @@ int main(int argc, char** argv)
         // notes, functions and heads from the bar views (Variation 0 and no
         // ABAB cadence, so a head plays as its slot renders), Fill notes from
         // the played events (their velocity; Variation 3/5: Lift and Fill, the
-        // head two bars on in an unvaried bar). Answer: notes from the played
+        // head two bars on in an unvaried bar; Lift, but for Bass, lifts the
+        // run with the last beat, and the line under it, which a bar after it
+        // enters from, is the line without Lift). Answer: notes from the played
         // events, functions and heads from the answer of the phrase's heard
         // motif (Shuffle 0: each onset is its step).
         std::mt19937 rng(30);
@@ -2970,15 +2972,22 @@ int main(int argc, char** argv)
                 // The run starts from the bar's last note before its last
                 // beat; without one, from the note the bar entered with: the
                 // last of the bar before (Pedal / Chords: entryNotes renders
-                // it, and it can itself lead into the next phrase). A bar
-                // entered from an empty bar is skipped.
+                // it, and it can itself lead into the next phrase), without
+                // the octave Lift put on that bar's last beat. A bar entered
+                // from an empty bar is skipped.
+                const int lift = c.part != Part::Bass ? 12 : 0;
+                auto varied = [&](int bar) {
+                    const int j = floorMod(bar, N), unitBars = N / 4;
+                    return (isBUnit(c, bar) && j % unitBars == unitBars - 1) || j == N - 1;
+                };
                 int from = -1, entered = -1;
                 std::vector<std::pair<double, int>> fills;
                 for (const Played& p : r.events)
                 {
                     if (p.ev.strandId != -1 || p.ev.type != VoiceEvent::Type::NoteOn) continue;
                     const double inBar = p.q - 4.0 * b;
-                    if (inBar >= -4.0 - 1.0e-3 && inBar < -1.0e-3) entered = p.ev.note - c.transpose;
+                    if (inBar >= -4.0 - 1.0e-3 && inBar < -1.0e-3)
+                        entered = p.ev.note - c.transpose - (varied(b - 1) && inBar >= -1.0 - 1.0e-3 ? lift : 0);
                     if (inBar < -1.0e-3 || inBar > 4.0 - 1.0e-3) continue;
                     if (std::abs(p.ev.velocity - kFillVel) < 1.0e-4) fills.emplace_back(inBar, p.ev.note - c.transpose);
                     else if (inBar < 3.0 - 1.0e-3) from = p.ev.note - c.transpose;
@@ -2989,7 +2998,7 @@ int main(int argc, char** argv)
                 for (const auto& [inBar, note] : fills)
                 {
                     const int j = static_cast<int>(std::lround((inBar - 3.0) / 0.25));
-                    const int want = scaleSteps(T, dir * (4 - j), mask);
+                    const int want = scaleSteps(T, dir * (4 - j), mask) + lift;
                     ++fillT.checked;
                     fillT.crossing += at == b + 2 && floorDiv(b + 1, N) == floorDiv(b, N) && floorDiv(at, N) != floorDiv(b, N);
                     if (note != want && fillT.bad++ < 2)
@@ -3049,6 +3058,86 @@ int main(int argc, char** argv)
         check(answerT.bad == 0, "Answer: an approach note leads into the head that plays (" + std::to_string(answerT.bad)
                                     + " of " + std::to_string(answerT.checked) + " off)" + answerT.why);
         check(answerT.crossing > 0, "Answer: approach notes led into the next phrase (" + std::to_string(answerT.crossing) + ")");
+    }
+
+    std::printf("\n== 31. Lift transposes the last beat of the line as it plays without Lift\n");
+    {
+        // Register lift (§3.7): the last beat goes up an octave. The line was
+        // lifted in itself: an embellishment after a lifted note took its P
+        // from that note and was lifted again (Repeat, Neighbour, Passing two
+        // or three octaves up), and the Fill run, in the same last beat, was
+        // not lifted at all. Oracle: the same varied bar at Variation 2/5
+        // (Re-pitch, Lift) and 1/5 (Re-pitch, the same draw): every event in
+        // the last beat sounds 12 above, every event before it is the same,
+        // and the line under it ends on the same notes, so a bar after it
+        // enters as it would without Lift. Riff, Lead and Stab (Bass plays an
+        // Octave instead, unchanged). The view shows the lifted notes.
+        std::mt19937 rng(31);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        int bars = 0, liftedNotes = 0, offInLast = 0, offBefore = 0, offEnd = 0, offView = 0, shapeErrs = 0;
+        std::string why;
+        for (int t = 0; t < 2000; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(1, 3));   // Riff, Lead, Stab
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.len = U(1, 2); c.pulses = U(2, 12); c.rotation = U(0, 7);
+            c.phraseBars = 8;
+            c.form = static_cast<Form>(U(0, 3));
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.layer = Layer::Off;
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(31000 + t), 0, c), c);
+            const int bar = 7;   // the last of phrase 0: varied in every form
+            // Both renders enter with the same notes.
+            const int pn = U(45, 69), ppn = U(45, 69);
+            BarRender r[2];
+            for (int i = 0; i < 2; ++i)
+            {
+                Config v = c;
+                v.variation = i == 0 ? 0.2f : 0.4f;
+                RenderInput in;
+                in.cfg = &v; in.motif = &m; in.nextPhraseMotif = &m;
+                in.bar = bar; in.barLenQ = 4.0;
+                in.prevNote = pn; in.prevPrevNote = ppn;
+                renderBar(in, r[i]);
+            }
+            ++bars;
+            if (r[0].count != r[1].count) { ++shapeErrs; continue; }
+            for (int e = 0; e < r[0].count; ++e)
+            {
+                const Event& a = r[0].events[static_cast<size_t>(e)];
+                const Event& b = r[1].events[static_cast<size_t>(e)];
+                if (std::abs(a.onQ - b.onQ) > 1.0e-9 || a.strand != b.strand) { ++shapeErrs; continue; }
+                const bool inLast = a.onQ >= 3.0 - 1.0e-9;
+                if (inLast) ++liftedNotes;
+                const int want = a.note + (inLast ? 12 : 0);
+                if (b.note != want)
+                {
+                    ++(inLast ? offInLast : offBefore);
+                    if (why.size() < 300)
+                        why += " | t " + std::to_string(t) + " part " + std::to_string(static_cast<int>(c.part)) + " at "
+                             + std::to_string(a.onQ) + ": " + std::to_string(a.note) + " -> " + std::to_string(b.note);
+                }
+            }
+            if (r[0].lastNote != r[1].lastNote || r[0].prevNote != r[1].prevNote) ++offEnd;
+            for (int k = 0; k < r[0].viewSteps; ++k)
+            {
+                const StepView& a = r[0].view[static_cast<size_t>(k)];
+                const StepView& b = r[1].view[static_cast<size_t>(k)];
+                if (a.note < 0) continue;
+                const bool inLast = k * (4.0 / m.stepsPerBar) >= 3.0 - 1.0e-9;
+                offView += b.note != a.note + (inLast ? 12 : 0);
+            }
+        }
+        check(shapeErrs == 0, "Lift changes no onset (" + std::to_string(shapeErrs) + " of " + std::to_string(bars) + " bars)");
+        check(liftedNotes > 1000, "last-beat events compared (" + std::to_string(liftedNotes) + ")");
+        check(offInLast == 0, "every event of the last beat sounds an octave above the bar without Lift ("
+                                  + std::to_string(offInLast) + " off)" + why);
+        check(offBefore == 0, "every event before the last beat is the bar without Lift (" + std::to_string(offBefore) + " off)");
+        check(offEnd == 0, "the line ends on the notes it ends on without Lift (" + std::to_string(offEnd) + " bars off)");
+        check(offView == 0, "the view shows the lifted notes (" + std::to_string(offView) + " off)");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

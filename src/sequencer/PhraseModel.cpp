@@ -953,7 +953,7 @@ struct Onset
 {
     double onQ = 0.0, durQ = 0.0;
     double gridQ = 0.0;        // unshuffled position (Fill looks for free 16ths)
-    int    note = 60;
+    int    note = 60;          // as it sounds: Lift included
     int    octShift = 0;       // Lift: +12 (Stab applies it to the voicing)
     float  vel = kVelNormal;
     int    step = -1;          // motif step, −1 for fill notes
@@ -1135,6 +1135,13 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     // The cadence lands on the bar's last sounding head; Lift (Bass) on the
     // last sounding pulse of the last beat; Ratchet on the last beat's
     // strongest head (or strongest pulse when it has none).
+    //
+    // Lift (not Bass) transposes the last beat: the line is rendered as it
+    // plays without Lift (P, PP, the Fill's start and the bar's last notes
+    // are that line's), and the last beat sounds an octave above it. Lifted
+    // in the line itself, every embellishment after a lifted note took the
+    // octave again from P (two or three octaves up), and the Fill run stayed
+    // below the notes around it.
     int lastHeadK = -1, lastPulseInLastBeat = -1, ratchetK = -1, ratchetW = -1;
     for (int k = 0; k < steps; ++k)
     {
@@ -1172,7 +1179,6 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
 
         const int T = lookaheadHead(x, k, false);
         int note = renderSlot(sl, ch, P, PP, T, x);
-        int octShift = 0;
 
         if (var.cadence != 0 && head && k == lastHeadK)
         {
@@ -1183,18 +1189,11 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             else
                 note = chordToneNote(ch, Fifth, sl.octave, x.tonic);
         }
-        if (var.lift && inLast)
+        const int octShift = var.lift && inLast && !x.bass ? 12 : 0;
+        if (var.lift && inLast && x.bass && k == lastPulseInLastBeat)
         {
-            if (!x.bass)
-            {
-                note += 12;
-                octShift = 12;
-            }
-            else if (k == lastPulseInLastBeat)
-            {
-                const int p = P >= 0 ? P : note;
-                note = p > x.center ? p - 12 : p + 12;    // Bass: an Octave instead
-            }
+            const int p = P >= 0 ? P : note;
+            note = p > x.center ? p - 12 : p + 12;    // Bass: an Octave instead
         }
 
         // A step lasts its slot: a step longer than what is left of the bar
@@ -1208,7 +1207,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         // its notes.
         Onset o;
         o.onQ = onQ; o.gridQ = posQ; o.durQ = slotEnd(posQ, stepQ, x.barLenQ) - posQ;
-        o.note = note; o.octShift = octShift;
+        o.note = note + octShift; o.octShift = octShift;
         o.vel = sl.accent ? kVelAccent : kVelNormal;
         o.step = s; o.barStep = k; o.fn = sl.fn; o.head = head; o.accent = sl.accent;
         o.forcedSlide = sl.slide;
@@ -1242,7 +1241,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         {
             out.push(o);
         }
-        if (sv) { sv->note = note; sv->fn = sl.fn; sv->head = head; sv->accent = sl.accent; sv->slide = false; }
+        if (sv) { sv->note = note + octShift; sv->fn = sl.fn; sv->head = head; sv->accent = sl.accent; sv->slide = false; }
 
         if (!inLast) pBeforeLastBeat = note;
         PP = P; P = note;
@@ -1279,8 +1278,8 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             Onset f;
             f.onQ = onQ; f.gridQ = q;
             f.durQ = 0.25;
-            f.note = scaleSteps(target, dir * (4 - j), x.mask);
             f.octShift = var.lift && !x.bass ? 12 : 0;
+            f.note = scaleSteps(target, dir * (4 - j), x.mask) + f.octShift;
             f.vel = kVelFill;
             f.fn = Fn::Passing;
             out.push(f);
@@ -1290,8 +1289,13 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     insertionSort(out.a.data(), out.n, [](const Onset& a, const Onset& b) { return a.onQ < b.onQ; });
     if (out.n > 0)
     {
-        P = out.a[static_cast<size_t>(out.n - 1)].note;
-        PP = out.n > 1 ? out.a[static_cast<size_t>(out.n - 2)].note : PP;
+        const Onset& l1 = out.a[static_cast<size_t>(out.n - 1)];
+        P = l1.note - l1.octShift;
+        if (out.n > 1)
+        {
+            const Onset& l2 = out.a[static_cast<size_t>(out.n - 2)];
+            PP = l2.note - l2.octShift;
+        }
     }
 }
 
@@ -1485,8 +1489,13 @@ void renderBar(const RenderInput& in, BarRender& out)
         emitChords(out, line, voicing, nv, -1, true, 0, cfg.transpose, 1.0f);
         if (cfg.layer == Layer::Octave)
             emitChords(out, line, voicing, nv, 5, false, octaveShift, cfg.transpose, kLayerVel);
-        for (int k = 0; k < out.viewSteps; ++k)
-            if (out.view[static_cast<size_t>(k)].note >= 0) out.view[static_cast<size_t>(k)].note = voicing[0];
+        // The view shows the chord's lowest voice, lifted with its step.
+        for (int i = 0; i < line.n; ++i)
+        {
+            const Onset& o = line.a[static_cast<size_t>(i)];
+            if (o.barStep >= 0 && !o.ratchetTail)
+                out.view[static_cast<size_t>(o.barStep)].note = voicing[0] + o.octShift;
+        }
     }
     else
     {
