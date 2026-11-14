@@ -1185,16 +1185,14 @@ void SequencerPanel::timerCallback()
 
     // Mode changes must update the layout even while audio is idle. Otherwise
     // a switch away from GEN stays visually in gen mode until PLAY wakes the
-    // timer path. Entering Step also re-reads the step count and the playhead:
-    // a load or automation may have changed the count while another mode was
-    // shown, Step playback may have stopped meanwhile, and both the step-count
-    // sync and the highlight further down sit below the idle early-return.
+    // timer path. Entering Step also re-reads the step count: a load or
+    // automation may have changed it while another mode was shown. The
+    // playhead highlight is re-read by resized() whenever it lays out Step.
     if (engine != layoutEngine)
     {
         if (stepMode)
         {
             syncStepCount();   // lays the panel out
-            showCurrentStep(playedStep());
         }
         else
         {
@@ -1589,6 +1587,7 @@ void SequencerPanel::resized()
     area.removeFromBottom(g);
 
     // ═══ Determine mode ═══
+    const int previousLayoutEngine = layoutEngine;
     layoutEngine = static_cast<int>(processorRef.getValueTreeState()
         .getRawParameterValue(PID::seqEngine)->load());
     const bool genModeActive  = layoutEngine == SeqEngine::Gen;
@@ -1597,6 +1596,15 @@ void SequencerPanel::resized()
     // Visibility: step grid vs gen controls (Row 1 stays ALWAYS visible)
     for (int i = 0; i < MAX_COLS; ++i)
         stepCols[static_cast<size_t>(i)]->setVisible(stepModeActive && i < numVisibleSteps);
+
+    // Laying out Step re-reads the playhead highlight. The timer keeps it
+    // current only in Step and only with the audio awake, so a column lit
+    // before another mode was shown would come back lit after Step playback
+    // stopped meanwhile. Here and not in the timer: whichever layout first
+    // sees the switch (the timer's, a window resize, a step-count sync) takes
+    // the edge the timer would act on.
+    if (stepModeActive && previousLayoutEngine != SeqEngine::Step)
+        showCurrentStep(playedStep());
 
     genStepsRow->setVisible(genModeActive);
     genPulsesRow->setVisible(genModeActive);

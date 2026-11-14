@@ -197,7 +197,8 @@ private:
     std::unique_ptr<GenSeqCRTMonitor> genMonitor;
 
     // The SeqEngine resized() last laid the panel out for (-1 before the
-    // first layout); the timer re-lays out when the parameter moves away.
+    // first layout); the timer re-lays out when the parameter moves away, and
+    // resized() re-reads the playhead highlight when it moves into Step.
     int layoutEngine = -1;
 
     // Row 4: Arp controls (left-labels + glyph/numeric switchboxes)

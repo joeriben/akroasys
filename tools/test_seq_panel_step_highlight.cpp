@@ -16,6 +16,10 @@
 //      only updated in Step mode, and below the timer's audioIdle gate. The
 //      Phrase stretch left the flag set, and entering Step in deep idle laid
 //      the grid out with it, so the column showed lit until audio activity.
+//   C. As B, but a layout other than the timer's sees the switch first: a
+//      window resize (or a step-count sync) runs resized(), which took the
+//      engine edge, so the timer's entering-Step re-read of the playhead never
+//      ran and the column stayed lit. resized() now re-reads it itself.
 //
 // A column is lit when its snapshot differs from the others: every step
 // carries the same data, so unlit columns of one kind (with or without the
@@ -298,6 +302,44 @@ void stepAfterPhraseInIdle()
     check("Step shows its 16 columns after the copy", stepColumns(panel).size() == kSteps);
     check("none after the audio thread ran", afterBlock.empty());
 }
+
+/** C: as B, but a resize lays out Step before the timer sees the switch. */
+void stepThroughResizeInIdle()
+{
+    std::printf("C. back to Step through a resize, in deep idle\n");
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    uniformGrid(proc);
+    SequencerPanel panel(proc);
+    panel.setSize(864, 208);
+    tick();
+
+    const int step = playStepAndShow(proc);
+    const auto playing = litColumns(panel);
+    check("the played column is lit", playing.size() == 1 && playing[0] == step);
+
+    setPlain(proc, PID::seqEngine, static_cast<float>(SeqEngine::Phrase));
+    blocks(proc, 4);
+    tick();
+    setPlain(proc, PID::seqRunning, 0.0f);
+    blocks(proc, 4);
+    tick();
+    blocks(proc, kIdleBlocks);
+    check("deep idle before the switch", proc.audioIdle.load());
+
+    setPlain(proc, PID::seqEngine, static_cast<float>(SeqEngine::Step));
+    panel.setSize(900, 208);   // resized() sees the switch before the timer
+    const auto resizedLit = litColumns(panel);
+    printLit(resizedLit);
+    check("Step shows its 16 columns after the resize", stepColumns(panel).size() == kSteps);
+    check("no column lit when the resize lays out Step", resizedLit.empty());
+    tick();
+    tick();
+    const auto ticked = litColumns(panel);
+    printLit(ticked);
+    check("nor after the timer ran", ticked.empty());
+}
 } // namespace
 
 int main()
@@ -308,6 +350,7 @@ int main()
 
     stopButtonInStep();
     stepAfterPhraseInIdle();
+    stepThroughResizeInIdle();
 
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::printf(failures == 0 ? "ALL PASS\n" : "%d FAIL\n", failures);
