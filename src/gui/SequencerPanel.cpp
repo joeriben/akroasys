@@ -1155,6 +1155,18 @@ void SequencerPanel::showCurrentStep(int step)
     currentStep = step;
 }
 
+int SequencerPanel::playedStep() const
+{
+    // The audio thread clears the playhead only in its first block after a
+    // stop, so a tick between the STOP click and that block would read the
+    // played step and light again the column the click put out. The transport
+    // parameter is what starts and stops Step playback, and it reads stopped
+    // from the click on.
+    if (processorRef.getValueTreeState().getRawParameterValue(PID::seqRunning)->load() <= 0.5f)
+        return -1;
+    return processorRef.getStepSequencer().currentStepForGui.load(std::memory_order_relaxed);
+}
+
 void SequencerPanel::mouseDoubleClick(const juce::MouseEvent& e)
 {
     // Double-click on the Step mode segment toggles step-record (latched).
@@ -1182,8 +1194,7 @@ void SequencerPanel::timerCallback()
         if (stepMode)
         {
             syncStepCount();   // lays the panel out
-            showCurrentStep(processorRef.getStepSequencer()
-                                .currentStepForGui.load(std::memory_order_relaxed));
+            showCurrentStep(playedStep());
         }
         else
         {
@@ -1280,8 +1291,7 @@ void SequencerPanel::timerCallback()
 
     // Step-grid highlight (step mode only; the grid is hidden in Phrase and Gen).
     if (stepMode)
-        showCurrentStep(processorRef.getStepSequencer()
-                            .currentStepForGui.load(std::memory_order_relaxed));
+        showCurrentStep(playedStep());
 
     // Transport button state (step seq)
     transportBtn.setButtonText(seqRunning ? "STOP" : "PLAY");

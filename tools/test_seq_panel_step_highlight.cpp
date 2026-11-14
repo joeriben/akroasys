@@ -7,7 +7,11 @@
 //
 //   A. STOP pressed in Step mode. The button cleared the panel's mirror of the
 //      current step but not the column's flag; the timer then saw the mirror
-//      already equal to the stopped -1 and never unlit the column.
+//      already equal to the stopped -1 and never unlit the column. Once the
+//      click put the column out, a tick landing before the audio thread's next
+//      block read the still-set playhead and lit it again for one tick; the
+//      panel now shows no playhead while the transport parameter reads
+//      stopped.
 //   B. Step running -> Phrase -> stop -> deep idle -> Step. The highlight is
 //      only updated in Step mode, and below the timer's audioIdle gate. The
 //      Phrase stretch left the flag set, and entering Step in deep idle laid
@@ -17,7 +21,7 @@
 // carries the same data, so unlit columns of one kind (with or without the
 // beat border on every fourth) render identically. A snapshot paints the
 // flag whether or not the panel asked for a repaint, so A also checks that
-// the column lit and the column unlit are invalidated (a CachedComponentImage
+// the column lit and the column unlit at the click are invalidated (a CachedComponentImage
 // on the panel records it; there is no window here).
 //
 // Build: the processor-level recipe of tools/test_seq_engine_idle.cpp
@@ -229,6 +233,20 @@ void stopButtonInStep()
     if (stop == nullptr) return;
     probe->reset();
     stop->onClick();
+    const auto clicked = litColumns(panel);
+    printLit(clicked);
+    check("the click puts the column out at once", clicked.empty());
+    check("and repaints it", probe->covers(litBounds));
+
+    // A tick before the audio thread's next block: the playhead still reads
+    // the played step.
+    check("the playhead still reads the played step",
+          proc.getStepSequencer().currentStepForGui.load() == step);
+    tick();
+    const auto early = litColumns(panel);
+    printLit(early);
+    check("a tick before the next audio block keeps it out", early.empty());
+
     blocks(proc, 3);   // the audio thread stops Step playback
     check("Step playback stopped",
           proc.getStepSequencer().currentStepForGui.load() == -1 && ! proc.audioIdle.load());
@@ -236,7 +254,6 @@ void stopButtonInStep()
     const auto stopped = litColumns(panel);
     printLit(stopped);
     check("no column lit after STOP", stopped.empty());
-    check("the column lit before is repainted", probe->covers(litBounds));
 }
 
 /** B: Step running -> Phrase -> stop -> deep idle -> Step. The tick that

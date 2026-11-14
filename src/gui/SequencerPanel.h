@@ -48,6 +48,9 @@ private:
      *  so the lit column always matches currentStep; only the columns that
      *  change repaint. */
     void showCurrentStep(int step);
+    /** The step column to light: Step's playhead while the transport runs,
+     *  none (-1) while it is stopped. */
+    int playedStep() const;
     void showHeaderOverflowMenu();
 
     T5ynthProcessor& processorRef;
