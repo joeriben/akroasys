@@ -4685,6 +4685,82 @@ int main(int argc, char** argv)
         check(locOff == 0, "Keys: a locate plays the line playing reaches (" + std::to_string(locOff) + " of "
                                + std::to_string(locates) + " off)" + locWhy);
         check(errs == 0, "Keys entry: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+
+        // Oracle 4: Harm turned from Chords to Keys inside a bar. The bar
+        // re-renders under Keys, entered from the chord bar − 1 ended on: the
+        // one Chords rendered, not a Keys chord latched before (here the one
+        // held at the start, under Chords not heard). Keys held on the triad
+        // of the one Chords degree, the run plays on what Chords plays, note
+        // for note. Evolve 0 and no Stab or Chord layer (their voicing is led
+        // live), so the bar's render can be rebuilt here: `turnMatters`
+        // counts the turns where entering from the stale chord plays other
+        // notes after the turn.
+        int turns = 0, turnOff = 0, turnMatters = 0, turnErrs = 0;
+        std::string turnWhy;
+        for (int t = 0; t < 800; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.scaleRoot = U(0, 11);
+            c.stepsPerBar = 4 << U(0, 2);
+            c.len = U(1, 2); c.pulses = U(1, c.stepsPerBar); c.rotation = U(0, c.stepsPerBar - 1);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = 0.25f * static_cast<float>(U(0, 4));
+            c.slide = 0.5f * static_cast<float>(U(0, 2));
+            c.shuffle = U(0, 1) ? 0.0f : 0.4f;
+            c.layer = U(0, 2) == 0 ? Layer::Off : (U(0, 1) ? Layer::Octave : Layer::Answer);
+            const int mi = U(0, 8);
+            const int tsNum = kMeters[mi][0], tsDen = kMeters[mi][1];
+            const double barLenQ = 4.0 * tsNum / tsDen, beatQ = 4.0 / tsDen;
+            const std::uint32_t seed = static_cast<std::uint32_t>(37500 + t);
+
+            const int deg = U(1, 7);
+            Config d = c; d.harm = Harm::Chords; d.chordDegrees = { deg, 0, 0, 0 };
+            Config k = d; k.harm = Harm::Keys;
+            const Chord stale = chordForDegree((deg - 1 + U(1, 6)) % 7, c.scaleType, c.scaleRoot, c.ext7);
+            const std::vector<int> held = triadOf(chordForDegree(deg - 1, c.scaleType, c.scaleRoot, c.ext7));
+            const int b = U(2, 12);
+            const double bQ = b * barLenQ;
+            const double turnQ = bQ + barLenQ * U(1, 15) / 16.0;
+            const int bars = b + 2;
+            double turnedAt = -1.0;
+            const Run ra = play(d, 0.0, bars * barLenQ, tsNum, tsDen, { { 0.0, triadOf(stale) }, { 0.5 * beatQ, held } }, seed,
+                                [&](T5ynthPhraseSequencer& s, double q) {
+                                    if (turnedAt < 0.0 && q >= turnQ) { s.setConfig(k); turnedAt = q; }
+                                });
+            const Run rb = play(d, 0.0, bars * barLenQ, tsNum, tsDen, {}, seed);
+            turnErrs += ra.hangs + ra.orphanOffs + ra.badGlides + ra.sounding;
+            ++turns;
+            std::string w;
+            if (!same(onsInBars(ra, barLenQ, 0, bars), onsInBars(rb, barLenQ, 0, bars), w) && turnOff++ < 3)
+                turnWhy += " | t " + std::to_string(t) + " turn at " + std::to_string(turnedAt) + ": " + w;
+
+            if (barOf(turnedAt, barLenQ) != b) continue;
+            const Motif fm = fitMotif(generateMotif(seed, 0, k), k);
+            const Motif am = c.layer == Layer::Answer ? answerMotif(fm, k) : Motif {};
+            auto after = [&](const Chord& entry) {
+                BarRender sc, out;
+                int p = -1, pp = -1;
+                entryNotes(k, fm, fm, b, barLenQ, &entry, sc, p, pp);
+                RenderInput in;
+                in.cfg = &k; in.motif = &fm; in.nextPhraseMotif = &fm; in.bar = b; in.barLenQ = barLenQ;
+                in.answer = c.layer == Layer::Answer ? &am : nullptr;
+                in.keys = true; in.keysChord = chordOf(held); in.prevNote = p; in.prevPrevNote = pp;
+                renderBar(in, out);
+                std::vector<std::pair<double, int>> v;
+                for (int e = 0; e < out.count; ++e)
+                    if (bQ + out.events[static_cast<size_t>(e)].onQ > turnedAt + 1.0e-9)
+                        v.push_back({ out.events[static_cast<size_t>(e)].onQ, out.events[static_cast<size_t>(e)].note });
+                return v;
+            };
+            turnMatters += after(chordOf(triadOf(stale))) != after(chordForDegree(deg - 1, c.scaleType, c.scaleRoot, c.ext7));
+        }
+        check(turns == 800 && turnMatters > 30 && turnOff == 0,
+              "Chords turned to Keys inside a bar: the bar plays on entered from the chord Chords ended bar − 1 on ("
+                  + std::to_string(turnOff) + " of " + std::to_string(turns) + " off; " + std::to_string(turnMatters)
+                  + " where entering from the Keys chord latched before plays other notes after the turn)" + turnWhy);
+        check(turnErrs == 0, "Chords turned to Keys: no hanging or orphan note, no bad glide (" + std::to_string(turnErrs) + ")");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
