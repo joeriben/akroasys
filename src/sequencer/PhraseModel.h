@@ -422,11 +422,14 @@ std::string noteNameText(int note);
 std::string chordNameText(const Chord& c);
 
 /** What a step plays, as the phrase view writes it: · a rest or a silenced
- *  step; R 3 5 7 the chord tone (2 the scale step a cadence puts there), ●
- *  a Stab hit of the whole chord, each with ' per octave above the part's
- *  register and , per octave below; = repeat, 8ve octave, p passing,
- *  n↑ / n↓ neighbour, ↗ / ↘ the approach that rises / falls into the next
- *  head, ½↗ the chromatic approach from a semitone below. */
+ *  step; a chord tone by its name in the bar's chord (its ToneLabel: R,
+ *  2 / 3 / 4, 5, 6 / 7, and an added member's ♭9 9 11 ♯11 ♭13 maj7; 2 also
+ *  the scale step a cadence puts there), ● a Stab hit of the whole chord;
+ *  = repeat, 8ve octave, p passing, n↑ / n↓ neighbour, ↗ / ↘ the approach
+ *  that rises / falls into the next head, ½↗ the chromatic approach from a
+ *  semitone below. Each takes ' per octave above the part's register and ,
+ *  per octave below: a chord tone's octave, and the one Lift puts on any
+ *  step. */
 std::string stepGlyphText(const StepView& v);
 
 // ─── Step → Phrase (§4) ─────────────────────────────────────────────────────
