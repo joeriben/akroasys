@@ -808,8 +808,8 @@ int main(int argc, char** argv)
             const Motif h1 = evolvedMotif(f, cc, 1), h2 = evolvedMotif(f, cc, 2);
             BarRender scratch;
             int p1 = -1, pp1 = -1, p2 = -1, pp2 = -1;
-            entryNotes(cc, h1, h2, 8, B, scratch, p1, pp1);
-            entryNotes(cc, h2, h2, 8, B, scratch, p2, pp2);
+            entryNotes(cc, h1, h2, 8, B, nullptr, scratch, p1, pp1);
+            entryNotes(cc, h2, h2, 8, B, nullptr, scratch, p2, pp2);
             check(p1 != p2 || pp1 != pp2,
                   "keep in a phrase's first bar: its entry differs when led from the kept motif "
                   "(else the checks below prove nothing)");
@@ -2972,8 +2972,8 @@ int main(int argc, char** argv)
                 if (T < 0 || (at == b + 1 && atK * (4.0 / c.stepsPerBar) >= 3.0 - 1.0e-9)) continue;
                 // The run starts from the bar's last note before its last
                 // beat; without one, from the note the bar entered with: the
-                // last of the bar before (Pedal / Chords: entryNotes renders
-                // it, and it can itself lead into the next phrase), without
+                // last of the bar before (entryNotes renders it, and it can
+                // itself lead into the next phrase), without
                 // the octave Lift put on that bar's last beat. A bar entered
                 // from an empty bar is skipped.
                 const int lift = c.part != Part::Bass ? 12 : 0;
@@ -4162,6 +4162,205 @@ int main(int argc, char** argv)
                   + std::to_string(intoOff) + ", " + std::to_string(crossOff) + " from the bar before) or out of it ("
                   + std::to_string(fromOff) + "), no Chord-layer hit (" + std::to_string(chordOff)
                   + "), ratchet on the strongest other head (" + std::to_string(ratchetOff) + ")" + why);
+    }
+
+    std::printf("\n== 37. Under Keys a bar enters from the bar before rendered on its own\n");
+    {
+        // Keys carried the line on live from bar to bar: a bar entered with
+        // the last notes the bar before had played. Where no head sounds in a
+        // bar (a bar of one beat, a sparse motif), nothing pulls the line
+        // back: a Passing step goes on up from its P, a Neighbour drifts, and
+        // the line climbed bar after bar until it stuck at the top of the
+        // MIDI range. A locate entered with no notes at all and played other
+        // notes than playing there did. Pedal and Chords enter from bar − 1
+        // rendered on its own from the chord root (§3.9); Keys now does the
+        // same with the chord bar − 1 ended on.
+        //  - Oracle 1: keys held on one chord all along play what Chords with
+        //    that chord as its only slot plays, note for note.
+        //  - Oracle 2: a chord latched in a bar's last beat takes effect at the
+        //    next downbeat; that bar plays as renderBar renders it with the
+        //    new chord, entered from the bar before rendered on its own with
+        //    the chord it ended on (entryNotes), not with the new one. A chord
+        //    taking effect inside the bar before is the one it ended on, not
+        //    the one it started on.
+        //  - Oracle 3: a locate under Keys, with chords changing on the way,
+        //    plays the line playing reaches there, when the bar before ended
+        //    on the chord held at the locate. The Chord layer and Stab voice
+        //    the chord led from the voicing before, live (it stays near its
+        //    anchor): they are not compared.
+        std::mt19937 rng(37);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static const int kMeters[][2] = { { 1, 4 }, { 2, 4 }, { 1, 8 }, { 3, 8 }, { 3, 4 }, { 4, 4 }, { 5, 8 }, { 7, 8 }, { 5, 16 } };
+        auto triadOf = [](const Chord& ch) {
+            std::vector<int> v { 48 + ch.rootPc };
+            for (int i = 1; i < 3; ++i) if (ch.iv[static_cast<size_t>(i)] >= 0) v.push_back(48 + ch.rootPc + ch.iv[static_cast<size_t>(i)]);
+            return v;
+        };
+        auto mainTop = [](const Run& r) {
+            int top = -1;
+            for (const auto& p : r.events)
+                if (p.ev.type == VoiceEvent::Type::NoteOn && p.ev.strandId == -1) top = std::max(top, p.ev.note);
+            return top;
+        };
+        int trials = 0, sameOff = 0, higher = 0, short1 = 0, locates = 0, locOff = 0, changesIn = 0, errs = 0;
+        int topKeys = 0, topChords = 0, entries = 0, entriesInside = 0, entryOff = 0, entryMatters = 0;
+        std::string why, locWhy, entryWhy;
+        auto chordOf = [](const std::vector<int>& v) {
+            std::uint16_t mask = 0;
+            for (int n : v) mask = static_cast<std::uint16_t>(mask | (1u << (n % 12)));
+            return chordFromKeys(v[0], mask);
+        };
+        auto same = [](const std::vector<Played>& a, const std::vector<Played>& b, std::string& w) {
+            return (a.empty() && b.empty()) || sameOns(a, b, w);
+        };
+        for (int t = 0; t < 240; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));
+            c.scaleRoot = U(0, 11);
+            c.stepsPerBar = 4 << U(0, 2);
+            c.len = U(1, 2); c.pulses = U(1, c.stepsPerBar); c.rotation = U(0, c.stepsPerBar - 1);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = 0.25f * static_cast<float>(U(0, 4));
+            c.evolve = U(0, 1) ? 0.0f : 0.5f;
+            c.slide = 0.5f * static_cast<float>(U(0, 2));
+            c.shuffle = U(0, 1) ? 0.0f : 0.4f;
+            c.layer = static_cast<Layer>(U(0, 3));
+            const int mi = U(0, 8);
+            const int tsNum = kMeters[mi][0], tsDen = kMeters[mi][1];
+            const double barLenQ = 4.0 * tsNum / tsDen, beatQ = 4.0 / tsDen;
+            short1 += barLenQ <= 1.0;
+            const std::uint32_t seed = static_cast<std::uint32_t>(37000 + t);
+            ++trials;
+
+            // Oracle 1
+            const int deg = U(1, 7);
+            Config k = c; k.harm = Harm::Keys;
+            Config d = c; d.harm = Harm::Chords; d.chordDegrees = { deg, 0, 0, 0 };
+            const std::vector<int> held = triadOf(chordForDegree(deg - 1, c.scaleType, c.scaleRoot, c.ext7));
+            const int bars = 48;
+            const Run rk = play(k, 0.0, bars * barLenQ, tsNum, tsDen, { { 0.0, held } }, seed);
+            const Run rd = play(d, 0.0, bars * barLenQ, tsNum, tsDen, {}, seed);
+            errs += rk.hangs + rk.orphanOffs + rk.badGlides + rk.sounding;
+            std::string w;
+            if (!same(onsInBars(rk, barLenQ, 0, bars), onsInBars(rd, barLenQ, 0, bars), w) && sameOff++ < 3)
+                why += " | t " + std::to_string(t) + " " + w;
+            const int tk = mainTop(rk), td = mainTop(rd);
+            higher += tk > td;
+            topKeys = std::max(topKeys, tk);
+            topChords = std::max(topChords, td);
+
+            if (c.part == Part::Stab) continue;
+
+            // Oracle 2. Evolve 0 and no layer: every phrase plays the motif
+            // as diced, and the bar's events are the main line's. The new
+            // chord is another degree than the one held.
+            for (int rep = 0; rep < 4; ++rep)
+            {
+                const int b = U(2, 12);
+                const double bQ = b * barLenQ;
+                const bool inside = rep == 3 && tsNum >= 2;   // effective on bar b − 1's second beat
+                Config k2 = c; k2.harm = Harm::Keys; k2.evolve = 0.0f; k2.layer = Layer::Off;
+                const std::vector<int> next = triadOf(chordForDegree((deg - 1 + U(1, 6)) % 7, c.scaleType, c.scaleRoot, c.ext7));
+                const double tc = inside ? bQ - barLenQ + 0.5 * beatQ : bQ - 0.5 * beatQ;
+                const Run r2 = play(k2, 0.0, (b + 1) * barLenQ, tsNum, tsDen, { { 0.0, held }, { tc, next } }, seed);
+                errs += r2.hangs + r2.orphanOffs + r2.badGlides + r2.sounding;
+                const Motif fm = fitMotif(generateMotif(seed, 0, k2), k2);
+                auto expect = [&](const Chord& before) {
+                    BarRender sc2, out2;
+                    int p = -1, pp = -1;
+                    entryNotes(k2, fm, fm, b, barLenQ, &before, sc2, p, pp);
+                    RenderInput in;
+                    in.cfg = &k2; in.motif = &fm; in.nextPhraseMotif = &fm; in.bar = b; in.barLenQ = barLenQ;
+                    in.keys = true; in.keysChord = chordOf(next); in.prevNote = p; in.prevPrevNote = pp;
+                    renderBar(in, out2);
+                    std::vector<std::pair<double, int>> v;
+                    for (int e = 0; e < out2.count; ++e)
+                        v.push_back({ bQ + out2.events[static_cast<size_t>(e)].onQ, out2.events[static_cast<size_t>(e)].note });
+                    return v;
+                };
+                const auto want = expect(chordOf(inside ? next : held)), fromNew = expect(chordOf(inside ? held : next));
+                std::vector<std::pair<double, int>> got;
+                for (const Played& p : onsInBars(r2, barLenQ, b, b + 1)) got.push_back({ p.q, p.ev.note });
+                bool ok = got.size() == want.size();
+                for (size_t e = 0; ok && e < got.size(); ++e)
+                    ok = std::abs(got[e].first - want[e].first) < 1.5 * kOneSampleQ && got[e].second == want[e].second;
+                ++entries;
+                entriesInside += inside;
+                bool matters = want.size() != fromNew.size();
+                for (size_t e = 0; !matters && e < want.size(); ++e) matters = want[e].second != fromNew[e].second;
+                entryMatters += matters;
+                if (!ok && entryOff++ < 3)
+                {
+                    entryWhy += " | t " + std::to_string(t) + " bar " + std::to_string(b) + ":";
+                    for (const auto& g : got) entryWhy += " " + std::to_string(g.second);
+                    entryWhy += " want";
+                    for (const auto& g : want) entryWhy += " " + std::to_string(g.second);
+                }
+            }
+
+            // Oracle 3: chords change mid-beat, so both runs latch them in the
+            // same beat whatever their block grids; one takes effect at the
+            // beat after it.
+            std::vector<std::pair<double, std::vector<int>>> keys { { 0.0, held } };
+            const int locBar = U(2, 24);
+            for (int n = U(1, 3); n > 0; --n)
+            {
+                const int beats = static_cast<int>(std::llround(locBar * barLenQ / beatQ)) + 4;
+                keys.push_back({ (U(0, beats) + 0.5) * beatQ,
+                                 triadOf(chordForDegree(U(0, 6), c.scaleType, c.scaleRoot, c.ext7)) });
+            }
+            // And one in the located bar's first beat: the bar entered keeps
+            // the chord it was entered from when a re-render takes the new one.
+            keys.push_back({ locBar * barLenQ + 0.5 * beatQ,
+                             triadOf(chordForDegree(U(0, 6), c.scaleType, c.scaleRoot, c.ext7)) });
+            std::sort(keys.begin(), keys.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            const double locQ = locBar * barLenQ;
+            bool atEntry = false;   // a change taking effect at the locate's downbeat: bar − 1 ended on the old chord
+            for (const auto& kc : keys)
+                if (kc.first > 0.0)
+                {
+                    const double effective = std::ceil(kc.first / beatQ) * beatQ;
+                    atEntry = atEntry || std::abs(effective - locQ) < 1.0e-9;
+                    changesIn += kc.first < locQ;
+                }
+            if (atEntry) continue;
+            const int toBar = locBar + 4;
+            // Evolve 0: a motif diced while stopped evolves from the phrase it
+            // is first heard in (§3.8), the located run's own.
+            Config kl = c; kl.harm = Harm::Keys; kl.evolve = 0.0f;
+            const Run cont = play(kl, 0.0, toBar * barLenQ, tsNum, tsDen, keys, seed);
+            const Run loc = play(kl, locQ, toBar * barLenQ, tsNum, tsDen, keys, seed);
+            errs += cont.hangs + cont.orphanOffs + cont.badGlides + cont.sounding
+                  + loc.hangs + loc.orphanOffs + loc.badGlides + loc.sounding;
+            auto lineOf = [&](const Run& r) {
+                std::vector<Played> v;
+                for (const Played& p : onsInBars(r, barLenQ, locBar, toBar))
+                    if (c.layer != Layer::Chord || p.ev.strandId == -1) v.push_back(p);
+                return v;
+            };
+            ++locates;
+            w.clear();
+            if (!same(lineOf(cont), lineOf(loc), w) && locOff++ < 3)
+                locWhy += " | t " + std::to_string(t) + " locate to bar " + std::to_string(locBar) + ": " + w;
+        }
+        check(trials == 240 && short1 > 40 && locates > 120 && changesIn > 150,
+              "cases: trials (" + std::to_string(trials) + ", " + std::to_string(short1)
+                  + " in a bar of a beat or less), locates (" + std::to_string(locates) + ", "
+                  + std::to_string(changesIn) + " chords changed before them)");
+        check(sameOff == 0 && higher == 0,
+              "Keys on one chord plays what Chords on it plays (" + std::to_string(sameOff) + " trials differ, "
+                  + std::to_string(higher) + " higher; top note " + std::to_string(topKeys) + " vs "
+                  + std::to_string(topChords) + ")" + why);
+        check(entries > 600 && entriesInside > 100 && entryMatters > 30 && entryOff == 0,
+              "Keys: a bar a chord change reaches at its downbeat enters from the chord the bar before ended on ("
+                  + std::to_string(entryOff) + " of " + std::to_string(entries) + " off; " + std::to_string(entryMatters)
+                  + " where the other chord's entry plays other notes; " + std::to_string(entriesInside)
+                  + " with the chord taking effect inside the bar before)" + entryWhy);
+        check(locOff == 0, "Keys: a locate plays the line playing reaches (" + std::to_string(locOff) + " of "
+                               + std::to_string(locates) + " off)" + locWhy);
+        check(errs == 0, "Keys entry: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

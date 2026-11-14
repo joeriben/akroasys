@@ -1627,7 +1627,7 @@ void renderBar(const RenderInput& in, BarRender& out)
 }
 
 void entryNotes(const Config& cfg, const Motif& motif, const Motif& nextPhraseMotif,
-                int bar, double barLenQ, BarRender& scratch, int& p, int& pp)
+                int bar, double barLenQ, const Chord* keysChord, BarRender& scratch, int& p, int& pp)
 {
     RenderInput in;
     in.cfg = &cfg;
@@ -1635,7 +1635,9 @@ void entryNotes(const Config& cfg, const Motif& motif, const Motif& nextPhraseMo
     in.nextPhraseMotif = &nextPhraseMotif;
     in.bar = bar - 1;
     in.barLenQ = barLenQ;
-    const Chord ch = chordForBar(cfg, bar - 1);
+    in.keys = keysChord != nullptr;
+    if (keysChord) in.keysChord = *keysChord;
+    const Chord ch = keysChord ? *keysChord : chordForBar(cfg, bar - 1);
     in.prevNote = in.prevPrevNote = chordRootNote(ch, tonicNote(partAnchor(motif.part), cfg.scaleRoot));
     Config c = cfg;
     c.layer = Layer::Off;   // only the main line's last notes matter

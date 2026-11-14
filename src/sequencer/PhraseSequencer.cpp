@@ -463,25 +463,23 @@ void T5ynthPhraseSequencer::renderCurrent()
     in.barLenQ = barLenQ;
     in.keys = cfg.harm == Harm::Keys;
     in.keysChord = currentKeysChord();
+    // The line enters from bar − 1 rendered on its own, so bar b sounds the
+    // same whether reached by playing or by a locate, and no drift carries
+    // on from bar to bar (a line continued live climbs without end where no
+    // head pulls it back). The last bar of the phrase before plays evoPrev
+    // (or the kept lead-in) on into this phrase. Keys renders bar − 1 with
+    // the chord it ended on; the voicing goes on live, voice-led from the
+    // chord before (it stays near its anchor).
+    const bool firstBar = floorDiv(bar - 1, N) != p;
+    int ep = -1, epp = -1;
+    entryNotes(L, firstBar ? evoPrev : cur, firstBar ? cur : evoNext, bar, barLenQ,
+               in.keys ? &entryChord : nullptr, scratch, ep, epp);
+    in.prevNote = ep;
+    in.prevPrevNote = epp;
     if (in.keys)
     {
-        // Keys has no chord history to recompute: the line continues live.
-        in.prevNote = entryP;
-        in.prevPrevNote = entryPP;
         in.prevVoicing = entryVoicingCount > 0 ? entryVoicing.data() : nullptr;
         in.prevVoicingCount = entryVoicingCount;
-    }
-    else
-    {
-        // Pedal / Chords: the entry state is bar − 1 rendered on its own, so
-        // bar b sounds the same whether reached by playing or by a locate.
-        // The last bar of the phrase before plays evoPrev (or the kept
-        // lead-in) on into this phrase.
-        const bool firstBar = floorDiv(bar - 1, N) != p;
-        int ep = -1, epp = -1;
-        entryNotes(L, firstBar ? evoPrev : cur, firstBar ? cur : evoNext, bar, barLenQ, scratch, ep, epp);
-        in.prevNote = ep;
-        in.prevPrevNote = epp;
     }
     in.slideIn = heldNote[static_cast<size_t>(slotOf(-1))] >= 0;
     renderBar(in, render);
@@ -498,15 +496,13 @@ void T5ynthPhraseSequencer::enterBar(int newBar, bool continuous)
 {
     if (continuous)
     {
-        entryP = render.lastNote;
-        entryPP = render.prevNote;
+        entryChord = render.chord;   // the chord bar − 1 ended on
         entryVoicingCount = render.lastVoicingCount;
         for (int v = 0; v < entryVoicingCount; ++v)
             entryVoicing[static_cast<size_t>(v)] = render.lastVoicing[static_cast<size_t>(v)];
     }
     else
     {
-        entryP = entryPP = -1;
         entryVoicingCount = 0;
     }
 
@@ -537,6 +533,9 @@ void T5ynthPhraseSequencer::enterBar(int newBar, bool continuous)
         keysEverSet = true;
         keysChanged = false;
     }
+    // A locate has no bar before playing into it: the chord held at it. A
+    // chord taking effect later in the bar does not change where it entered.
+    if (!continuous) entryChord = currentKeysChord();
 
     renderCurrent();
     nextEvent = 0;

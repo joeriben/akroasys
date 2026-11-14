@@ -241,7 +241,9 @@ private:
     double barStartQ = 0.0;
     PhraseModel::BarRender render, scratch;
     int nextEvent = 0;                   // index into render.events
-    int entryP = -1, entryPP = -1;       // Keys: the live line at the bar entry
+    // Keys: the chord the bar before ended on (a locate: the chord held at
+    // it), set at the bar entry, and the voicing the bar before ended on.
+    PhraseModel::Chord entryChord {};
     std::array<int, PhraseModel::kMaxVoices> entryVoicing {};
     int entryVoicingCount = 0;
 

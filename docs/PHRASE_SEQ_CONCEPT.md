@@ -291,6 +291,16 @@ locate. Consequences:
   plays the same line. (Gen's patterns are re-randomised; that difference
   is intentional.)
 
+Each bar's line enters from the last notes of the bar before, that bar
+rendered on its own from its chord root; no drift carries on from bar to
+bar. Under Keys the chord is played, not a function of b, so the bar
+before is rendered with the chord it ended on (after a locate: the chord
+held at the locate). A bar then plays the same whether it is reached by
+playing or by locating with the same chord held, and Keys on one chord
+plays what Chords on that chord plays. The voicing of Stab and of the
+Chord layer is the exception: it is voice-led live from the voicing
+before (§3.5), which keeps it near its anchor.
+
 ### 3.10 Layers
 
 One extra layer per instance, using the strand mechanism, panned centre

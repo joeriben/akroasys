@@ -85,8 +85,8 @@ struct Motif : MotifBody
      *  A phrase before the origin plays the motif itself, so without it the
      *  origin phrase's first bar would enter from the motif's own last bar
      *  rather than from what preceded it when it was heard. The first bar of
-     *  the origin phrase enters from it (Pedal / Chords: entryNotes renders
-     *  the bar before with it), so the entry follows every later change of
+     *  the origin phrase enters from it (entryNotes renders the bar before
+     *  with it), so the entry follows every later change of
      *  the config as it would without the Keep. It names the phrase it
      *  preceded (leadInPhrase) and applies only while that phrase is the
      *  origin; otherwise the phrase before leads in, as for a motif without
@@ -344,13 +344,16 @@ struct RenderInput
  *  bar and the scheduler plays the events from the current position on. */
 void renderBar(const RenderInput& in, BarRender& out);
 
-/** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
- *  of bar − 1, rendered on its own as renderBar renders it, from `motif` (the
- *  heard motif of bar − 1's phrase, or the kept lead-in into an origin phrase)
- *  with `nextPhraseMotif` (the heard motif of the phrase after bar − 1's).
- *  Keeps continuous play and a locate equal. */
+/** The main line's P / PP entering `bar`: the last notes of bar − 1,
+ *  rendered on its own as renderBar renders it, from the chord root, from
+ *  `motif` (the heard motif of bar − 1's phrase, or the kept lead-in into an
+ *  origin phrase) with `nextPhraseMotif` (the heard motif of the phrase after
+ *  bar − 1's). `keysChord` is the Keys source's chord bar − 1 ended on;
+ *  nullptr for Pedal and Chords, whose chord at bar − 1 the config gives.
+ *  Keeps continuous play and a locate equal, and keeps a line from carrying
+ *  a drift on from bar to bar. */
 void entryNotes(const Config& cfg, const Motif& motif, const Motif& nextPhraseMotif,
-                int bar, double barLenQ, BarRender& scratch, int& p, int& pp);
+                int bar, double barLenQ, const Chord* keysChord, BarRender& scratch, int& p, int& pp);
 
 /** Stab / Chord-layer voicing of the chord loop at `bar`, voice-led over two
  *  laps of the loop so it does not depend on where playback started. */
