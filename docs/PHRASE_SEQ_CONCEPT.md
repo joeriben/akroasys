@@ -258,7 +258,9 @@ stay aligned.
   The rhythm never evolves; Bass keeps R on its first head.
 - Evolve = 0 is a locked loop (the locked end of Marbles' Déjà vu).
 - Evolve is latched at phrase entry: turning it changes the evolution from
-  the next phrase boundary on, not the phrase now playing.
+  the next phrase boundary on, not the phrase now playing. The line into
+  the next phrase leads into the motif that phrase will play with Evolve
+  as it stands, re-led from where playback is when it turns.
 - **Keep** stores the motif heard in the phrase now playing (evolved, as
   the audio thread played it) as the new stored motif, so playback goes on
   unchanged. It keeps the motif the phrase entered from as its lead-in and

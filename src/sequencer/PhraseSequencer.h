@@ -200,15 +200,19 @@ private:
     bool motifDirty = false;             // the heard motif may differ: refit, rebuild evolution
     bool renderDirty = false;            // the bar renders differently: re-render it
     float latchedEvolve = 0.0f;          // Evolve as of the current phrase entry
+    float evoNextEvolve = 0.0f;          // Evolve evoNext was derived with
 
     // Heard motifs of the phrases around the current bar; evoPrev is the
     // motif the current phrase enters from, which for the origin phrase is
-    // the kept lead-in when it has one (leadsInto).
+    // the kept lead-in when it has one (leadsInto). evoNext is the next
+    // phrase's with the Evolve set now, the one it latches at its entry.
     PhraseModel::Motif evoPrev, evoCur, evoNext;
     int evoPhrase = 0;
     bool evoValid = false;
     void rebuildEvolution(int phrase);
     void advanceEvolution(int phrase);
+    /** evoNext for the phrase after `phrase`, from cfg.evolve. */
+    void deriveNext(int phrase);
     /** The kept lead-in leads into `phrase`: it is the origin, and the phrase
      *  the lead-in preceded when it was heard. */
     bool leadsInto(int phrase) const;

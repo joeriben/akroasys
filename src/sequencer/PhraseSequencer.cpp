@@ -84,7 +84,8 @@ void T5ynthPhraseSequencer::setConfig(const Config& c)
         return;
     }
     // Evolve is latched at phrase entry (§3.8): turning it changes the next
-    // phrase, not the bar that is playing.
+    // phrase, not the bar that is playing (processBlock re-renders the bar
+    // for the line into the next phrase).
     Config a = cfg, b = c;
     a.evolve = b.evolve = 0.0f;
     if (a != b)
@@ -375,8 +376,7 @@ void T5ynthPhraseSequencer::rebuildEvolution(int phrase)
     evoPrev = evolvedMotif(fitted, L, phrase - 1);
     evoCur = evoPrev;
     if (phrase > fitted.origin) evolveOnce(evoCur, L, phrase);
-    evoNext = evoCur;
-    if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
+    deriveNext(phrase);
     if (leadsInto(phrase)) evoPrev = fittedLeadIn;
     evoPhrase = phrase;
     evoValid = true;
@@ -387,13 +387,30 @@ void T5ynthPhraseSequencer::advanceEvolution(int phrase)
 {
     if (evoValid && phrase == evoPhrase) return;
     if (!evoValid || phrase != evoPhrase + 1) { rebuildEvolution(phrase); return; }
-    const Config L = latchedConfig();
     evoPrev = leadsInto(phrase) ? fittedLeadIn : evoCur;
     evoCur = evoNext;
-    evoNext = evoCur;
-    if (phrase + 1 > fitted.origin) evolveOnce(evoNext, L, phrase + 1);
+    deriveNext(phrase);
     evoPhrase = phrase;
     publishHeard();
+}
+
+void T5ynthPhraseSequencer::deriveNext(int phrase)
+{
+    // The next phrase latches Evolve as it stands at its entry (§3.8), and
+    // with another value than this phrase's it derives its motif from the
+    // origin with that value (enterBar): the line leads into that motif.
+    // processBlock re-derives it when Evolve turns, so a phrase entry always
+    // finds it derived with the value it latches.
+    if (cfg.evolve == latchedEvolve)
+    {
+        evoNext = evoCur;
+        if (phrase + 1 > fitted.origin) evolveOnce(evoNext, cfg, phrase + 1);
+    }
+    else
+    {
+        evoNext = evolvedMotif(fitted, cfg, phrase + 1);
+    }
+    evoNextEvolve = cfg.evolve;
 }
 
 bool T5ynthPhraseSequencer::leadsInto(int phrase) const
@@ -633,11 +650,14 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         nextEvent = firstEventNotPlayed(resumeQ);
         positioned = true;
     }
-    else if (renderDirty)
+    else if (renderDirty || (evoValid && evoNextEvolve != cfg.evolve))
     {
         // A change inside the bar: re-render it and play on from where
         // playback has reached (a host may jitter q0 around that by < kJumpQ).
+        // Evolve turned: the next phrase plays another motif, which the line
+        // leads into.
         if (motifDirty) rebuildEvolution(floorDiv(bar, phraseBarsOf(cfg)));
+        else if (evoNextEvolve != cfg.evolve) deriveNext(evoPhrase);
         renderCurrent();
         nextEvent = firstEventNotPlayed(resumeQ);
         releaseUnusedHeld(nextEvent, out, 0);

@@ -3160,16 +3160,13 @@ int main(int argc, char** argv)
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, octave = false; };
         using Bar = std::array<Note, kMaxBarSteps>;
+        using Line = std::vector<Bar>;
         constexpr int kBars = 40;
         auto isApproachFn = [](Fn f) { return f == Fn::ApproachUp || f == Fn::ApproachDown || f == Fn::ApproachChromatic; };
         const float kFillVel = 72.0f / 127.0f;
         static const float kVariation[] = { 0.0f, 0.4f, 0.6f, 1.0f };
         static const int kPhraseBars[] = { 4, 8, 16 };
-        int runErrs = 0, checked = 0, bad = 0, cadenceTargets = 0, dropSkips = 0, octaveSkips = 0;
-        int fillChecked = 0, fillBad = 0, fillCadence = 0;
-        std::string why, fillWhy;
-        for (int t = 0; t < 2000; ++t)
-        {
+        auto draw = [&]() {
             Config c = base();
             c.part = static_cast<Part>(U(0, 2));   // Bass, Riff, Lead
             c.stepsPerBar = U(0, 1) ? 16 : 8;
@@ -3183,12 +3180,26 @@ int main(int argc, char** argv)
             c.slide = 0.0f; c.shuffle = 0.0f;
             c.layer = Layer::Off;
             c.len = U(1, 2); c.pulses = U(1, 8); c.rotation = U(0, 7);
-            const Motif m = generateMotif(static_cast<std::uint32_t>(32000 + t), 0, c);
+            return c;
+        };
 
-            std::vector<Bar> line(kBars);
+        // Plays c with motif m from bar 0 and reads the bar views into line.
+        // turnQ >= 0: Evolve turns to turnTo in the first block from turnQ on,
+        // which starts at turnedAt.
+        auto playLine = [&](const Config& c, const Motif& m, double turnQ, float turnTo, Line& line,
+                            double& turnedAt) {
+            line.assign(kBars, Bar {});
+            turnedAt = -1.0;
             bool loaded = false;
-            const Run r = play(c, 0.0, kBars * 4.0, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double) {
+            return play(c, 0.0, kBars * 4.0, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
                 if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
+                if (turnQ >= 0.0 && turnedAt < 0.0 && q >= turnQ)
+                {
+                    Config n = c;
+                    n.evolve = turnTo;
+                    s.setConfig(n);
+                    turnedAt = q;
+                }
                 const int b = s.currentBarForGui.load();
                 if (b < 0 || b >= kBars) return;
                 std::array<StepView, kMaxBarSteps> v {};
@@ -3199,7 +3210,22 @@ int main(int argc, char** argv)
                     bar[static_cast<size_t>(k)] = { v[static_cast<size_t>(k)].note, v[static_cast<size_t>(k)].fn,
                                                     v[static_cast<size_t>(k)].head, false };
             });
-            runErrs += r.hangs + r.orphanOffs + r.badGlides + r.polyMain;
+        };
+
+        struct Tally
+        {
+            int runErrs = 0, checked = 0, bad = 0, cadenceTargets = 0, dropSkips = 0, octaveSkips = 0;
+            int fillChecked = 0, fillBad = 0, fillCadence = 0;
+            int crossing = 0, moved = 0, fillCrossing = 0, fillMoved = 0;
+            std::string why, fillWhy;
+        };
+        // Checks the approach notes and the Fill notes of run r that sound
+        // from fromQ on. With `without` (the same trial without the turn), it
+        // counts those that lead from phrase 1 into phrase 2, and among them
+        // those whose head there is another without the turn.
+        auto checkRun = [&](int t, const Config& c, Line& line, const Run& r, double fromQ, Line* without,
+                            Tally& y) {
+            y.runErrs += r.hangs + r.orphanOffs + r.badGlides + r.polyMain;
 
             const int N = phraseBarsOf(c), unitBars = N / 4;
             const int ops = static_cast<int>(std::lround(c.variation * 5.0f));
@@ -3214,34 +3240,38 @@ int main(int argc, char** argv)
             auto cadenceBar = [&](int bar) { return c.form == Form::ABAB && floorMod(bar, N) % unitBars == unitBars - 1; };
 
             // The line under the octave Lift.
-            for (int b = 0; b < kBars; ++b)
-            {
-                if (!lifted(b)) continue;
-                Bar& bar = line[static_cast<size_t>(b)];
-                int lastK = -1;
-                for (int k = 0; k < kMaxBarSteps; ++k)
-                    if (bar[static_cast<size_t>(k)].note >= 0 && inLast(k))
-                    {
-                        lastK = k;
-                        if (!bass) bar[static_cast<size_t>(k)].note -= 12;
-                    }
-                if (bass && lastK >= 0)
+            auto underLift = [&](Line& L) {
+                for (int b = 0; b < kBars; ++b)
                 {
-                    bar[static_cast<size_t>(lastK)].note = -1;
-                    bar[static_cast<size_t>(lastK)].octave = true;
+                    if (!lifted(b)) continue;
+                    Bar& bar = L[static_cast<size_t>(b)];
+                    int lastK = -1;
+                    for (int k = 0; k < kMaxBarSteps; ++k)
+                        if (bar[static_cast<size_t>(k)].note >= 0 && inLast(k))
+                        {
+                            lastK = k;
+                            if (!bass) bar[static_cast<size_t>(k)].note -= 12;
+                        }
+                    if (bass && lastK >= 0)
+                    {
+                        bar[static_cast<size_t>(lastK)].note = -1;
+                        bar[static_cast<size_t>(lastK)].octave = true;
+                    }
                 }
-            }
+            };
+            underLift(line);
+            if (without) underLift(*without);
 
             // The next sounding head from bar b, step k on (k = -1: from the
             // bar start); `skips` counts the dropped heads and octave pulses
             // passed on the way.
             struct Target { int note = -1, bar = -1, step = -1, drops = 0, octaves = 0; };
-            auto nextHead = [&](int b, int k) {
+            auto nextHead = [&](const Line& L, int b, int k) {
                 Target h;
                 for (int ahead = 0; ahead <= 2; ++ahead)
                     for (int j = ahead == 0 ? k + 1 : 0; j < kMaxBarSteps; ++j)
                     {
-                        const Note& n = line[static_cast<size_t>(b + ahead)][static_cast<size_t>(j)];
+                        const Note& n = L[static_cast<size_t>(b + ahead)][static_cast<size_t>(j)];
                         if (!n.head) continue;
                         if (n.octave) { ++h.octaves; continue; }
                         if (n.note < 0) { h.drops += n.fn != Fn::Rest; continue; }
@@ -3259,27 +3289,34 @@ int main(int argc, char** argv)
                 }
                 return true;
             };
+            auto crosses = [&](int b, const Target& h) { return floorDiv(b, N) == 1 && floorDiv(h.bar, N) == 2; };
 
             for (int b = 0; b + 2 < kBars; ++b)
                 for (int k = 0; k < kMaxBarSteps; ++k)
                 {
                     const Note& a = line[static_cast<size_t>(b)][static_cast<size_t>(k)];
                     if (a.note < 0 || !isApproachFn(a.fn)) continue;
-                    const Target h = nextHead(b, k);
+                    if (4.0 * b + k * stepQ < fromQ + 1.0e-6) continue;
+                    const Target h = nextHead(line, b, k);
                     if (h.note < 0) continue;
                     const int want = a.fn == Fn::ApproachUp ? scaleStep(h.note, -1, mask)
                                    : a.fn == Fn::ApproachDown ? scaleStep(h.note, 1, mask) : h.note - 1;
-                    ++checked;
-                    cadenceTargets += isCadence(h);
-                    dropSkips += h.drops;
-                    octaveSkips += h.octaves;
-                    if (a.note != want && bad++ < 3)
+                    ++y.checked;
+                    y.cadenceTargets += isCadence(h);
+                    y.dropSkips += h.drops;
+                    y.octaveSkips += h.octaves;
+                    if (without && crosses(b, h))
+                    {
+                        ++y.crossing;
+                        y.moved += nextHead(*without, b, k).note != h.note;
+                    }
+                    if (a.note != want && y.bad++ < 3)
                     {
                         char s[200];
                         std::snprintf(s, sizeof s, " | t %d form %d part %d: bar %d step %d note %d, head %d at %d/%d wants %d",
                                       t, static_cast<int>(c.form), static_cast<int>(c.part), b, k, a.note, h.note, h.bar,
                                       h.step, want);
-                        why += s;
+                        y.why += s;
                     }
                 }
 
@@ -3289,7 +3326,7 @@ int main(int argc, char** argv)
             // head; the run sounds with the Lift (not Bass).
             for (int b = 1; b + 2 < kBars; ++b)
             {
-                const Target h = nextHead(b + 1, -1);
+                const Target h = nextHead(line, b + 1, -1);
                 if (h.note < 0) continue;
                 int from = -1, entered = -1;
                 std::vector<std::pair<double, int>> fills;
@@ -3301,39 +3338,93 @@ int main(int argc, char** argv)
                     if (inBar >= -4.0 - 1.0e-3 && inBar < -1.0e-3)
                         entered = note - (lifted(b - 1) && !bass && inBar >= -1.0 - 1.0e-3 ? 12 : 0);
                     if (inBar < -1.0e-3 || inBar > 4.0 - 1.0e-3) continue;
-                    if (std::abs(p.ev.velocity - kFillVel) < 1.0e-4) fills.emplace_back(inBar, note);
+                    if (std::abs(p.ev.velocity - kFillVel) < 1.0e-4)
+                    {
+                        if (p.q >= fromQ + 1.0e-6) fills.emplace_back(inBar, note);
+                    }
                     else if (inBar < 3.0 - 1.0e-3) from = note;
                 }
                 if (from < 0) from = entered;
                 if (fills.empty() || from < 0) continue;
                 const int dir = h.note >= from ? -1 : 1;
+                const bool cross = without && crosses(b, h);
+                const bool moved = cross && nextHead(*without, b + 1, -1).note != h.note;
                 for (const auto& [inBar, note] : fills)
                 {
                     const int j = static_cast<int>(std::lround((inBar - 3.0) / 0.25));
                     const int want = scaleSteps(h.note, dir * (4 - j), mask) + (bass ? 0 : 12);
-                    ++fillChecked;
-                    fillCadence += isCadence(h);
-                    if (note != want && fillBad++ < 3)
+                    ++y.fillChecked;
+                    y.fillCadence += isCadence(h);
+                    y.fillCrossing += cross;
+                    y.fillMoved += moved;
+                    if (note != want && y.fillBad++ < 3)
                     {
                         char s[200];
                         std::snprintf(s, sizeof s, " | t %d form %d part %d: bar %d at %.2f note %d, head %d at %d/%d wants %d",
                                       t, static_cast<int>(c.form), static_cast<int>(c.part), b, inBar, note, h.note, h.bar,
                                       h.step, want);
-                        fillWhy += s;
+                        y.fillWhy += s;
                     }
                 }
             }
+        };
+
+        Tally one;
+        for (int t = 0; t < 2000; ++t)
+        {
+            const Config c = draw();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(32000 + t), 0, c);
+            Line line;
+            double unturned = -1.0;
+            const Run r = playLine(c, m, -1.0, 0.0f, line, unturned);
+            checkRun(t, c, line, r, -1.0e9, nullptr, one);
         }
-        check(runErrs == 0, "lookahead as played: no hanging or orphan note, no bad glide (" + std::to_string(runErrs) + ")");
-        check(cadenceTargets > 0 && dropSkips > 0 && octaveSkips > 0,
-              "lookahead as played: approach notes into cadence heads (" + std::to_string(cadenceTargets)
-                  + "), past dropped heads (" + std::to_string(dropSkips) + ") and past Bass's octave pulse ("
-                  + std::to_string(octaveSkips) + ")");
-        check(bad == 0, "lookahead as played: an approach note leads into the head that sounds (" + std::to_string(bad)
-                            + " of " + std::to_string(checked) + " off)" + why);
-        check(fillCadence > 0, "lookahead as played: Fill runs into cadence heads (" + std::to_string(fillCadence) + ")");
-        check(fillBad == 0, "lookahead as played: a Fill runs into the head that sounds (" + std::to_string(fillBad)
-                                + " of " + std::to_string(fillChecked) + " off)" + fillWhy);
+        check(one.runErrs == 0, "lookahead as played: no hanging or orphan note, no bad glide (" + std::to_string(one.runErrs) + ")");
+        check(one.cadenceTargets > 0 && one.dropSkips > 0 && one.octaveSkips > 0,
+              "lookahead as played: approach notes into cadence heads (" + std::to_string(one.cadenceTargets)
+                  + "), past dropped heads (" + std::to_string(one.dropSkips) + ") and past Bass's octave pulse ("
+                  + std::to_string(one.octaveSkips) + ")");
+        check(one.bad == 0, "lookahead as played: an approach note leads into the head that sounds (" + std::to_string(one.bad)
+                                + " of " + std::to_string(one.checked) + " off)" + one.why);
+        check(one.fillCadence > 0, "lookahead as played: Fill runs into cadence heads (" + std::to_string(one.fillCadence) + ")");
+        check(one.fillBad == 0, "lookahead as played: a Fill runs into the head that sounds (" + std::to_string(one.fillBad)
+                                    + " of " + std::to_string(one.fillChecked) + " off)" + one.fillWhy);
+
+        std::printf("\n== 33. The line leads into the next phrase with the Evolve it latches\n");
+        // Evolve is latched at phrase entry (§3.8), so turning it in a phrase
+        // gives the next phrase another motif; the line led into the motif the
+        // next phrase had before the turn. Evolve turns by 0.5 in phrase 1,
+        // half the time in its last bar, always inside a bar's first three
+        // beats (the bar re-renders, and the view read after the turn shows
+        // it). Oracle of 32, for what sounds from the block of the turn on;
+        // the same trial unturned counts the heads the turn moves.
+        Tally two;
+        for (int t = 0; t < 1000; ++t)
+        {
+            const Config c = draw();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(33000 + t), 0, c);
+            const int N = phraseBarsOf(c);
+            const int turnBar = U(0, 1) ? 2 * N - 1 : U(N, 2 * N - 1);
+            const double turnQ = 4.0 * turnBar + 0.25 * U(0, 11);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Line line, without;
+            double turnedAt = -1.0, unturned = -1.0;
+            const Run r = playLine(c, m, turnQ, turnTo, line, turnedAt);
+            const Run r0 = playLine(c, m, -1.0, 0.0f, without, unturned);
+            two.runErrs += r0.hangs + r0.orphanOffs + r0.badGlides + r0.polyMain;
+            checkRun(t, c, line, r, turnedAt, &without, two);
+        }
+        check(two.runErrs == 0, "Evolve turned: no hanging or orphan note, no bad glide (" + std::to_string(two.runErrs) + ")");
+        check(two.crossing > 0 && two.moved > 0,
+              "Evolve turned: approach notes from phrase 1 into phrase 2 (" + std::to_string(two.crossing) + "), "
+                  + std::to_string(two.moved) + " of them into a head the turn moved");
+        check(two.bad == 0, "Evolve turned: an approach note leads into the head that sounds (" + std::to_string(two.bad)
+                                + " of " + std::to_string(two.checked) + " off)" + two.why);
+        check(two.fillCrossing > 0 && two.fillMoved > 0,
+              "Evolve turned: Fill notes from phrase 1 into phrase 2 (" + std::to_string(two.fillCrossing) + "), "
+                  + std::to_string(two.fillMoved) + " of them into a head the turn moved");
+        check(two.fillBad == 0, "Evolve turned: a Fill runs into the head that sounds (" + std::to_string(two.fillBad)
+                                    + " of " + std::to_string(two.fillChecked) + " off)" + two.fillWhy);
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
