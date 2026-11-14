@@ -277,6 +277,20 @@ void T5ynthPhraseSequencer::emitOn(int index, std::vector<VoiceEvent>& out, int 
     else        addPending(barStartQ + e.offQ, barStartQ + e.gateOffQ, e.note, e.strand, e.line, out, offset);
 }
 
+void T5ynthPhraseSequencer::skipOn(int index, std::vector<VoiceEvent>& out, int offset)
+{
+    // The held note on the strand would have been continued by this note and
+    // ended at its off, or ended at its onset (a chord's). Both lie in this
+    // sample: the held note ends here.
+    const Event& e = render.events[static_cast<size_t>(index)];
+    const int slot = slotOf(e.strand);
+    if (slot < 0 || slot >= kStrandSlots) return;
+    const int held = heldNote[static_cast<size_t>(slot)];
+    if (held < 0) return;
+    heldNote[static_cast<size_t>(slot)] = -1;
+    emitOff(held, e.strand, out, offset);
+}
+
 void T5ynthPhraseSequencer::releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset)
 {
     // A held note waits for its strand's next onset. When the (re)rendered bar
@@ -630,7 +644,16 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             endPendingByNextOnset(nextEvent);
             continue;
         }
-        emitOn(nextEvent, out, offset);
+        // A note needs a sample to sound in. An onset in time the host skipped
+        // (a block reported a little ahead of where playback reached) starts
+        // late, on the block's first sample; a note whose off falls in that
+        // same sample has nothing left to sound. Its on and off would share a
+        // tick, where the processor puts offs before ons: the off would end
+        // nothing and the on would hang. It is not started.
+        const Event& e = render.events[static_cast<size_t>(nextEvent)];
+        const double offQ = barStartQ + e.offQ;
+        if (!e.held && offQ < q1 && offsetAt(offQ) <= offset) skipOn(nextEvent, out, offset);
+        else emitOn(nextEvent, out, offset);
         ++nextEvent;
     }
 

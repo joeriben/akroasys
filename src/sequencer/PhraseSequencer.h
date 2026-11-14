@@ -247,6 +247,9 @@ private:
     /** Another event of the same strand starts at render.events[index]'s onset. */
     bool sharesOnset(int index) const;
     void emitOn(int index, std::vector<VoiceEvent>& out, int offset);
+    /** render.events[index] is not started (no sample to sound in): a held
+     *  note it would have continued or ended ends at `offset`. */
+    void skipOn(int index, std::vector<VoiceEvent>& out, int offset);
     void emitOff(int note, int strand, std::vector<VoiceEvent>& out, int offset);
     void flushPendingFor(int note, int strand, std::vector<VoiceEvent>& out, int offset);
     void addPending(double q, double ownQ, int note, int strand, PhraseModel::Line line,

@@ -34,6 +34,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -2294,6 +2295,198 @@ int main(int argc, char** argv)
         check(early == 0, "Keys beat under host jitter: the chord changes in the beat after where playback reached ("
                               + std::to_string(early) + " of " + std::to_string(runs) + " elsewhere)");
         check(errs == 0, "Keys beat under host jitter: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+    }
+
+    std::printf("\n== 26. A note with no sample left after a host reports a block ahead is not started\n");
+    {
+        // A host may report a block a little ahead of where playback reached
+        // (under the locate threshold). Onsets in the time it skipped start
+        // late, on the block's first sample. A note whose off falls in that
+        // sample too (a short ratchet note, a low gate) has nothing left to
+        // sound: started, its on and off would share a tick, the processor
+        // would put the off first, and the note would hang. Random configs
+        // with short notes (ratchets at a low gate). Each runs reported
+        // exactly first; then with forward spikes on random blocks, and on
+        // the block of every note short enough to fit in one, sized to skip
+        // it whole. No on shares a tick with its own off, every note outside
+        // the skipped time plays (within the spike), no note plays that the
+        // exact run has not, and nothing hangs. One case is the fuzz find:
+        // Riff, Keys, 32 steps, 6 pulses, AABA, Variation 1, shuffle 0.6,
+        // Octave layer, gate 0.2, 5/16, 100-sample blocks.
+        struct Note { double on, end; int note, strand; };
+        struct Played { std::vector<Note> notes; int tickPairs = 0, errs = 0; };
+        std::mt19937 rng(26);
+        auto I = [&](int a, int b) { return std::uniform_int_distribution<int>(a, b)(rng); };
+        auto pick = [&](std::initializer_list<double> v) { return *(v.begin() + I(0, static_cast<int>(v.size()) - 1)); };
+        int runs = 0, missing = 0, extra = 0, pairs = 0, errs = 0, skippedNotes = 0;
+        std::string why;
+        for (int r = 0; r < 240; ++r)
+        {
+            Config c = base();
+            int num = 5, den = 16, block = 100;
+            double bpm = 120.0, spike = 0.009;
+            c.part = Part::Riff; c.harm = Harm::Keys; c.stepsPerBar = 32; c.pulses = 6; c.form = Form::AABA;
+            c.variation = 1.0f; c.slide = 0.0f; c.shuffle = 0.6f; c.layer = Layer::Octave; c.gate = 0.2f;
+            if (r > 0)
+            {
+                c.part = static_cast<Part>(I(0, 3));
+                c.harm = static_cast<Harm>(I(0, 2));
+                c.stepsPerBar = I(0, 1) ? 32 : 16;
+                c.pulses = I(1, c.stepsPerBar);
+                c.form = static_cast<Form>(I(0, 3));
+                c.variation = static_cast<float>(pick({ 0.5, 1.0 }));
+                c.slide = static_cast<float>(pick({ 0.0, 0.5 }));
+                c.shuffle = static_cast<float>(pick({ 0.0, 0.6 }));
+                c.layer = static_cast<Layer>(I(0, 3));
+                c.gate = static_cast<float>(pick({ 0.1, 0.2, 0.3 }));
+                static const int meters[4][2] = { { 4, 4 }, { 3, 4 }, { 5, 16 }, { 7, 8 } };
+                const int m = I(0, 3);
+                num = meters[m][0]; den = meters[m][1];
+                block = static_cast<int>(pick({ 32, 64, 100, 256 }));
+                bpm = pick({ 90.0, 120.0, 174.0 });
+                spike = pick({ 0.005, 0.009 });
+            }
+            const double qps = bpm / (60.0 * kSr);   // quarters per sample
+            const double dq = block * qps;
+            const int blocks = static_cast<int>(std::ceil(8.0 * (4.0 * num / den) / dq));
+            std::vector<double> ahead(static_cast<size_t>(blocks), 0.0);
+            auto run = [&](bool jitter) {
+                T5ynthPhraseSequencer seq;
+                seq.prepare(kSr);
+                seq.setTimeSignature(num, den);
+                seq.setConfig(c);
+                seq.clearKeys();
+                for (int n : { 45, 48, 52 }) seq.keyOn(n);
+                for (int n : { 45, 48, 52 }) seq.keyOff(n);
+                seq.start();
+                Played pl;
+                // Live voices: (note, strand, index into pl.notes); a glide hands the voice on.
+                struct Live { int note, strand; size_t idx; };
+                std::vector<Live> live;
+                int orphan = 0, badGlide = 0;
+                std::vector<VoiceEvent> out;
+                out.reserve(1024);
+                for (int b = 0; b < blocks; ++b)
+                {
+                    const double q0 = b * dq + (jitter ? ahead[static_cast<size_t>(b)] : 0.0);
+                    out.clear();
+                    seq.processBlock(block, bpm, true, q0, out);
+                    // The sequencer's own order: no on is followed by its own off on one tick.
+                    for (size_t i = 0; i < out.size(); ++i)
+                        if (out[i].type == VoiceEvent::Type::NoteOn)
+                            for (size_t j = i + 1; j < out.size(); ++j)
+                                if (out[j].type == VoiceEvent::Type::NoteOff && out[j].note == out[i].note
+                                    && out[j].strandId == out[i].strandId && out[j].sampleOffset == out[i].sampleOffset)
+                                    ++pl.tickPairs;
+                    std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& x, const VoiceEvent& y) {
+                        if (x.sampleOffset != y.sampleOffset) return x.sampleOffset < y.sampleOffset;
+                        return x.type == VoiceEvent::Type::NoteOff && y.type == VoiceEvent::Type::NoteOn;
+                    });
+                    for (const auto& e : out)
+                    {
+                        const double q = q0 + e.sampleOffset * qps;
+                        if (e.type == VoiceEvent::Type::NoteOn)
+                        {
+                            pl.notes.push_back({ q, std::numeric_limits<double>::infinity(), e.note, e.strandId });
+                            if (e.artic == VoiceEvent::Articulation::Glide)
+                            {
+                                bool found = false;
+                                for (auto it = live.rbegin(); it != live.rend() && !found; ++it)
+                                    if (it->strand == e.strandId)
+                                    {
+                                        pl.notes[it->idx].end = q;
+                                        it->note = e.note;
+                                        it->idx = pl.notes.size() - 1;
+                                        found = true;
+                                    }
+                                if (found) continue;
+                                ++badGlide;
+                            }
+                            live.push_back({ e.note, e.strandId, pl.notes.size() - 1 });
+                        }
+                        else
+                        {
+                            bool found = false;
+                            for (auto it = live.begin(); it != live.end() && !found; ++it)
+                                if (it->note == e.note && it->strand == e.strandId)
+                                {
+                                    pl.notes[it->idx].end = q;
+                                    live.erase(it);
+                                    found = true;
+                                }
+                            if (!found) ++orphan;
+                        }
+                    }
+                }
+                out.clear();
+                seq.allNotesOff(out, 0);
+                for (const auto& e : out)
+                    for (auto it = live.begin(); it != live.end(); ++it)
+                        if (it->note == e.note && it->strand == e.strandId) { live.erase(it); break; }
+                pl.errs = static_cast<int>(live.size()) + orphan + badGlide;
+                return pl;
+            };
+            const Played exact = run(false);
+            // Spikes: random blocks, and the block of each note short enough to
+            // skip whole (reported half a sample past its end). None in the
+            // last 0.01 q, so a spike reaches no further than the exact run.
+            const int last = blocks - static_cast<int>(std::ceil(0.01 / dq)) - 1;
+            for (int b = 1; b < last; ++b)
+                if (I(0, 4) == 0) ahead[static_cast<size_t>(b)] = spike;
+            for (const Note& n : exact.notes)
+            {
+                const int b = static_cast<int>(std::floor(n.on / dq + 1.0e-9));
+                const double past = n.end + 0.5 * qps - b * dq;
+                if (b >= 1 && b < last && past < 0.0095) ahead[static_cast<size_t>(b)] = past;
+            }
+            const Played got = run(true);
+            ++runs;
+            pairs += got.tickPairs + exact.tickPairs;
+            errs += got.errs + exact.errs;
+            // The time each spike skipped: from where playback reached to the block's start.
+            std::vector<std::pair<double, double>> skipped;
+            double reached = 0.0;
+            for (int b = 0; b < blocks; ++b)
+            {
+                const double q0 = b * dq + ahead[static_cast<size_t>(b)];
+                if (b > 0 && q0 > reached) skipped.push_back({ reached, q0 });
+                reached = std::max(reached, q0 + dq);
+            }
+            auto inSkipped = [&](const Note& n) {
+                for (const auto& sk : skipped)
+                    if (n.on >= sk.first - qps && n.on < sk.second && n.end < sk.second + 2 * qps) return true;
+                return false;
+            };
+            const double tol = 0.0095 + 2 * qps;
+            std::vector<bool> used(got.notes.size(), false);
+            int miss = 0, more = 0;
+            for (const Note& n : exact.notes)
+            {
+                bool hit = false;
+                for (size_t i = 0; i < got.notes.size() && !hit; ++i)
+                    if (!used[i] && got.notes[i].note == n.note && got.notes[i].strand == n.strand
+                        && std::abs(got.notes[i].on - n.on) <= tol)
+                        used[i] = hit = true;
+                if (inSkipped(n)) { ++skippedNotes; continue; }
+                miss += !hit;
+            }
+            for (bool u : used) more += !u;
+            if ((miss || more) && (missing + extra) == 0)
+            {
+                char tag[160];
+                std::snprintf(tag, sizeof tag, " (run %d: part %d harm %d %d/%d, %d-sample blocks, %d missing, %d extra)",
+                              r, static_cast<int>(c.part), static_cast<int>(c.harm), num, den, block, miss, more);
+                why = tag;
+            }
+            missing += miss;
+            extra += more;
+        }
+        check(skippedNotes > 0, "host ahead: notes lie wholly in skipped time (" + std::to_string(skippedNotes) + " in "
+                                    + std::to_string(runs) + " runs)");
+        check(pairs == 0, "host ahead: no note-on shares a tick with its own off (" + std::to_string(pairs) + ")");
+        check(missing == 0 && extra == 0, "host ahead: every note outside the skipped time plays, none the exact run has not ("
+                                              + std::to_string(missing) + " missing, " + std::to_string(extra) + " extra)" + why);
+        check(errs == 0, "host ahead: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
