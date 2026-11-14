@@ -5398,23 +5398,30 @@ int main(int argc, char** argv)
     std::printf("\n== 41. The view names an embellishment for the note it plays\n");
     {
         // Read from what plays: for each step, the main-line note that starts
-        // on its onset, and the one the line played before it in the bar.
+        // on its onset, the one the line played before it (on the bar's first
+        // step the note the bar enters from), and the head it leads into: the
+        // next of the bar, else the first of the next two bars, rendered here
+        // (§3.4's lookahead), else none, which leads into the note before
+        // (every bar here has a head, so none never occurs).
         // Without Variation (no Lift, Fill, Drop, Re-pitch, Ratchet) a step
         // the view shows as a Repeat plays the note before it, a Neighbour
-        // the scale step above or below it, a Passing note one strictly
-        // between the note before it and the next head of the bar: where
-        // there is no room for one (the head is the note before, or a scale
-        // step from it) the step plays a neighbour, and the view showed p
-        // over it. And a Lead embellishment after a
-        // leap of more than 4 semitones steps back against the leap (Huron's
-        // post-skip reversal), whatever the motif stored there: the view
-        // showed the stored = or n-arrow over the step back. Half the motifs
-        // come from Step: a drawn Lead motif stores no Repeat, an analysed
-        // one does wherever a step repeats its note.
+        // the scale step above or below it. A stored Passing step plays the
+        // scale step from the note before towards the head where that lies
+        // strictly between them, and the view shows p; where it does not
+        // (the head is the note before, or no further from it than that
+        // step) the step plays the neighbour away from the head (above
+        // without one), and the view showed p over it. And a Lead
+        // embellishment after a leap of more than 4 semitones steps back
+        // against the leap (Huron's post-skip reversal), whatever the motif
+        // stored there: the view showed the stored = or n-arrow over the
+        // step back. Half the motifs come from Step: a drawn Lead motif
+        // stores no Repeat, an analysed one does wherever a step repeats its
+        // note.
         std::mt19937 rng(41);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         static const int spbs[] = { 2, 4, 8, 16 };
-        int named = 0, passing = 0, reversals = 0, reversalsRelabelled = 0, repeatReversals = 0, off = 0;
+        int named = 0, passing = 0, passingRoom = 0, passingFirst = 0, passingLater = 0, passingNoHead = 0;
+        int reversals = 0, reversalsRelabelled = 0, repeatReversals = 0, off = 0;
         std::string why;
         for (int t = 0; t < 20000; ++t)
         {
@@ -5462,26 +5469,43 @@ int main(int argc, char** argv)
             const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
             const double stepQ = 4.0 / c.stepsPerBar;
             const int mb = ((in.bar % m.len) + m.len) % m.len;
-            auto noteAt = [&](int k) {
+            auto noteAt = [&](const BarRender& b, int k) {
                 const double posQ = k * stepQ;
                 const double onQ = (k & 1) ? posQ + static_cast<double>(c.shuffle) * stepQ : posQ;
                 int n = -1;
-                for (int i = 0; i < r.count; ++i)
+                for (int i = 0; i < b.count; ++i)
                 {
-                    const Event& e = r.events[static_cast<size_t>(i)];
+                    const Event& e = b.events[static_cast<size_t>(i)];
                     if (e.strand == -1 && e.line == Line::Main && std::abs(e.onQ - onQ) < 1e-6) n = e.note;
                 }
                 return n;
             };
-            int prev = -1, prevPrev = -1;
+            // The first head of `b` from step `from`, as it plays; -1 none.
+            auto firstHead = [&](const BarRender& b, int from) {
+                for (int k2 = from; k2 < b.viewSteps; ++k2)
+                    if (b.view[static_cast<size_t>(k2)].head) return noteAt(b, k2);
+                return -1;
+            };
+            std::array<BarRender, 2> next;
+            for (int i = 0; i < 2; ++i)
+            {
+                RenderInput a = in;
+                a.bar = in.bar + 1 + i;
+                renderBar(a, next[static_cast<size_t>(i)]);
+            }
+            int prev = in.prevNote, prevPrev = in.prevPrevNote;
+            bool firstOnset = true;
             for (int k = 0; k < r.viewSteps; ++k)
             {
-                const int note = noteAt(k);
+                const int note = noteAt(r, k);
                 if (note < 0) continue;
                 const StepView& v = r.view[static_cast<size_t>(k)];
                 const Fn stored = m.slots[static_cast<size_t>(mb * c.stepsPerBar + k)].fn;
+                const bool reversal = c.part == Part::Lead && std::abs(prev - prevPrev) > 4
+                    && (stored == Fn::Repeat || stored == Fn::Passing
+                        || stored == Fn::NeighbourUp || stored == Fn::NeighbourDown);
                 std::string bad;
-                if (prev >= 0 && v.tone == Tone::None)
+                if (v.tone == Tone::None)
                 {
                     const int want = v.fn == Fn::Repeat ? prev
                                    : v.fn == Fn::NeighbourUp ? scaleStep(prev, 1, mask)
@@ -5491,19 +5515,28 @@ int main(int argc, char** argv)
                         ++named;
                         if (note != want) bad = "shown " + stepGlyphText(v) + " after " + std::to_string(prev);
                     }
-                    int head = -1;
-                    for (int k2 = k + 1; k2 < r.viewSteps && head < 0; ++k2)
-                        if (r.view[static_cast<size_t>(k2)].head) head = noteAt(k2);
-                    if (v.fn == Fn::Passing && head >= 0)
-                    {
-                        ++passing;
-                        if (!((note > prev && note < head) || (note < prev && note > head)))
-                            bad = "shown p between " + std::to_string(prev) + " and the head " + std::to_string(head);
-                    }
                 }
-                if (c.part == Part::Lead && prev >= 0 && prevPrev >= 0 && std::abs(prev - prevPrev) > 4
-                    && (stored == Fn::Repeat || stored == Fn::Passing
-                        || stored == Fn::NeighbourUp || stored == Fn::NeighbourDown))
+                if (stored == Fn::Passing && !reversal)
+                {
+                    int head = firstHead(r, k + 1);
+                    const bool later = head < 0;
+                    if (head < 0) head = firstHead(next[0], 0);
+                    if (head < 0) head = firstHead(next[1], 0);
+                    const int T = head >= 0 ? head : prev;
+                    const int toward = scaleStep(prev, T < prev ? -1 : 1, mask);
+                    const bool room = T > prev ? toward < T : T < prev && toward > T;
+                    ++passing;
+                    passingRoom += room;
+                    passingFirst += firstOnset;
+                    passingLater += later && head >= 0;
+                    passingNoHead += head < 0;
+                    const Fn wantFn = room ? Fn::Passing : T < prev ? Fn::NeighbourUp : T > prev ? Fn::NeighbourDown : Fn::NeighbourUp;
+                    const int wantNote = room ? toward : scaleStep(prev, wantFn == Fn::NeighbourUp ? 1 : -1, mask);
+                    if ((v.fn != wantFn || note != wantNote) && bad.empty())
+                        bad = "stored p after " + std::to_string(prev) + " into " + std::to_string(T)
+                            + ", shown " + stepGlyphText(v) + ", want " + std::to_string(wantNote);
+                }
+                if (reversal)
                 {
                     ++reversals;
                     if (v.fn != stored) ++reversalsRelabelled;
@@ -5514,14 +5547,19 @@ int main(int argc, char** argv)
                 if (!bad.empty() && off++ < 4)
                     why += " | t" + std::to_string(t) + " k" + std::to_string(k) + ": plays " + std::to_string(note) + ", " + bad;
                 prevPrev = prev; prev = note;
+                firstOnset = false;
             }
         }
         check(off == 0, std::to_string(named) + " Repeat/Neighbour steps, " + std::to_string(passing)
-                        + " Passing steps before a head, " + std::to_string(reversals)
+                        + " stored Passing steps, " + std::to_string(reversals)
                         + " Lead steps after a leap: each is named for the note it plays and steps back ("
                         + std::to_string(off) + " off)" + why);
-        check(named >= 5000 && passing >= 1500 && reversals >= 500 && reversalsRelabelled >= 200 && repeatReversals >= 50,
-              "coverage: " + std::to_string(named) + " named, " + std::to_string(passing) + " passing, "
+        check(named >= 5000 && passing >= 2500 && passingRoom >= 1500 && passing - passingRoom >= 500
+                  && passingFirst >= 30 && passingLater >= 500
+                  && reversals >= 500 && reversalsRelabelled >= 200 && repeatReversals >= 50,
+              "coverage: " + std::to_string(named) + " named, " + std::to_string(passing) + " stored Passing ("
+              + std::to_string(passingRoom) + " with room, " + std::to_string(passingFirst) + " on the bar's first onset, "
+              + std::to_string(passingLater) + " into a later bar's head, " + std::to_string(passingNoHead) + " into none), "
               + std::to_string(reversals) + " reversals, "
               + std::to_string(reversalsRelabelled) + " shown other than stored, "
               + std::to_string(repeatReversals) + " of a stored Repeat");
