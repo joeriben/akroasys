@@ -7,8 +7,9 @@
 //   B. The layout at the panel's size range (792x192, 864x208, 1300x280):
 //      every visible control lies inside the panel, no two overlap, every
 //      switch segment and action button is as wide as its label needs, every
-//      inline bar as wide as its label and widest value need, every Phrase
-//      combo as wide as its longest item needs.
+//      tag's text fits inside its Label's border, every inline bar is as wide
+//      as its label and widest value need, every Phrase combo as wide as its
+//      longest item needs.
 //   C. The bindings: a segment click writes its parameter and lights its
 //      segment only; a parameter changed elsewhere moves the segments; each
 //      combo and bar writes its own parameter.
@@ -428,6 +429,30 @@ void layoutAtSize(int w, int h)
                         b->getWidth(), buttonNeedW(*b));
         }
     check("every segment and action button fits its label", buttonsFit);
+
+    // A tag's text fits the area its Label draws into: its bounds less the
+    // Label's border, which drawLabel takes off both sides before it fits
+    // (and squeezes) the text.
+    bool tagsFit = true;
+    int tagsSeen = 0;
+    for (auto* c : panel.getChildren())
+        if (auto* l = dynamic_cast<juce::Label*>(c))
+        {
+            const auto text = l->getText();
+            if (! l->isVisible() || ! juce::StringArray { "Part", "Key", "Oct", "Layer", "Harm",
+                                                          "Rate", "Ext", "Len", "Bars", "Form" }.contains(text))
+                continue;
+            ++tagsSeen;
+            const int area = l->getWidth() - l->getBorderSize().getLeftAndRight();
+            const int need = measureTextWidth(text, l->getFont().getHeight());
+            if (area < need)
+            {
+                tagsFit = false;
+                std::printf("    tag \"%s\" draws into %d px < %d\n", text.toRawUTF8(), area, need);
+            }
+        }
+    check("all ten Phrase tags are shown", tagsSeen == 10);
+    check("every tag's text fits the area its Label draws into", tagsFit);
 
     bool barsFit = true;
     for (size_t i = 0; i < std::size(kBars); ++i)

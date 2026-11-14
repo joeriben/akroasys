@@ -108,10 +108,11 @@ void styleTag(juce::Label& tag, const juce::String& text)
     tag.setInterceptsMouseClicks(false, false);
 }
 
-// The tag's width: its text plus the Label's default border (3 px a side).
+// The tag's width: its text plus the Label's border, which drawLabel takes
+// off both sides before it fits the text (narrower, it squeezes it).
 int tagWidth(const juce::Label& tag)
 {
-    return measureTextWidth(tag.getText(), kTagFontSize) + 6;
+    return measureTextWidth(tag.getText(), kTagFontSize) + tag.getBorderSize().getLeftAndRight();
 }
 
 // A switch segment or button as wide as its label in the button font, plus
