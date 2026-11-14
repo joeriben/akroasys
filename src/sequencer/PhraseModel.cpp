@@ -1438,8 +1438,9 @@ int renderSlot(const Slot& sl, const Chord& ch, int P, int PP, int T, const Line
         case Fn::Passing:
         {
             // A scale step from P towards the head, where one lies strictly
-            // between them. Where none does (the head is P, or a scale step
-            // from it) the step plays P's neighbour away from the head (above
+            // between them. Where none does (the head is P, or no further
+            // from it than that scale step: an off-scale Keys head can be
+            // closer) the step plays P's neighbour away from the head (above
             // for T == P), and the view names it that neighbour: shown as p,
             // it claimed a note between two that it is not between.
             if (T > P)
