@@ -1,6 +1,7 @@
 #include "SequencerPanel.h"
 #include "../PluginProcessor.h"
 #include "WaveformDisplay.h"
+#include "../sequencer/PhraseModel.h"
 
 // ─── Note name helper ──────────────────────────────────────────────
 static juce::String noteName(int n)
@@ -70,6 +71,56 @@ bool getOneShotCopyDragSource(const juce::var& description, int& srcStep, int& s
     }
 
     return false;
+}
+
+// The chord-loop slots' parameters, in slot order.
+constexpr const char* kPhraseChordPIDs[] = {
+    PID::phrChord1, PID::phrChord2, PID::phrChord3, PID::phrChord4
+};
+
+template <size_t N>
+juce::StringArray choiceLabels(const ChoiceEntry (&entries)[N])
+{
+    juce::StringArray labels;
+    for (const auto& e : entries)
+        labels.add(e.label);
+    return labels;
+}
+
+// The panel's dropdown look (as genScaleRootBox and the Gen boxes).
+void styleSeqCombo(juce::ComboBox& box)
+{
+    box.setColour(juce::ComboBox::backgroundColourId, kSurface);
+    box.setColour(juce::ComboBox::textColourId, kSeqCol);
+    box.setColour(juce::ComboBox::outlineColourId, kBorder);
+}
+
+// A tag in front of a control without a label of its own (Gen's "Rng"):
+// 11 px, white like the inline-bar labels beside it.
+constexpr float kTagFontSize = 11.0f;
+
+void styleTag(juce::Label& tag, const juce::String& text)
+{
+    tag.setText(text, juce::dontSendNotification);
+    tag.setColour(juce::Label::textColourId, juce::Colours::white);
+    tag.setJustificationType(juce::Justification::centredLeft);
+    tag.setFont(juce::FontOptions(kTagFontSize));
+    tag.setInterceptsMouseClicks(false, false);
+}
+
+// The tag's width: its text plus the Label's default border (3 px a side).
+int tagWidth(const juce::Label& tag)
+{
+    return measureTextWidth(tag.getText(), kTagFontSize) + 6;
+}
+
+// A switch segment or button as wide as its label in the button font, plus
+// the LookAndFeel's text indents (at most 0.6 x the font height per side),
+// so no label is squeezed below the font size (as the mode switch).
+int labelButtonWidth(juce::TextButton& b, int rowH)
+{
+    const float fs = b.getLookAndFeel().getTextButtonFont(b, rowH).getHeight();
+    return measureTextWidth(b.getButtonText(), fs) + 2 * juce::roundToInt(fs * 0.6f) + 2;
 }
 }
 
@@ -618,7 +669,7 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     {
         octShiftBtns[i].setButtonText(seqOctItems[i]);
         styleSwitchButton(octShiftBtns[i], kSeqCol);
-        octShiftBtns[i].setTooltip("Octave shift for the whole step pattern");
+        octShiftBtns[i].setTooltip("Octave shift for the Step and Phrase sequences");
         octShiftBtns[i].setClickingTogglesState(true);
         octShiftBtns[i].setRadioGroupId(2004);
         octShiftBtns[i].onClick = [this, i] { octShiftHidden.setSelectedId(i + 1); };
@@ -924,7 +975,7 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     genScaleRootBox.setColour(juce::ComboBox::backgroundColourId, kSurface);
     genScaleRootBox.setColour(juce::ComboBox::textColourId, kSeqCol);
     genScaleRootBox.setColour(juce::ComboBox::outlineColourId, kBorder);
-    genScaleRootBox.setTooltip("Root note the generative pitch field is built on");
+    genScaleRootBox.setTooltip("Root note of the key the Gen and Phrase pitches are built on");
     addAndMakeVisible(genScaleRootBox);
     genScaleRootA = std::make_unique<CA>(apvts, PID::scaleRoot, genScaleRootBox);
 
@@ -934,9 +985,131 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     genScaleTypeBox.setColour(juce::ComboBox::backgroundColourId, kSurface);
     genScaleTypeBox.setColour(juce::ComboBox::textColourId, kSeqCol);
     genScaleTypeBox.setColour(juce::ComboBox::outlineColourId, kBorder);
-    genScaleTypeBox.setTooltip("Scale/mode the generative pitch field is quantized to");
+    genScaleTypeBox.setTooltip("Scale/mode the Gen and Phrase pitches are quantized to");
     addAndMakeVisible(genScaleTypeBox);
     genScaleTypeA = std::make_unique<CA>(apvts, PID::scaleType, genScaleTypeBox);
+
+    // ── Phrase mode controls (docs/PHRASE_SEQ_CONCEPT.md §4) ──
+    // Three rows in the order of the use case: what (Part), in which key and
+    // octave, over which harmony, in which rhythm, and how it unfolds over
+    // the phrase. Dark green like Gen: generated, not hand-written. The chord
+    // and Layer combos are built before the switches whose onSelect
+    // relabels them, since an attachment selects at construction.
+    {
+        static_assert(std::size(kPhraseChordPIDs) == kNumChordSlots);
+        const auto chordItems = choiceLabels(PhrChord::kEntries);   // relabelled per scale
+        for (int i = 0; i < kNumChordSlots; ++i)
+        {
+            auto& box = phrChordBoxes[static_cast<size_t>(i)];
+            box.addItemList(chordItems, 1);
+            styleSeqCombo(box);
+            box.setTooltip("Chord slot " + juce::String(i + 1) + ": a degree of the key, or - for none. "
+                           "The slots in play loop, one chord per Rate bars (Harm = Chords)");
+            addAndMakeVisible(box);
+            phrChordA[static_cast<size_t>(i)] = std::make_unique<CA>(apvts, kPhraseChordPIDs[i], box);
+        }
+
+        phrLayerBox.addItemList(choiceLabels(PhrLayer::kEntries), 1);
+        styleSeqCombo(phrLayerBox);
+        phrLayerBox.setTooltip("A second line: Octave doubles the line an octave away, Chord plays the "
+                               "chord on its heads (not with Stab), Answer is a second motif heard in "
+                               "the B parts of the form");
+        phrLayerBox.onChange = [this] { refreshPhraseLayerItems(); };
+        addAndMakeVisible(phrLayerBox);
+        phrLayerA = std::make_unique<CA>(apvts, PID::phrLayer, phrLayerBox);
+
+        phrFormBox.addItemList(choiceLabels(PhrForm::kEntries), 1);
+        styleSeqCombo(phrFormBox);
+        phrFormBox.setTooltip("The phrase's form, one letter per quarter: A is the motif, B the motif "
+                              "varied by Var. Var also varies the phrase's last bar");
+        addAndMakeVisible(phrFormBox);
+        phrFormA = std::make_unique<CA>(apvts, PID::phrForm, phrFormBox);
+
+        setupPhraseSwitch(phrPartSwitch, "Part", choiceLabels(PhrPart::kEntries), 2020,
+            "What the phrase plays: a Bass, Riff or Lead line, or Stab chords on every pulse");
+        phrPartSwitch.onSelect = [this] { refreshPhraseLayerItems(); };
+        phrPartA = std::make_unique<CA>(apvts, PID::phrPart, phrPartSwitch.hidden);
+
+        setupPhraseSwitch(phrHarmSwitch, "Harm", choiceLabels(PhrHarm::kEntries), 2021,
+            "Where the chord comes from: Pedal (the tonic throughout), Keys (held keys set it and "
+            "do not sound), Chords (the chord slots)");
+        phrHarmSwitch.onSelect = [this] { refreshPhraseChordSlots(); };
+        phrHarmA = std::make_unique<CA>(apvts, PID::phrHarm, phrHarmSwitch.hidden);
+
+        setupPhraseSwitch(phrRateSwitch, "Rate", choiceLabels(PhrChordRate::kEntries), 2022,
+            "Bars per chord of the chord slots");
+        phrRateA = std::make_unique<CA>(apvts, PID::phrChordRate, phrRateSwitch.hidden);
+
+        // Ext is a Bool: the hidden combo's two items are false and true.
+        setupPhraseSwitch(phrExtSwitch, "Ext", { "3", "7" }, 2023,
+            "Chords as triads (3) or with their seventh (7)");
+        phrExtA = std::make_unique<CA>(apvts, PID::phrExt7, phrExtSwitch.hidden);
+
+        setupPhraseSwitch(phrLenSwitch, "Len", choiceLabels(PhrLen::kEntries), 2024,
+            "Motif length in bars");
+        phrLenA = std::make_unique<CA>(apvts, PID::phrLen, phrLenSwitch.hidden);
+
+        setupPhraseSwitch(phrBarsSwitch, "Bars", choiceLabels(PhrBars::kEntries), 2025,
+            "Phrase length in bars; the form divides it into quarters");
+        phrBarsA = std::make_unique<CA>(apvts, PID::phrBars, phrBarsSwitch.hidden);
+
+        styleTag(phrKeyTag, "Key");     addAndMakeVisible(phrKeyTag);
+        styleTag(phrOctTag, "Oct");     addAndMakeVisible(phrOctTag);
+        styleTag(phrLayerTag, "Layer"); addAndMakeVisible(phrLayerTag);
+        styleTag(phrFormTag, "Form");   addAndMakeVisible(phrFormTag);
+
+        auto pct = [](double v) { return juce::String(juce::roundToInt(v * 100.0)) + "%"; };
+        auto makeRow = [&](std::unique_ptr<SliderRow>& row, std::unique_ptr<SA>& attachment,
+                           const char* name, const char* pid,
+                           std::function<juce::String(double)> format, const juce::String& tip)
+        {
+            row = std::make_unique<SliderRow>(name, std::move(format), kSeqFill);
+            row->setInlineLabel(true);
+            row->getSlider().setTooltip(tip);
+            addAndMakeVisible(*row);
+            attachment = std::make_unique<SA>(apvts, pid, row->getSlider());
+            row->updateValue();
+        };
+        makeRow(phrSlideRow, phrSlideA, "Slide", PID::phrSlide, pct,
+                "Chance that a passing or approach note glides into the head after it");
+        makeRow(phrPulsesRow, phrPulsesA, "Pulses", PID::phrPulses, intFmt,
+                "Onsets in the motif, spread evenly over its steps");
+        makeRow(phrRotationRow, phrRotationA, "Rot", PID::phrRotation, intFmt,
+                "Rotates the motif's rhythm by steps");
+        makeRow(phrVariationRow, phrVariationA, "Var", PID::phrVariation, pct,
+                "How much the B parts and each phrase's last bar vary: re-pitch, lift, fill, "
+                "ratchet, drop, added in that order");
+        makeRow(phrEvolveRow, phrEvolveA, "Evolve", PID::phrEvolve, pct,
+                "How many motif steps change their note at each phrase boundary; the rhythm "
+                "stays. 0 is a locked loop");
+
+        auto styleAction = [this](juce::TextButton& b, const juce::String& tip)
+        {
+            b.setColour(juce::TextButton::buttonColourId, kSurface);
+            b.setColour(juce::TextButton::textColourOffId, kSeqCol);
+            b.setTooltip(tip);
+            addAndMakeVisible(b);
+        };
+        styleAction(phrDiceBtn, "A new motif from a new seed, for the current Part, Len, Pulses and Rot");
+        styleAction(phrKeepBtn, "Keep the motif as it plays now (evolved) as the stored motif");
+        styleAction(phrUndoBtn, "Back to the motif before the last Dice, Keep or From Step; "
+                                "press again to redo");
+        styleAction(phrFromStepBtn, "Take the step pattern (up to its first two bars) as the motif and "
+                                    "set Len, Pulses and Rot to match. Needs a step switched on");
+        // Each action can change whether there is something to undo.
+        phrDiceBtn.onClick     = [this] { processorRef.phraseDice();      phrUndoBtn.setEnabled(processorRef.canPhraseUndo()); };
+        phrKeepBtn.onClick     = [this] { processorRef.phraseKeep();      phrUndoBtn.setEnabled(processorRef.canPhraseUndo()); };
+        phrUndoBtn.onClick     = [this] { processorRef.phraseUndo();      phrUndoBtn.setEnabled(processorRef.canPhraseUndo()); };
+        phrFromStepBtn.onClick = [this] { processorRef.phraseFromSteps(); phrUndoBtn.setEnabled(processorRef.canPhraseUndo()); };
+        phrUndoBtn.setEnabled(processorRef.canPhraseUndo());
+
+        // The chord slots' labels follow the scale. The CA listens to the
+        // combo, so its onChange is free; it also fires when the attachment
+        // follows automation or a load.
+        genScaleTypeBox.onChange = [this] { refreshPhraseChordSlots(); };
+        refreshPhraseChordSlots();
+        refreshPhraseLayerItems();
+    }
 
     // ── Arp controls (SwitchBox: OFF/Up/Dn/U-D/Rnd) ──
     juce::StringArray arpModeItems;
@@ -1167,6 +1340,144 @@ int SequencerPanel::playedStep() const
     return processorRef.getStepSequencer().currentStepForGui.load(std::memory_order_relaxed);
 }
 
+void SequencerPanel::setupPhraseSwitch(PhraseSwitch& sw, const juce::String& tag,
+                                       const juce::StringArray& items, int radioGroupId,
+                                       const juce::String& tooltip)
+{
+    styleTag(sw.tag, tag);
+    addAndMakeVisible(sw.tag);
+
+    // The hidden combo is the attachment's target (as arpModeBox): a segment
+    // click selects its item, the attachment writes the parameter, and a
+    // parameter change from anywhere selects the item, which sets the
+    // segments. Synchronous, so the segments follow within the click.
+    sw.hidden.addItemList(items, 1);
+    for (int i = 0; i < items.size(); ++i)
+    {
+        auto btn = std::make_unique<juce::TextButton>(items[i]);
+        styleSwitchButton(*btn, kSeqFill);
+        btn->setTooltip(tooltip);
+        btn->setClickingTogglesState(true);
+        btn->setRadioGroupId(radioGroupId);
+        btn->onClick = [&sw, i] { sw.hidden.setSelectedId(i + 1, juce::sendNotificationSync); };
+        addAndMakeVisible(*btn);
+        sw.segments.push_back(std::move(btn));
+    }
+    sw.hidden.onChange = [&sw]
+    {
+        const int id = sw.hidden.getSelectedId();
+        for (size_t i = 0; i < sw.segments.size(); ++i)
+            sw.segments[i]->setToggleState(static_cast<int>(i) + 1 == id, juce::dontSendNotification);
+        if (sw.onSelect)
+            sw.onSelect();
+    };
+}
+
+int SequencerPanel::phraseSwitchWidth(PhraseSwitch& sw, int rowH)
+{
+    int w = tagWidth(sw.tag);
+    for (auto& seg : sw.segments)
+        w += labelButtonWidth(*seg, rowH);
+    return w;
+}
+
+void SequencerPanel::layoutPhraseSwitch(PhraseSwitch& sw, juce::Rectangle<int>& row, int rowH)
+{
+    sw.tag.setBounds(row.removeFromLeft(juce::jmin(tagWidth(sw.tag), row.getWidth())));
+    const int n = static_cast<int>(sw.segments.size());
+    for (int i = 0; i < n; ++i)
+    {
+        auto& seg = *sw.segments[static_cast<size_t>(i)];
+        int edges = 0;
+        if (i > 0)     edges |= juce::Button::ConnectedOnLeft;
+        if (i < n - 1) edges |= juce::Button::ConnectedOnRight;
+        seg.setConnectedEdges(edges);
+        seg.setBounds(row.removeFromLeft(juce::jmin(labelButtonWidth(seg, rowH), row.getWidth())));
+    }
+    sw.frame = n > 0 ? sw.segments.front()->getBounds().getUnion(sw.segments.back()->getBounds())
+                     : juce::Rectangle<int>{};
+}
+
+std::vector<juce::Component*> SequencerPanel::phraseControls()
+{
+    // Phrase-only controls. Key and Oct are the shared scale boxes and octave
+    // switch, which resized() shows for Phrase alongside these.
+    std::vector<juce::Component*> c {
+        &phrKeyTag, &phrOctTag, &phrLayerTag, &phrFormTag, &phrLayerBox, &phrFormBox,
+        phrSlideRow.get(), phrPulsesRow.get(), phrRotationRow.get(),
+        phrVariationRow.get(), phrEvolveRow.get(),
+        &phrDiceBtn, &phrKeepBtn, &phrUndoBtn, &phrFromStepBtn
+    };
+    for (auto& box : phrChordBoxes)
+        c.push_back(&box);
+    for (auto* sw : { &phrPartSwitch, &phrHarmSwitch, &phrRateSwitch,
+                      &phrExtSwitch, &phrLenSwitch, &phrBarsSwitch })
+    {
+        c.push_back(&sw->tag);
+        for (auto& seg : sw->segments)
+            c.push_back(seg.get());
+    }
+    return c;
+}
+
+// Both refreshes run from combo onChange handlers, so they read the combos,
+// never getRawParameterValue(): JUCE notifies a parameter's listeners in
+// reverse order of registration (AudioProcessorParameter::
+// sendValueChangedMessageToListeners), so for a change made on the message
+// thread (a preset load, From Step writing Len/Pulses/Rot) the attachment
+// sets its combo, and the combo calls onChange, before the APVTS adapter
+// has stored the new value. The attachments' combos already hold it.
+// Called on events only (Harm, scale type, Part, Layer, construction), never
+// per tick; none of the calls below repaints when nothing changes.
+void SequencerPanel::refreshPhraseChordSlots()
+{
+    const int scaleType = juce::jmax(0, genScaleTypeBox.getSelectedItemIndex());
+    const bool hasChords = PhraseModel::chordsAvailable(scaleType);
+    const int degrees    = PhraseModel::degreeCount(scaleType);
+    const bool slotsInPlay = phrHarmSwitch.hidden.getSelectedItemIndex() == PhrHarm::Chords
+                             && hasChords;
+
+    for (auto& box : phrChordBoxes)
+    {
+        // Read before relabelling: every relabel ends by re-selecting, so the
+        // shown text matches its item here (getSelectedId() is 0 otherwise).
+        const int selectedId = box.getSelectedId();
+        for (int d = 1; d <= PhrChord::D7; ++d)
+        {
+            const bool inScale = hasChords && d <= degrees;
+            juce::String text;
+            if (! hasChords)
+                text = juce::String(d);   // chromatic: no degrees, no chords
+            else if (inScale)
+                text = juce::String::fromUTF8(PhraseModel::chordLabelText(
+                           PhraseModel::chordLabel(d - 1, scaleType)).c_str());
+            else
+                text = "(" + juce::String(d) + ")";   // beyond a pentatonic's five
+            box.changeItemText(d + 1, text);
+            box.setItemEnabled(d + 1, inScale);
+        }
+        // Re-selecting shows the relabelled text (setSelectedId compares the
+        // text too) without writing the parameter.
+        box.setSelectedId(selectedId, juce::dontSendNotification);
+        box.setEnabled(slotsInPlay);
+        // The panel's combo look barely changes when disabled; dim it like
+        // the BPM bar under an external clock.
+        box.setAlpha(slotsInPlay ? 1.0f : 0.45f);
+    }
+    for (auto& seg : phrRateSwitch.segments)
+        seg->setEnabled(slotsInPlay);
+}
+
+void SequencerPanel::refreshPhraseLayerItems()
+{
+    // Stab plays the chord already: its Chord layer does nothing. Not
+    // offered for Stab, and dimmed when it is set and Part becomes Stab.
+    const bool stab = phrPartSwitch.hidden.getSelectedItemIndex() == PhrPart::Stab;
+    const bool chordLayer = phrLayerBox.getSelectedItemIndex() == PhrLayer::Chord;
+    phrLayerBox.setItemEnabled(PhrLayer::Chord + 1, ! stab);
+    phrLayerBox.setAlpha(stab && chordLayer ? 0.45f : 1.0f);
+}
+
 void SequencerPanel::mouseDoubleClick(const juce::MouseEvent& e)
 {
     // Double-click on the Step mode segment toggles step-record (latched).
@@ -1288,6 +1599,12 @@ void SequencerPanel::timerCallback()
     if (stepMode)
         showCurrentStep(playedStep());
 
+    // Phrase Undo is offered only when there is something to undo. A preset
+    // load or an engine switch can change that without a button, possibly
+    // while stopped, so it is read here above the idle gate: one atomic load,
+    // and setEnabled() does nothing (no repaint) while the answer stands.
+    phrUndoBtn.setEnabled(processorRef.canPhraseUndo());
+
     // Skip expensive updates when audio is idle and neither sequencer runs
     bool seqIdle = processorRef.audioIdle.load(std::memory_order_relaxed)
                    && !seqRunning && !genRunning;
@@ -1368,6 +1685,9 @@ void SequencerPanel::paint(juce::Graphics& g)
     }
     for (int i = 0; i < kNumExtraStrands; ++i)
         paintSwitchBoxBorder(g, strandOctSwitchBounds[i]);
+    for (const auto* sw : { &phrPartSwitch, &phrHarmSwitch, &phrRateSwitch,
+                            &phrExtSwitch, &phrLenSwitch, &phrBarsSwitch })
+        paintSwitchBoxBorder(g, sw->frame);
 
     // Harmony box card (gen-mode left column) + the thin divider above the voices.
     // Both reset (empty / -1) in step mode, so they don't draw there. Lighter
@@ -1595,8 +1915,9 @@ void SequencerPanel::resized()
     const int previousLayoutEngine = layoutEngine;
     layoutEngine = static_cast<int>(processorRef.getValueTreeState()
         .getRawParameterValue(PID::seqEngine)->load());
-    const bool genModeActive  = layoutEngine == SeqEngine::Gen;
-    const bool stepModeActive = layoutEngine == SeqEngine::Step;
+    const bool genModeActive    = layoutEngine == SeqEngine::Gen;
+    const bool stepModeActive   = layoutEngine == SeqEngine::Step;
+    const bool phraseModeActive = layoutEngine == SeqEngine::Phrase;
 
     // Visibility: step grid vs gen controls (Row 1 stays ALWAYS visible)
     for (int i = 0; i < MAX_COLS; ++i)
@@ -1618,8 +1939,8 @@ void SequencerPanel::resized()
     for (auto& b : genRangeBtns) b.setVisible(genModeActive);
     genRangeLabel.setVisible(genModeActive);
     genCycRow->setVisible(genModeActive);
-    genScaleRootBox.setVisible(genModeActive);
-    genScaleTypeBox.setVisible(genModeActive);
+    genScaleRootBox.setVisible(genModeActive || phraseModeActive);   // Phrase's Key
+    genScaleTypeBox.setVisible(genModeActive || phraseModeActive);
     genFixStepsBtn.setVisible(genModeActive);
     genFixPulsesBtn.setVisible(genModeActive);
     genFixRotationBtn.setVisible(genModeActive);
@@ -1638,15 +1959,21 @@ void SequencerPanel::resized()
         strandDomRows[i]->setVisible(genModeActive);
     }
 
-    // Step-mode-only controls (step row 2): unified Steps slider, octave switch,
-    // preset management. Hidden in gen mode, which has its own Steps (with FIX),
-    // and in Phrase mode.
+    // Step-mode-only controls (step row 2): unified Steps slider, preset
+    // management. Hidden in gen mode, which has its own Steps (with FIX), and
+    // in Phrase mode. The octave switch is Step's and Phrase's (Phrase's Oct).
     seqStepsRow->setVisible(stepModeActive);
     presetBox.setVisible(stepModeActive);
     seqSaveBtn.setVisible(stepModeActive);
     seqLoadBtn.setVisible(stepModeActive);
     for (int i = 0; i < kNumOctShiftBtns; ++i)
-        octShiftBtns[i].setVisible(stepModeActive);
+        octShiftBtns[i].setVisible(stepModeActive || phraseModeActive);
+
+    for (auto* c : phraseControls())
+        c->setVisible(phraseModeActive);
+    for (auto* sw : { &phrPartSwitch, &phrHarmSwitch, &phrRateSwitch,
+                      &phrExtSwitch, &phrLenSwitch, &phrBarsSwitch })
+        sw->frame = {};   // set below only when Phrase is laid out
 
     // Reset gen-mode frames/divider; set below only when laid out (gen mode on),
     // so the empty-guards in paint() drop them when the step grid is showing.
@@ -1658,6 +1985,24 @@ void SequencerPanel::resized()
     for (int i = 0; i < kNumExtraStrands; ++i)
         strandOctSwitchBounds[i] = {};
     genRangeSwitchBounds = {};
+
+    // The octave switchbox [-2 .. +2]: Step's row 2 and Phrase's row P1.
+    const int octW = kNumOctShiftBtns * (compactTopRow ? 20 : 24);
+    auto layoutOctShift = [this](juce::Rectangle<int> octArea)
+    {
+        const int octBtnW = octArea.getWidth() / kNumOctShiftBtns;
+        for (int i = 0; i < kNumOctShiftBtns; ++i)
+        {
+            int edges = 0;
+            if (i > 0) edges |= juce::Button::ConnectedOnLeft;
+            if (i < kNumOctShiftBtns - 1) edges |= juce::Button::ConnectedOnRight;
+            octShiftBtns[i].setConnectedEdges(edges);
+            octShiftBtns[i].setBounds(octArea.removeFromLeft(
+                i == kNumOctShiftBtns - 1 ? octArea.getWidth() : octBtnW));
+        }
+        octShiftSwitchBounds = octShiftBtns[0].getBounds()
+            .getUnion(octShiftBtns[kNumOctShiftBtns - 1].getBounds());
+    };
 
     if (genModeActive)
     {
@@ -1842,7 +2187,6 @@ void SequencerPanel::resized()
         auto stepRow = area.removeFromTop(rH);
         const int presetW = compactTopRow ? 76 : 96;
         const int iconW   = rH;
-        const int octW    = kNumOctShiftBtns * (compactTopRow ? 20 : 24);
         const int sColGap = 8, sFixW = 28, sFixGap = 2;          // mirror the gen branch
         const int sColW   = (stepRow.getWidth() - sColGap) / 2;
         const int stepsW  = juce::jmax(40, sColW - sFixW - sFixGap);  // == genStepsRow width
@@ -1858,21 +2202,7 @@ void SequencerPanel::resized()
         stepRow.removeFromRight(g);
 
         // Octave switchbox (relocated from the shared header).
-        {
-            auto octArea = stepRow.removeFromRight(octW);
-            const int octBtnW = octArea.getWidth() / kNumOctShiftBtns;
-            for (int i = 0; i < kNumOctShiftBtns; ++i)
-            {
-                int edges = 0;
-                if (i > 0) edges |= juce::Button::ConnectedOnLeft;
-                if (i < kNumOctShiftBtns - 1) edges |= juce::Button::ConnectedOnRight;
-                octShiftBtns[i].setConnectedEdges(edges);
-                octShiftBtns[i].setBounds(octArea.removeFromLeft(
-                    i == kNumOctShiftBtns - 1 ? octArea.getWidth() : octBtnW));
-            }
-            octShiftSwitchBounds = octShiftBtns[0].getBounds()
-                .getUnion(octShiftBtns[kNumOctShiftBtns - 1].getBounds());
-        }
+        layoutOctShift(stepRow.removeFromRight(octW));
 
         area.removeFromTop(compactTopRow ? 4 : g);
 
@@ -1893,6 +2223,118 @@ void SequencerPanel::resized()
     else
     {
         // ═══ Phrase mode ═══ (docs/PHRASE_SEQ_CONCEPT.md §4)
+        //   P1: Part · Key · Oct · Layer · Slide
+        //   P2: Harm · four chord slots · Rate · Ext
+        //   P3: Len · Pulses · Rot · Bars · Form · Var · Evolve · actions
+        // Switches, combos and buttons get their content's width; the inline
+        // sliders share what is left in their row, in proportion to the
+        // width their label and widest value need. The space below P3 is the
+        // phrase view's.
+        const int groupGap = 8;
+        // The width an inline bar needs for its label and widest value at
+        // rH: SliderRow::paintInlineBar's font, its 4 px inset a side, the
+        // value's 2 px slack and the 4 px between value and label.
+        const float barFs = juce::jlimit(9.0f, 13.0f, static_cast<float>(rH) * 0.58f);
+        auto barPrefW = [barFs](const char* label, const char* widestValue)
+        {
+            return measureTextWidth(label, barFs) + measureTextWidth(widestValue, barFs) + 14;
+        };
+        auto placeTag = [](juce::Label& tag, juce::Rectangle<int>& row)
+        {
+            tag.setBounds(row.removeFromLeft(juce::jmin(tagWidth(tag), row.getWidth())));
+        };
+        auto placeBars = [g](juce::Rectangle<int> row,
+                             std::initializer_list<std::pair<SliderRow*, int>> bars)
+        {
+            int prefSum = 0;
+            for (const auto& b : bars) prefSum += b.second;
+            const int n = static_cast<int>(bars.size());
+            const int avail = juce::jmax(0, row.getWidth() - (n - 1) * g);
+            int k = 0;
+            for (const auto& b : bars)
+            {
+                const int w = (k == n - 1) ? row.getWidth()
+                                           : avail * b.second / juce::jmax(1, prefSum);
+                b.first->setBounds(row.removeFromLeft(juce::jmin(w, row.getWidth())));
+                if (k < n - 1) row.removeFromLeft(juce::jmin(g, row.getWidth()));
+                ++k;
+            }
+        };
+
+        // ── P1: what, in which key and octave ──
+        {
+            auto row = area.removeFromTop(rH);
+            layoutPhraseSwitch(phrPartSwitch, row, rH);
+            row.removeFromLeft(groupGap);
+            placeTag(phrKeyTag, row);
+            genScaleRootBox.setBounds(row.removeFromLeft(juce::jmin(44, row.getWidth())));   row.removeFromLeft(g);
+            genScaleTypeBox.setBounds(row.removeFromLeft(juce::jmin(88, row.getWidth())));
+            row.removeFromLeft(groupGap);
+            placeTag(phrOctTag, row);
+            layoutOctShift(row.removeFromLeft(juce::jmin(octW, row.getWidth())));
+            row.removeFromLeft(groupGap);
+            placeTag(phrLayerTag, row);
+            phrLayerBox.setBounds(row.removeFromLeft(juce::jmin(76, row.getWidth())));
+            row.removeFromLeft(groupGap);
+            phrSlideRow->setBounds(row);
+        }
+        area.removeFromTop(g);
+
+        // ── P2: over which harmony ──
+        {
+            auto row = area.removeFromTop(rH);
+            layoutPhraseSwitch(phrHarmSwitch, row, rH);
+            row.removeFromLeft(groupGap);
+            // Rate and Ext from the right; the chord slots share the middle.
+            auto right = row.removeFromRight(juce::jmin(row.getWidth(),
+                phraseSwitchWidth(phrRateSwitch, rH) + groupGap + phraseSwitchWidth(phrExtSwitch, rH)));
+            layoutPhraseSwitch(phrRateSwitch, right, rH);
+            right.removeFromLeft(groupGap);
+            layoutPhraseSwitch(phrExtSwitch, right, rH);
+            row.removeFromRight(groupGap);
+            const int slotW = juce::jmin(100, (row.getWidth() - (kNumChordSlots - 1) * g) / kNumChordSlots);
+            for (auto& box : phrChordBoxes)
+            {
+                box.setBounds(row.removeFromLeft(juce::jmax(0, juce::jmin(slotW, row.getWidth()))));
+                row.removeFromLeft(juce::jmin(g, row.getWidth()));
+            }
+        }
+        area.removeFromTop(g);
+
+        // ── P3: which rhythm, how it unfolds; the motif actions at the end ──
+        {
+            auto row = area.removeFromTop(rH);
+            // Actions from the right: [Dice][Keep][Undo] [From Step].
+            for (auto* b : { &phrFromStepBtn, &phrUndoBtn, &phrKeepBtn, &phrDiceBtn })
+            {
+                b->setBounds(row.removeFromRight(juce::jmin(labelButtonWidth(*b, rH), row.getWidth())));
+                row.removeFromRight(juce::jmin(b == &phrFromStepBtn ? groupGap : 2, row.getWidth()));
+            }
+            row.removeFromRight(juce::jmin(groupGap - 2, row.getWidth()));
+
+            layoutPhraseSwitch(phrLenSwitch, row, rH);
+            row.removeFromLeft(groupGap);
+            // Fixed parts of the row after Len: the Bars switch and Form.
+            const int barsW = phraseSwitchWidth(phrBarsSwitch, rH);
+            const int formW = tagWidth(phrFormTag) + 64;
+            const int fixedW = barsW + formW + 3 * groupGap;
+            // Pulses · Rot | Bars · Form | Var · Evolve — the bars around the
+            // fixed groups share what is left.
+            const int barsSpace = juce::jmax(0, row.getWidth() - fixedW);
+            const int pPulses = barPrefW("Pulses", "32"), pRot = barPrefW("Rot", "31");
+            const int pVar = barPrefW("Var", "100%"),     pEvo = barPrefW("Evolve", "100%");
+            const int leftW = barsSpace * (pPulses + pRot) / juce::jmax(1, pPulses + pRot + pVar + pEvo);
+            placeBars(row.removeFromLeft(juce::jmin(leftW, row.getWidth())),
+                      { { phrPulsesRow.get(), pPulses }, { phrRotationRow.get(), pRot } });
+            row.removeFromLeft(juce::jmin(groupGap, row.getWidth()));
+            layoutPhraseSwitch(phrBarsSwitch, row, rH);
+            row.removeFromLeft(juce::jmin(groupGap, row.getWidth()));
+            placeTag(phrFormTag, row);
+            phrFormBox.setBounds(row.removeFromLeft(juce::jmin(64, row.getWidth())));
+            row.removeFromLeft(juce::jmin(groupGap, row.getWidth()));
+            placeBars(row, { { phrVariationRow.get(), pVar }, { phrEvolveRow.get(), pEvo } });
+        }
+
         gridArea = {};
     }
 }

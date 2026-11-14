@@ -196,6 +196,47 @@ private:
     // per-cycle euclidean/Turing decisions legible. Visible only in GEN mode.
     std::unique_ptr<GenSeqCRTMonitor> genMonitor;
 
+    // ── Phrase mode controls (docs/PHRASE_SEQ_CONCEPT.md §4) ──
+    // Key and Oct are the shared scale combos (genScaleRootBox / genScaleTypeBox)
+    // and the octave switchbox (octShiftBtns); everything else binds a phr_*
+    // parameter. Visible only in Phrase mode.
+    //
+    // A tagged switchbox on a Choice or Bool parameter: the tag in front,
+    // connected segments, and a hidden ComboBox as the APVTS bridge (its
+    // attachment is in the attachments section below).
+    struct PhraseSwitch
+    {
+        juce::Label tag;
+        std::vector<std::unique_ptr<juce::TextButton>> segments;
+        juce::ComboBox hidden;
+        juce::Rectangle<int> frame;   // unified border; empty outside Phrase mode
+        std::function<void()> onSelect;   // after the segments follow the parameter
+    };
+    PhraseSwitch phrPartSwitch, phrHarmSwitch, phrRateSwitch, phrExtSwitch,
+                 phrLenSwitch, phrBarsSwitch;
+    juce::Label phrKeyTag, phrOctTag, phrLayerTag, phrFormTag;
+    juce::ComboBox phrLayerBox, phrFormBox;
+    static constexpr int kNumChordSlots = 4;
+    std::array<juce::ComboBox, kNumChordSlots> phrChordBoxes;
+    std::unique_ptr<SliderRow> phrSlideRow, phrPulsesRow, phrRotationRow,
+                               phrVariationRow, phrEvolveRow;
+    juce::TextButton phrDiceBtn { "Dice" }, phrKeepBtn { "Keep" },
+                     phrUndoBtn { "Undo" }, phrFromStepBtn { "From Step" };
+    void setupPhraseSwitch(PhraseSwitch& sw, const juce::String& tag,
+                           const juce::StringArray& items, int radioGroupId,
+                           const juce::String& tooltip);
+    /** Lays the switch out at the left of `row`: the tag, then one segment
+     *  per item, each as wide as its label needs. */
+    void layoutPhraseSwitch(PhraseSwitch& sw, juce::Rectangle<int>& row, int rowH);
+    int phraseSwitchWidth(PhraseSwitch& sw, int rowH);
+    std::vector<juce::Component*> phraseControls();
+    /** Chord slot labels follow the scale (Roman numerals; degrees the scale
+     *  does not have are disabled), and the slots and Rate are enabled only
+     *  where they act: Harm = Chords on a scale with degrees. */
+    void refreshPhraseChordSlots();
+    /** Layer's Chord does not apply to Stab (a stab already is the chord). */
+    void refreshPhraseLayerItems();
+
     // The SeqEngine resized() last laid the panel out for (-1 before the
     // first layout); the timer re-lays out when the parameter moves away, and
     // resized() re-reads the playhead highlight when it moves into Step.
@@ -231,6 +272,12 @@ private:
     std::unique_ptr<CA> strandDivA[kNumExtraStrands];
     std::unique_ptr<SA> strandOctaveA[kNumExtraStrands];
     std::unique_ptr<SA> strandDomA[kNumExtraStrands];
+
+    // Phrase attachments
+    std::unique_ptr<CA> phrPartA, phrHarmA, phrRateA, phrExtA, phrLenA, phrBarsA,
+                        phrLayerA, phrFormA;
+    std::array<std::unique_ptr<CA>, kNumChordSlots> phrChordA;
+    std::unique_ptr<SA> phrSlideA, phrPulsesA, phrRotationA, phrVariationA, phrEvolveA;
 
     int currentStep = -1;     // the lit step column (showCurrentStep)
     int lastPatternGen = 0;   // mirrors StepSequencer::patternReplacedGen for grid refresh
