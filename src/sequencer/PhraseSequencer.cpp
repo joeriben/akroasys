@@ -421,8 +421,6 @@ void T5ynthPhraseSequencer::renderCurrent()
     const int N = phraseBarsOf(cfg);
     const int p = floorDiv(bar, N);
     const Motif& cur = evoCur;
-    const Motif& next = floorDiv(bar + 1, N) == p ? evoCur : evoNext;
-    const Motif& prev = floorDiv(bar - 1, N) == p ? evoCur : evoPrev;
     const Config L = latchedConfig();
 
     Motif answer;
@@ -432,7 +430,7 @@ void T5ynthPhraseSequencer::renderCurrent()
     RenderInput in;
     in.cfg = &L;
     in.motif = &cur;
-    in.nextMotif = &next;
+    in.nextPhraseMotif = &evoNext;
     in.answer = wantAnswer ? &answer : nullptr;
     in.bar = bar;
     in.barLenQ = barLenQ;
@@ -450,8 +448,11 @@ void T5ynthPhraseSequencer::renderCurrent()
     {
         // Pedal / Chords: the entry state is bar − 1 rendered on its own, so
         // bar b sounds the same whether reached by playing or by a locate.
+        // The last bar of the phrase before plays evoPrev (or the kept
+        // lead-in) on into this phrase.
+        const bool firstBar = floorDiv(bar - 1, N) != p;
         int ep = -1, epp = -1;
-        entryNotes(L, prev, cur, bar, barLenQ, scratch, ep, epp);
+        entryNotes(L, firstBar ? evoPrev : cur, firstBar ? cur : evoNext, bar, barLenQ, scratch, ep, epp);
         in.prevNote = ep;
         in.prevPrevNote = epp;
     }

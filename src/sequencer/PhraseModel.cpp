@@ -976,9 +976,9 @@ struct OnsetList
 struct LineCtx
 {
     const Config* cfg = nullptr;
-    const Motif*  motif = nullptr;
-    const Motif*  nextMotif = nullptr;
-    std::array<bool, kMaxMotifSteps> heads {}, nextHeads {};
+    const Motif*  motif = nullptr;             // this bar's phrase
+    const Motif*  nextPhraseMotif = nullptr;   // the phrase after it
+    std::array<bool, kMaxMotifSteps> heads {}, nextPhraseHeads {};
     int    bar = 0;
     double barLenQ = 4.0;
     bool   keys = false;
@@ -997,6 +997,14 @@ struct LineCtx
 bool playsIn(const LineCtx& x, int bar)
 {
     return !x.bUnitsOnly || isBUnit(*x.cfg, bar);
+}
+
+/** `bar` (one the lookahead reaches, at most two on: a phrase has four bars
+ *  or more) lies in the phrase after the context's bar. */
+bool inNextPhrase(const LineCtx& x, int bar)
+{
+    const int N = phraseBarsOf(*x.cfg);
+    return floorDiv(bar, N) != floorDiv(x.bar, N);
 }
 
 int barStepsFor(int spb, double barLenQ)
@@ -1036,9 +1044,9 @@ int headNote(const Slot& sl, const Chord& ch, int tonic)
 }
 
 /** The next head after bar-step k of the bar (k = −1: from the bar start),
- *  rendered against the chord valid at its own position (§3.4). Bars the
- *  line does not play in have no head; −1 when none follows in the next two
- *  bars. */
+ *  rendered against the chord valid at its own position (§3.4). A bar of the
+ *  next phrase is read from that phrase's motif. Bars the line does not play
+ *  in have no head; −1 when none follows in the next two bars. */
 int lookaheadHead(const LineCtx& x, int k, bool fromNextBar)
 {
     const Motif& m = *x.motif;
@@ -1055,18 +1063,20 @@ int lookaheadHead(const LineCtx& x, int k, bool fromNextBar)
                 return headNote(m.slots[static_cast<size_t>(s)], ch, x.tonic);
         }
     }
-    const Motif& nm = *x.nextMotif;
     for (int ahead = 1; ahead <= 2; ++ahead)
     {
         const int nb = x.bar + ahead;
         if (!playsIn(x, nb)) continue;
+        const bool next = inNextPhrase(x, nb);
+        const Motif& nm = next ? *x.nextPhraseMotif : m;
+        const auto& nh = next ? x.nextPhraseHeads : x.heads;
         const int mb = floorMod(nb, nm.len);
         const int steps = barStepsFor(nm.stepsPerBar, x.barLenQ);
         const Chord ch = chordAt(x, nb);
         for (int j = 0; j < steps; ++j)
         {
             const int s = mb * nm.stepsPerBar + j;
-            if (nm.slots[static_cast<size_t>(s)].fn != Fn::Rest && x.nextHeads[static_cast<size_t>(s)])
+            if (nm.slots[static_cast<size_t>(s)].fn != Fn::Rest && nh[static_cast<size_t>(s)])
                 return headNote(nm.slots[static_cast<size_t>(s)], ch, x.tonic);
         }
     }
@@ -1290,10 +1300,11 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
  *  and a head. Collected by the code that renders the next bar, so a step its
  *  Drop removes does not count and a Fill note before its first step does.
  *  Onset times and kinds follow from that bar's motif and variation alone;
- *  the pitches, which also read the bar after it (taken here from the same
- *  motif, as renderBar does without a next motif), are not used. A line
- *  rendered without variation (the Answer) has none in the next bar either.
- *  A line that does not play in the next bar has no onset there. */
+ *  the pitches, which also read the bars after it, are not used (in a next
+ *  phrase they are read from that phrase's motif again: the phrase after it
+ *  is not known here). A line rendered without variation (the Answer) has
+ *  none in the next bar either. A line that does not play in the next bar
+ *  has no onset there. */
 void nextBarOnset(const LineCtx& x, double& onQ, bool& step, bool& head)
 {
     if (!playsIn(x, x.bar + 1))
@@ -1303,9 +1314,12 @@ void nextBarOnset(const LineCtx& x, double& onQ, bool& step, bool& head)
         return;
     }
     LineCtx n = x;
-    n.motif = x.nextMotif;
-    n.heads = x.nextHeads;
     n.bar = x.bar + 1;
+    if (inNextPhrase(x, n.bar))
+    {
+        n.motif = x.nextPhraseMotif;
+        n.heads = x.nextPhraseHeads;
+    }
     BarVariation var;
     if (x.var) var = variationForBar(*n.motif, n.heads, *x.cfg, n.bar);
     n.var = x.var ? &var : nullptr;
@@ -1433,9 +1447,9 @@ void renderBar(const RenderInput& in, BarRender& out)
     out.endsHeld = false;
 
     LineCtx x;
-    x.cfg = &cfg; x.motif = &m; x.nextMotif = in.nextMotif ? in.nextMotif : in.motif;
+    x.cfg = &cfg; x.motif = &m; x.nextPhraseMotif = in.nextPhraseMotif ? in.nextPhraseMotif : in.motif;
     computeHeads(m, x.heads);
-    computeHeads(*x.nextMotif, x.nextHeads);
+    computeHeads(*x.nextPhraseMotif, x.nextPhraseHeads);
     x.bar = in.bar; x.barLenQ = in.barLenQ;
     x.keys = in.keys; x.keysChord = in.keysChord;
     x.tonic = tonicNote(partAnchor(m.part), cfg.scaleRoot);
@@ -1501,9 +1515,11 @@ void renderBar(const RenderInput& in, BarRender& out)
         else if (cfg.layer == Layer::Answer && in.answer && isBUnit(cfg, in.bar))
         {
             LineCtx a = x;
-            a.motif = in.answer; a.nextMotif = in.answer;
+            // The next phrase's answer is this one: an answer is drawn from
+            // the motif's rhythm and seed, which Evolve does not change.
+            a.motif = in.answer; a.nextPhraseMotif = in.answer;
             computeHeads(*in.answer, a.heads);
-            a.nextHeads = a.heads;
+            a.nextPhraseHeads = a.heads;
             a.tonic = tonicNote(partAnchor(m.part) + octaveShift, cfg.scaleRoot);
             a.center = a.tonic + 6;
             a.var = nullptr;
@@ -1527,17 +1543,17 @@ void renderBar(const RenderInput& in, BarRender& out)
     out.lastVoicingCount = nv;
 }
 
-void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
+void entryNotes(const Config& cfg, const Motif& motif, const Motif& nextPhraseMotif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp)
 {
     RenderInput in;
     in.cfg = &cfg;
-    in.motif = &prevMotif;
-    in.nextMotif = &motif;
+    in.motif = &motif;
+    in.nextPhraseMotif = &nextPhraseMotif;
     in.bar = bar - 1;
     in.barLenQ = barLenQ;
     const Chord ch = chordForBar(cfg, bar - 1);
-    in.prevNote = in.prevPrevNote = chordRootNote(ch, tonicNote(partAnchor(prevMotif.part), cfg.scaleRoot));
+    in.prevNote = in.prevPrevNote = chordRootNote(ch, tonicNote(partAnchor(motif.part), cfg.scaleRoot));
     Config c = cfg;
     c.layer = Layer::Off;   // only the main line's last notes matter
     in.cfg = &c;

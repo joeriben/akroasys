@@ -325,7 +325,10 @@ struct RenderInput
 {
     const Config* cfg       = nullptr;
     const Motif*  motif     = nullptr;   // heard motif of this bar's phrase
-    const Motif*  nextMotif = nullptr;   // heard motif of the next bar's phrase
+    /** Heard motif of the phrase after this bar's (nullptr = `motif`). The
+     *  lookahead (approach notes, Fill, the next bar's first onset) reads up
+     *  to two bars on; a bar of the next phrase is read from this one. */
+    const Motif*  nextPhraseMotif = nullptr;
     const Motif*  answer    = nullptr;   // Answer layer motif (nullptr = none)
     int    bar      = 0;
     double barLenQ  = 4.0;
@@ -342,10 +345,11 @@ struct RenderInput
 void renderBar(const RenderInput& in, BarRender& out);
 
 /** The main line's P / PP entering `bar` for Pedal and Chords: the last notes
- *  of bar − 1, rendered on its own with `prevMotif` (the motif of bar − 1's
- *  phrase, or the kept lead-in into an origin phrase) leading into `motif`
- *  (bar's). Keeps continuous play and a locate equal. */
-void entryNotes(const Config& cfg, const Motif& prevMotif, const Motif& motif,
+ *  of bar − 1, rendered on its own as renderBar renders it, from `motif` (the
+ *  heard motif of bar − 1's phrase, or the kept lead-in into an origin phrase)
+ *  with `nextPhraseMotif` (the heard motif of the phrase after bar − 1's).
+ *  Keeps continuous play and a locate equal. */
+void entryNotes(const Config& cfg, const Motif& motif, const Motif& nextPhraseMotif,
                 int bar, double barLenQ, BarRender& scratch, int& p, int& pp);
 
 /** Stab / Chord-layer voicing of the chord loop at `bar`, voice-led over two
