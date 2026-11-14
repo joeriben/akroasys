@@ -17,6 +17,11 @@
 // instrument idle again (asserted: a wake that never clears is an idle-CPU
 // regression).
 //
+// A change made in the same block as Phrase -> Step reaches the grid: the
+// phrase section, which brings the view up to date, does not run in a block
+// that switches away from Phrase, and the switch copied the bar from before
+// the change (found in the review of db2a968a).
+//
 // A view rendered while stopped is not heard: a motif diced while stopped
 // keeps its open origin and Keep does nothing with it, and a second Dice
 // still anchors where playback next starts.
@@ -317,6 +322,59 @@ int main()
         check("  the dice was made in deep idle", idleBefore);
         check("  the dice changes the bar", ! same(view, before));
         check("  the step grid is the bar the view shows", gridIsView);
+    }
+
+    {
+        // A change and Phrase -> Step in one block: the phrase section, which
+        // brings the stopped view up to date, does not run in a block that
+        // switches away from Phrase, so the switch must take the change into
+        // the view before it copies it. The oracle is the view the phrase
+        // sequencer shows once switched back (its config reads no step
+        // parameter the switch sets).
+        auto switchInBlockOfChange = [](const char* name, bool fromIdle,
+                                        const std::function<void(Rig&)>& change) {
+            std::printf("%s\n", name);
+            // A Dice can draw the bar it replaces; a few attempts find one
+            // that changes it.
+            bool idleBefore = true, changed = false, gridIsView = false;
+            for (int attempt = 0; attempt < 8 && ! changed; ++attempt)
+            {
+                Rig r;
+                if (fromIdle) idleBefore = r.waitIdle();
+                const Shown before = shown(r.proc);
+                change(r);
+                r.set(PID::seqEngine, SeqEngine::Step);
+                r.blocks(2);
+                auto& st = r.proc.getStepSequencer();
+                Shown grid;
+                grid.n = st.getNumSteps();
+                for (int i = 0; i < grid.n && i < PhraseModel::kMaxBarSteps; ++i)
+                {
+                    const auto& s = st.getStep(i);
+                    grid.v[static_cast<size_t>(i)].note = s.enabled ? s.note : -1;
+                }
+                r.set(PID::seqEngine, SeqEngine::Phrase);
+                r.blocks(3);
+                const Shown back = shown(r.proc);
+                changed = ! same(back, before);
+                gridIsView = grid.n == back.n;
+                for (int i = 0; gridIsView && i < back.n; ++i)
+                    gridIsView = grid.v[static_cast<size_t>(i)].note == back.v[static_cast<size_t>(i)].note;
+                std::printf("    before %s\n    grid   %s\n    view   %s\n",
+                            str(before).c_str(), str(grid).c_str(), str(back).c_str());
+            }
+            if (fromIdle) check("  the change was made in deep idle", idleBefore);
+            check("  the change changes the bar", changed);
+            check("  the step grid is the bar the view shows after the change", gridIsView);
+        };
+        switchInBlockOfChange("Dice and Phrase -> Step in one block, idle", true,
+                              [](Rig& r) { r.proc.phraseDice(); });
+        switchInBlockOfChange("Dice and Phrase -> Step in one block, awake", false,
+                              [](Rig& r) { r.proc.phraseDice(); });
+        switchInBlockOfChange("Part and Phrase -> Step in one block, idle", true,
+                              [](Rig& r) { r.set(PID::phrPart, PhrPart::Lead); });
+        switchInBlockOfChange("3/4 and Phrase -> Step in one block, idle", true,
+                              [](Rig& r) { r.head.num = 3; });
     }
 
     std::printf("failures=%d\n", failures);

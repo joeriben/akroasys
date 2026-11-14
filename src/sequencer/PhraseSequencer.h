@@ -64,9 +64,15 @@ public:
     /** Appends this block's events to `out`. `hostSync`: `hostPpq` is the
      *  block start position in quarters; otherwise the internal count runs.
      *  While stopped it emits nothing and brings the view up to date
-     *  (renderStoppedView). */
+     *  (updateStoppedView). */
     void processBlock(int numSamples, double bpm, bool hostSync, double hostPpq,
                       std::vector<VoiceEvent>& out);
+
+    /** Stopped: brings the view up to date with the stored motif, the
+     *  configuration, the time signature and the keys, as processBlock does
+     *  while stopped; for a reader of the view in a block that does not run
+     *  processBlock (Phrase -> Step). Does nothing while running. */
+    void updateStoppedView();
 
     /** Stopped: whether the next processBlock, after setConfig(`c`) and
      *  setTimeSignature(`numerator`, `denominator`), would change the view —
@@ -257,7 +263,6 @@ private:
      *  was rendered (the stored motif once taken, the configuration, the
      *  time signature, the keys). */
     bool stoppedViewStale() const;
-    void renderStoppedView();
     void releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset);
     /** Sets each pending off to its own off, ended no later than its line's
      *  or its strand's first onset in render.events from `fromIndex` on. */

@@ -546,7 +546,7 @@ bool T5ynthPhraseSequencer::viewPendingWhileStopped(const Config& c, int numerat
         || toAudio.sequence() != toAudioSeen || stoppedViewStale();
 }
 
-void T5ynthPhraseSequencer::renderStoppedView()
+void T5ynthPhraseSequencer::updateStoppedView()
 {
     // Stopped, the view shows the bar playback starts in on the sequencer's
     // own transport, the first one (start() counts from 0), as start() enters
@@ -554,6 +554,8 @@ void T5ynthPhraseSequencer::renderStoppedView()
     // heard; the view shows it heard at the first bar's phrase, and liveMotif
     // keeps the open origin for the start to resolve. Nothing is heard here:
     // publishHeard and the edit origin stay as playback left them.
+    if (running || !cfgValid) return;
+    takeStoredMotif();
     if (!stoppedViewStale()) return;
     Motif m = liveMotif;
     if (m.origin == kOriginAtNextEntry) m.origin = floorDiv(0, phraseBarsOf(cfg));
@@ -568,12 +570,12 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
 {
     if (numSamples <= 0 || !cfgValid) return;
 
-    takeStoredMotif();
     if (!running)
     {
-        renderStoppedView();
+        updateStoppedView();
         return;
     }
+    takeStoredMotif();
     if (!(bpm > 0.0)) return;
 
     const double dq = static_cast<double>(numSamples) * bpm / (60.0 * sampleRate);

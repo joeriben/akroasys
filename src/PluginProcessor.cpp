@@ -4983,6 +4983,16 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             // into the next onset, which is the step grid's slide on the
             // source step. Accents map to full velocity, the rest to the step
             // default, so From Step reads the accents back (> 0.85).
+            // Stopped, the view first takes what changed in this block (a
+            // Dice, a load, a phrase parameter, the time signature): the
+            // phrase section, which brings it up to date otherwise, does not
+            // run in a block that switches away from Phrase.
+            if (! phraseSequencer.isRunning())
+            {
+                phraseSequencer.setConfig(phraseConfigFromParams());
+                phraseSequencer.setTimeSignature(hostTsNum_, hostTsDen_);
+                phraseSequencer.updateStoppedView();
+            }
             std::array<PhraseModel::StepView, PhraseModel::kMaxBarSteps> view {};
             const int n = phraseSequencer.readView(view);
             if (n > 0)
