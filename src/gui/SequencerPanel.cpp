@@ -1164,25 +1164,31 @@ void SequencerPanel::timerCallback()
 
     // Mode changes must update the layout even while audio is idle. Otherwise
     // a switch away from GEN stays visually in gen mode until PLAY wakes the
-    // timer path.
+    // timer path. Entering Step also re-reads the step count: a load or
+    // automation may have changed it while another mode was shown, and the
+    // step-count sync further down sits below the idle early-return.
     if (engine != layoutEngine)
     {
-        resized();
+        if (stepMode)
+            syncStepCount();   // lays the panel out
+        else
+            resized();
         repaint();
     }
 
-    // A preset load rewrites the pattern on the audio thread — possibly while
-    // stopped (the audio block wakes one cycle for it). Refresh the grid once
-    // when it happens, BEFORE the idle early-return below, or a preset picked
-    // while stopped would never appear.
-    int presetGen = processorRef.getStepSequencer().presetAppliedGen.load(std::memory_order_relaxed);
-    if (presetGen != lastPresetGen)
+    // A step preset or an engine switch's transfer rewrites the pattern on the
+    // audio thread — possibly while stopped, and possibly after this timer
+    // already laid out the switch into Step. Refresh the grid once when it
+    // happens, BEFORE the idle early-return below, or a pattern replaced while
+    // stopped would never appear.
+    int patternGen = processorRef.getStepSequencer().patternReplacedGen.load(std::memory_order_acquire);
+    if (patternGen != lastPatternGen)
     {
-        lastPresetGen = presetGen;
+        lastPatternGen = patternGen;
         if (stepMode)
         {
-            syncStepCount();   // step count + column visibility follow the preset
-            repaint();         // redraw the new note pattern
+            syncStepCount();   // step count + column visibility follow the new pattern
+            repaint();         // redraw its notes
         }
     }
 

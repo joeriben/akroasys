@@ -4901,6 +4901,9 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             if (auto* par = parameters.getParameter(PID::seqSteps))
                 par->setValueNotifyingHost(par->convertTo0to1(static_cast<float>(seqSteps)));
         }
+        // The GUI polls this and refreshes the grid, also when the preset was
+        // applied while playback was stopped.
+        stepSequencer.markPatternReplaced();
     }
 
     // Engine switch: PLAY is the master transport, PID::seqEngine picks the
@@ -4974,6 +4977,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         stepSequencer.setStepEnabled(i, false);
                     }
                 }
+                stepSequencer.markPatternReplaced();   // the GUI redraws the grid
             }
         }
         else if (transfer && from == SeqEngine::Phrase && to == SeqEngine::Step)
@@ -5018,6 +5022,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                         stepSequencer.setStepEnabled(i, false);
                     }
                 }
+                stepSequencer.markPatternReplaced();   // the GUI redraws the grid
             }
         }
 

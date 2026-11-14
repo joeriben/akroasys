@@ -125,9 +125,19 @@ public:
     /** Atomic step position for GUI polling. */
     std::atomic<int> currentStepForGui { -1 };
 
-    /** Bumped on every loadPreset() so the GUI can detect a preset load — even
-     *  while the audio path is idle — and refresh the step grid. */
-    std::atomic<int> presetAppliedGen { 0 };
+    /** Bumped whenever the pattern is replaced from outside the grid: a step
+     *  preset (loadPreset) or an engine switch that copies Gen's or Phrase's
+     *  pattern into the grid. The GUI polls it, also while the audio path is
+     *  idle, and refreshes the step grid. Read it with acquire: the step
+     *  count parameter the replacement wrote is visible after it. */
+    std::atomic<int> patternReplacedGen { 0 };
+
+    /** Publishes a pattern replacement to the GUI (patternReplacedGen).
+     *  Call it after the steps and the step count are written. */
+    void markPatternReplaced() noexcept
+    {
+        patternReplacedGen.fetch_add(1, std::memory_order_release);
+    }
 
     /** Atomic flag: set to true when bar boundary crossed (step wraps to 0). */
     std::atomic<bool> barStartFlag { false };

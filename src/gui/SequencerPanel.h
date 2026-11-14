@@ -223,7 +223,7 @@ private:
     std::unique_ptr<SA> strandDomA[kNumExtraStrands];
 
     int currentStep = -1;
-    int lastPresetGen = 0;   // mirrors StepSequencer::presetAppliedGen for grid refresh
+    int lastPatternGen = 0;   // mirrors StepSequencer::patternReplacedGen for grid refresh
 
     // Step-record display mirrors (updated only when the bit/cursor changes, so
     // the 10 Hz timer never repaints idly).
