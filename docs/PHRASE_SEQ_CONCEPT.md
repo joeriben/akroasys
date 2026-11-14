@@ -148,7 +148,7 @@ it plays without Lift.
 | Octave | P ± 12, direction alternating to stay in range |
 | Passing | the scale step between P and T, moving toward T; if P and T are adjacent or equal, falls back to Neighbour |
 | Neighbour ↑/↓ | scale step above/below P |
-| Approach ↑/↓ | scale step above/below T |
+| Approach ↑/↓ | scale step below/above T, rising/falling into it |
 | Approach chromatic | T − 1 semitone |
 
 Categories after Aldwell, Schachter & Cadwallader (2011). Lead lines
