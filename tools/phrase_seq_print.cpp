@@ -3758,7 +3758,8 @@ int main(int argc, char** argv)
         // pulse (Bass), on the last head (Riff, Lead: their Lift transposes
         // the last beat). Its note is the root at the slot's octave (+12 in a
         // lifted last beat), in the view and as an onset; Bass's last pulse
-        // still plays an Octave of the motif note before it. The last bar of a
+        // plays an Octave of the note that sounds before it, a step's or a
+        // Fill run note's. The last bar of a
         // B unit, Variation 2/5 to 4/5 (Lift, Fill, Ratchet), 4/4 and 3/4.
         std::mt19937 rng(34);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
