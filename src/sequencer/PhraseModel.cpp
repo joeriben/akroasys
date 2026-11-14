@@ -1437,8 +1437,26 @@ int renderSlot(const Slot& sl, const Chord& ch, int P, int PP, int T, const Line
         case Fn::Octave:        return P > x.center ? P - 12 : P + 12;
         case Fn::Passing:
         {
-            if (T > P) { const int n = scaleStep(P, 1, x.mask);  return n < T ? n : scaleStep(P, -1, x.mask); }
-            if (T < P) { const int n = scaleStep(P, -1, x.mask); return n > T ? n : scaleStep(P, 1, x.mask); }
+            // A scale step from P towards the head, where one lies strictly
+            // between them. Where none does (the head is P, or a scale step
+            // from it) the step plays P's neighbour away from the head (above
+            // for T == P), and the view names it that neighbour: shown as p,
+            // it claimed a note between two that it is not between.
+            if (T > P)
+            {
+                const int n = scaleStep(P, 1, x.mask);
+                if (n < T) return n;
+                played = Fn::NeighbourDown;
+                return scaleStep(P, -1, x.mask);
+            }
+            if (T < P)
+            {
+                const int n = scaleStep(P, -1, x.mask);
+                if (n > T) return n;
+                played = Fn::NeighbourUp;
+                return scaleStep(P, 1, x.mask);
+            }
+            played = Fn::NeighbourUp;
             return scaleStep(P, 1, x.mask);
         }
         case Fn::NeighbourUp:   return scaleStep(P, 1, x.mask);
