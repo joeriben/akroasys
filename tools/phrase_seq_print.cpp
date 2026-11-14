@@ -3188,12 +3188,18 @@ int main(int argc, char** argv)
         // beat: an octave above an unlifted head, onto a lifted one. A head
         // lies lifted where its bar is varied and the head in its last beat;
         // in a short bar (one beat or less, all of it last beat) that is
-        // every head. Bars rendered in order (the entry notes chain), Shuffle
-        // 0, Evolve 0 (one motif for every phrase), Variation 3/5 (Re-pitch,
-        // Lift, Fill: a Fill bar is a lifted bar).
+        // every head. The run is counted back from the head toward the note
+        // it starts from: the bar's last note before its last beat, else the
+        // note the bar entered with (in a short bar always that one), else
+        // the head itself; it rises when the head lies at or above it. Every
+        // bar ends on its last two notes as played without Lift, Fill notes
+        // included, so the bar after it enters from that line. Bars rendered
+        // in order (the entry notes chain), Shuffle 0, Evolve 0 (one motif
+        // for every phrase), Variation 3/5 (Re-pitch, Lift, Fill: a Fill bar
+        // is a lifted bar).
         static const double kBarLens[] = { 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0 };
-        int runs = 0, runsIntoLifted = 0, runOff = 0;
-        std::string runWhy;
+        int runs = 0, runsIntoLifted = 0, runOff = 0, runsShort = 0, runsDown = 0, ends = 0, endsLifted = 0, endOff = 0;
+        std::string runWhy, endWhy;
         for (int t = 0; t < 1500; ++t)
         {
             Config c = base();
@@ -3233,6 +3239,29 @@ int main(int argc, char** argv)
             for (int b = 0; b + 2 < kBars; ++b)
             {
                 const BarRender& r = rs[static_cast<size_t>(b)];
+                // The line's last two notes, as played without Lift.
+                {
+                    std::vector<int> line;
+                    bool liftedEnd = false;
+                    for (int e = 0; e < r.count; ++e)
+                    {
+                        const Event& ev = r.events[static_cast<size_t>(e)];
+                        if (ev.strand != -1) continue;
+                        const bool up = lifted(b) && ev.onQ >= lastBeatQ - 1.0e-9;
+                        line.push_back(ev.note - c.transpose - (up ? 12 : 0));
+                        liftedEnd = up;
+                    }
+                    if (line.size() >= 2)
+                    {
+                        ++ends;
+                        endsLifted += liftedEnd;
+                        const int want1 = line.back(), want2 = line[line.size() - 2];
+                        if ((r.lastNote != want1 || r.prevNote != want2) && endOff++ < 3)
+                            endWhy += " | t " + std::to_string(t) + " bar " + std::to_string(b) + ": "
+                                    + std::to_string(r.prevNote) + " " + std::to_string(r.lastNote) + " want "
+                                    + std::to_string(want2) + " " + std::to_string(want1);
+                    }
+                }
                 std::vector<std::pair<int, int>> fills;   // (16th of the last beat, note)
                 for (int e = 0; e < r.count; ++e)
                 {
@@ -3256,27 +3285,42 @@ int main(int argc, char** argv)
                     }
                 }
                 if (L < 0) continue;
+                int from = -1;
+                for (int e = 0; e < r.count; ++e)
+                {
+                    const Event& ev = r.events[static_cast<size_t>(e)];
+                    if (ev.strand == -1 && ev.onQ < lastBeatQ - 1.0e-9) from = ev.note - c.transpose;
+                }
+                runsShort += lastBeatQ < 1.0e-9;
+                if (from < 0 && b > 0) from = rs[static_cast<size_t>(b - 1)].lastNote;
+                if (from < 0) from = L;
+                const int dir = L >= from ? -1 : 1;
                 ++runs;
                 runsIntoLifted += intoLifted;
-                // Counted back from the head, one direction for the run.
-                auto runs4 = [&](int dir) {
+                runsDown += dir > 0;
+                auto runs4 = [&](int d) {
                     for (const auto& [j, note] : fills)
-                        if (note - 12 != scaleSteps(L, dir * (4 - j), mask)) return false;
+                        if (note - 12 != scaleSteps(L, d * (4 - j), mask)) return false;
                     return true;
                 };
-                const bool ok = lifted(b) && (runs4(-1) || runs4(1));
+                const bool ok = lifted(b) && runs4(dir);
                 if (!ok && runOff++ < 3)
                 {
                     runWhy += " | t " + std::to_string(t) + " len " + std::to_string(barLenQ) + " bar " + std::to_string(b)
-                            + " into " + std::to_string(L) + (intoLifted ? " (lifted)" : "") + ":";
+                            + " from " + std::to_string(from) + " into " + std::to_string(L)
+                            + (intoLifted ? " (lifted)" : "") + ":";
                     for (const auto& [j, note] : fills) runWhy += " " + std::to_string(note);
                 }
             }
         }
-        check(runs > 500 && runsIntoLifted > 50, "Riff / Lead: Fill runs (" + std::to_string(runs) + ", "
-                                                     + std::to_string(runsIntoLifted) + " into a lifted head)");
-        check(runOff == 0, "Riff / Lead: a Fill run is led into the head as played without Lift and goes up with its beat ("
-                               + std::to_string(runOff) + " of " + std::to_string(runs) + " off)" + runWhy);
+        check(runs > 500 && runsIntoLifted > 50 && runsShort > 50 && runsDown > 50 && runs - runsDown > 50,
+              "Riff / Lead: Fill runs (" + std::to_string(runs) + ", " + std::to_string(runsIntoLifted) + " into a lifted head, "
+                  + std::to_string(runsShort) + " in a bar of a beat or less, " + std::to_string(runsDown) + " falling)");
+        check(runOff == 0, "Riff / Lead: a Fill run is led from the note before its beat into the head as played without "
+                           "Lift and goes up with its beat (" + std::to_string(runOff) + " of " + std::to_string(runs) + " off)" + runWhy);
+        check(ends > 5000 && endsLifted > 500 && endOff == 0,
+              "Riff / Lead: a bar ends on its last two notes as played without Lift (" + std::to_string(endOff) + " of "
+                  + std::to_string(ends) + " off, " + std::to_string(endsLifted) + " ending in a lifted beat)" + endWhy);
     }
 
     std::printf("\n== 32. The lookahead leads into the head as its bar plays it\n");
