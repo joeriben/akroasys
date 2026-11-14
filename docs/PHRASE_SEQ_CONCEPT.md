@@ -229,10 +229,11 @@ values for the listening phase, not derived from data.
   to the last bar of every phrase:
   1. **Re-pitch**: one embellishment changes kind (e.g. Neighbour → Passing).
   2. **Register lift**: the last beat goes up an octave (Bass: an Octave
-     embellishment instead). It transposes the steps of the line as it
-     plays without Lift; the bar after it enters from that line. A Fill run
-     stays in the line's register, so it lands on the next downbeat; Stab's
-     fill pulses go up with their beat.
+     embellishment instead). It transposes the line as it plays without
+     Lift, Fill notes included; the bar after it enters from that line.
+     A Fill run is led into the next head as played without Lift and goes
+     up with its beat: it ends an octave above an unlifted downbeat and
+     lands on a lifted head (a bar of one beat or less is all last beat).
   3. **Fill**: extra 16th pulses in the last beat, as a passing/approach run
      into the next downbeat. Needs at least 4 steps per bar. The free 16ths
      are found on the straight grid; the fill notes then swing with the
