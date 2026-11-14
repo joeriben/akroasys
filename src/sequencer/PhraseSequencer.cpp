@@ -33,6 +33,12 @@ Slot unpackSlot(std::uint32_t w)
     return s;
 }
 
+// A view step in one word: note + 1 (bits 0-7), fn (8-11), head, accent,
+// slide (12-14), tone (15-17), octave + 4 (18-20), label (21-24).
+static_assert(static_cast<int>(Fn::Count) <= 16 && static_cast<int>(Tone::Count) <= 8
+                  && static_cast<int>(ToneLabel::Count) <= 16,
+              "a view step's fields fit their bits");
+
 std::uint32_t packView(const StepView& v)
 {
     return static_cast<std::uint32_t>(std::clamp(v.note + 1, 0, 128))
@@ -41,7 +47,8 @@ std::uint32_t packView(const StepView& v)
          | (v.accent ? 1u << 13 : 0u)
          | (v.slide  ? 1u << 14 : 0u)
          | (static_cast<std::uint32_t>(v.tone) << 15)
-         | (static_cast<std::uint32_t>(std::clamp(v.octave, -4, 3) + 4) << 18);
+         | (static_cast<std::uint32_t>(std::clamp(v.octave, -4, 3) + 4) << 18)
+         | (static_cast<std::uint32_t>(v.label) << 21);
 }
 
 std::uint32_t packChord(const Chord& c)
@@ -811,6 +818,8 @@ int T5ynthPhraseSequencer::readView(std::array<StepView, kMaxBarSteps>& outView)
         const std::uint32_t tone = (w >> 15) & 7u;
         v.tone   = tone < static_cast<std::uint32_t>(Tone::Count) ? static_cast<Tone>(tone) : Tone::None;
         v.octave = static_cast<int>((w >> 18) & 7u) - 4;
+        const std::uint32_t label = (w >> 21) & 15u;
+        v.label  = label < static_cast<std::uint32_t>(ToneLabel::Count) ? static_cast<ToneLabel>(label) : ToneLabel::None;
         outView[static_cast<size_t>(k)] = v;
     }
     return n;

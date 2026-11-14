@@ -308,7 +308,8 @@ struct Event
     bool   held  = false;  // slide source: no note-off, the next onset glides it
 };
 
-/** The chord tone a step sounds, as the phrase view names it. */
+/** The chord tone a step sounds: which member (the view names it by its
+ *  ToneLabel). */
 enum class Tone : std::uint8_t
 {
     None = 0,   // no chord tone: a rest, a silenced step, an embellishment
@@ -319,17 +320,34 @@ enum class Tone : std::uint8_t
     Count
 };
 
+/** A sounding chord tone as the view names it: by the interval the chord's
+ *  name (chordNameText) gives that member. A sus chord's third is its 2 or
+ *  4, a sixth in the seventh's place its 6 (the °7's 7), a member outside
+ *  the triad / seventh vocabulary the extension its interval is (held keys:
+ *  Cadd9's D is a 9). Second: the open cadence's scale degree 2 (§3.7)
+ *  where it is no chord tone. */
+enum class ToneLabel : std::uint8_t
+{
+    None = 0,
+    Root, Second, Third, Fourth, Fifth, Sixth, Seventh,
+    Flat9, Ninth, Sharp9, Eleventh, Sharp11, Flat13, Major7,
+    Count
+};
+
 /** What the phrase view shows per step of the rendered bar. */
 struct StepView
 {
     int  note   = -1;      // −1 = rest
     Fn   fn     = Fn::Rest;
-    /** The chord tone the step sounds and its octave against the part's
-     *  register: the member the chord gives (soundingMember), the tone a
-     *  cadence puts on its head. `octave` adds the one a Lift puts on any
-     *  step, an embellishment's or a Fill note's (tone None) included. */
-    Tone tone   = Tone::None;
-    int  octave = 0;
+    /** The chord tone the step sounds, its name in the bar's chord, and its
+     *  octave against the part's register: the member the chord gives
+     *  (soundingMember), the tone a cadence puts on its head. `octave` adds
+     *  the one a Lift puts on any step, an embellishment's or a Fill note's
+     *  (tone None) included. The label is the model's, not the GUI's: the
+     *  view and the chord the GUI reads are published apart. */
+    Tone      tone   = Tone::None;
+    ToneLabel label  = ToneLabel::None;
+    int       octave = 0;
     bool head   = false;
     bool accent = false;
     bool slide  = false;

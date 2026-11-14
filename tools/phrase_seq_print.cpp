@@ -131,6 +131,100 @@ std::string toneMismatch(const StepView& v, const Chord& ch, int tonic, std::uin
     return "plays " + std::to_string(v.note) + ", its tone at its octave is " + std::to_string(want);
 }
 
+/** A chord symbol read back by a reader written here (sections 38, 39):
+ *  root, third (2 or 4 for sus2 / sus4), fifth and seventh (9 for a 6 or
+ *  °7) as intervals, −1 for absent, and the add… intervals. */
+struct ChordRead { int root = -1, t = 4, f = 7, sv = -1; std::vector<int> adds; bool ok = true; };
+
+ChordRead readChordName(const std::string& name)
+{
+    const std::string fl = "\xe2\x99\xad", sh = "\xe2\x99\xaf", dg = "\xc2\xb0", hd = "\xc3\xb8";
+    ChordRead r;
+    size_t i = 0;
+    auto eat = [&](const std::string& tok) {
+        if (name.compare(i, tok.size(), tok) != 0) return false;
+        i += tok.size();
+        return true;
+    };
+    static const char* kLetters = "C D EF G A B";
+    const char* at = name.empty() ? nullptr : std::strchr(kLetters, name[0]);
+    if (!at || name[0] == ' ') { r.ok = false; return r; }
+    r.root = static_cast<int>(at - kLetters);
+    i = 1;
+    if (eat("#")) ++r.root;
+    if (eat(hd)) { r.t = 3; r.f = 6; r.ok = eat("7"); r.sv = 10; }
+    else if (eat(dg)) { r.t = 3; r.f = 6; if (eat("7")) r.sv = 9; }
+    else if (eat("+")) { r.t = 4; r.f = 8; }
+    else if (name.compare(i, 3, "maj") != 0 && eat("m")) r.t = 3;
+    if (r.sv < 0)
+    {
+        if (eat("7")) r.sv = 10;
+        else if (eat("maj7") || eat("(maj7)")) r.sv = 11;
+        else if (!(r.t == 3 && r.f == 6) && eat("6")) r.sv = 9;   // a sixth over ° is °7
+    }
+    if (r.sv < 0 && i + 1 == name.size() && eat("5")) { r.t = -1; return r; }
+    if (eat("sus2")) r.t = 2;
+    else if (eat("sus4")) r.t = 5;
+    if (eat("(" + fl + "5)")) r.f = 6;
+    else if (eat("(" + sh + "5)")) r.f = 8;
+    const std::vector<std::pair<std::string, int>> ext = {
+        { fl + "13", 8 }, { sh + "11", 6 }, { fl + "9", 1 }, { sh + "9", 3 }, { "maj7", 11 },
+        { "11", 5 }, { "9", 2 }, { "3", 4 }, { "5", 7 }, { "6", 9 }, { "7", 10 } };
+    while (eat("add"))
+    {
+        bool found = false;
+        for (const auto& [tok, iv] : ext)
+            if (eat(tok)) { r.adds.push_back(iv); found = true; break; }
+        if (!found) { r.ok = false; return r; }
+    }
+    if (eat("no3")) r.t = -1;
+    if (eat("no5")) r.f = -1;
+    r.ok = r.ok && i == name.size();
+    return r;
+}
+
+/** Whether a view step's glyph names the pitch it plays as the bar's chord
+ *  name does (section 38): the chord symbol, read back, gives each interval
+ *  above its root a name (R; sus2 2, sus4 4, a third 3; a fifth 5; a sixth 6,
+ *  a seventh 7, the °7's sixth 7; an add… its own). The glyph, octave marks
+ *  dropped, is the name of the interval the step plays; the open cadence's
+ *  2 that is no chord tone (Tone::Second) is 2; a step naming no member
+ *  has no label. Empty when it is. */
+std::string labelMismatch(const StepView& v, const Chord& ch)
+{
+    // A step that names no member (a rest, an embellishment, a Stab hit)
+    // carries no label: the view word stays one word per step's meaning.
+    if (v.tone == Tone::None || v.tone == Tone::Chord)
+        return v.label == ToneLabel::None ? std::string()
+                                          : "names no member, labelled " + std::to_string(static_cast<int>(v.label));
+    if (v.note < 0) return {};
+    std::string g = stepGlyphText(v);
+    while (!g.empty() && (g.back() == '\'' || g.back() == ',')) g.pop_back();
+    std::string want;
+    const int d = ((v.note - ch.rootPc) % 12 + 12) % 12;
+    if (v.tone == Tone::Second) want = "2";
+    else
+    {
+        const std::string name = chordNameText(ch);
+        const ChordRead r = readChordName(name);
+        if (!r.ok) return "chord " + name + " unread";
+        const std::string fl = "\xe2\x99\xad", sh = "\xe2\x99\xaf";
+        static const char* kAddName[] = { "", "", "9", "", "3", "11", "", "5", "", "6", "7", "maj7" };
+        std::vector<std::pair<int, std::string>> names = { { 0, "R" } };
+        if (r.t >= 0) names.emplace_back(r.t, r.t == 2 ? "2" : r.t == 5 ? "4" : "3");
+        if (r.f >= 0) names.emplace_back(r.f, "5");
+        if (r.sv >= 0) names.emplace_back(r.sv, r.sv == 9 && !(r.t == 3 && r.f == 6) ? "6" : "7");
+        for (int a : r.adds)
+            names.emplace_back(a, a == 1 ? fl + "9" : a == 3 ? sh + "9" : a == 6 ? sh + "11" : a == 8 ? fl + "13"
+                                                    : std::string(kAddName[a]));
+        for (const auto& [iv, n] : names)
+            if (iv == d) want = n;
+        if (want.empty()) return "plays " + std::to_string(v.note) + ", no member of " + name;
+    }
+    if (g == want) return {};
+    return "shows " + g + " for the " + want + " of " + chordNameText(ch);
+}
+
 struct Played
 {
     double q;          // absolute quarters
@@ -4805,8 +4899,11 @@ int main(int argc, char** argv)
         // the chord; a rest, a silenced step and an
         // embellishment nothing. A step a non-Bass Lift raises, a chord tone,
         // an embellishment or a Fill note on a step the motif leaves empty,
-        // shows the octave it goes up (an embellishment showed none). Oracle: the slot, the bar's variation and the fallback
-        // table written out here; and every tone is the note its step plays.
+        // shows the octave it goes up (an embellishment showed none). Oracle:
+        // the slot, the bar's variation and the fallback table written out
+        // here; every tone is the note its step plays; and its glyph names
+        // that note as the bar's chord name does (Csus4's F a 4, Cadd9's D a
+        // 9: the glyph showed the member, 3 and 5).
         // Scales whose degrees lack members, Ext 3 and 7, Pedal, Chords and
         // Keys (one to four held keys: chords with no 3, no 5, neither).
         // B: the same through readView() and chordForGui while playing.
@@ -4864,7 +4961,8 @@ int main(int argc, char** argv)
             return Tone::Second;
         };
         std::array<int, kSeen> seen {};
-        int steps = 0, off = 0, offNote = 0;
+        std::map<std::string, int> labels;
+        int steps = 0, off = 0, offNote = 0, offLabel = 0;
         std::string why;
         auto fail = [&](int& n, int t, int k, const std::string& w) {
             if (n++ < 4) why += " | t " + std::to_string(t) + " step " + std::to_string(k) + ": " + w;
@@ -4940,6 +5038,14 @@ int main(int argc, char** argv)
                                         + " octave " + std::to_string(oct));
                 const std::string w = toneMismatch(v, ch, tonic, mask);
                 if (!w.empty()) fail(offNote, t, k, w);
+                const std::string wl = labelMismatch(v, ch);
+                if (!wl.empty()) fail(offLabel, t, k, wl);
+                if (v.note >= 0 && v.tone != Tone::None && v.tone != Tone::Chord)
+                {
+                    std::string g = stepGlyphText(v);
+                    while (!g.empty() && (g.back() == '\'' || g.back() == ',')) g.pop_back();
+                    ++labels[v.tone == Tone::Second ? "2 (cadence)" : g];
+                }
             }
         }
         std::string counts;
@@ -4953,6 +5059,17 @@ int main(int argc, char** argv)
         check(off == 0, "A. each step names the tone its slot, the cadence or the Stab gives it ("
                             + std::to_string(off) + " of " + std::to_string(steps) + " off)" + why);
         check(offNote == 0, "A. each named tone is the note its step plays (" + std::to_string(offNote) + " off)");
+        std::string labelCounts;
+        int addLabels = 0;
+        for (const auto& [g, n] : labels)
+        {
+            labelCounts += (labelCounts.empty() ? "" : ", ") + g + " " + std::to_string(n);
+            if (g != "R" && g != "2" && g != "2 (cadence)" && g != "3" && g != "4" && g != "5" && g != "6" && g != "7") addLabels += n;
+        }
+        const bool labelsMet = labels["R"] >= 20 && labels["2"] >= 20 && labels["3"] >= 20 && labels["4"] >= 20
+                            && labels["5"] >= 20 && labels["6"] >= 20 && labels["7"] >= 20 && addLabels >= 20;
+        check(offLabel == 0 && labelsMet, "A. each tone's glyph names its note as the bar's chord name does ("
+                                              + std::to_string(offLabel) + " off; " + labelCounts + ")");
 
         // B: what readView() and chordForGui hand the GUI.
         int bars = 0, named = 0, octaves = 0, seconds = 0, offB = 0, unnamed = 0;
@@ -4982,7 +5099,8 @@ int main(int argc, char** argv)
                     ++named;
                     octaves += x.octave != 0;
                     seconds += x.tone == Tone::Second;
-                    const std::string w = toneMismatch(x, ch, tonic, mask);
+                    std::string w = toneMismatch(x, ch, tonic, mask);
+                    if (w.empty()) w = labelMismatch(x, ch);
                     if (!w.empty() && offB++ < 4) whyB += " | t " + std::to_string(t) + " bar " + std::to_string(b) + ": " + w;
                 }
             });
@@ -4990,7 +5108,7 @@ int main(int argc, char** argv)
         check(bars > 1000 && named > 5000 && octaves > 300 && seconds > 20,
               "B. bars read (" + std::to_string(bars) + "; " + std::to_string(named) + " tones, "
                   + std::to_string(octaves) + " off octave 0, " + std::to_string(seconds) + " cadence 2)");
-        check(offB == 0 && unnamed == 0, "B. readView hands each sounding chord-tone step its tone, and each the note it plays ("
+        check(offB == 0 && unnamed == 0, "B. readView hands each sounding chord-tone step its tone, each the note it plays, named as the chord does ("
                                              + std::to_string(offB) + " off, " + std::to_string(unnamed) + " unnamed)" + whyB);
     }
 
@@ -5030,61 +5148,16 @@ int main(int argc, char** argv)
         }
         check(offA == 0, "A. chord names, " + std::to_string(named.size()) + " shapes written out (" + std::to_string(offA) + " off)" + whyA);
 
-        // B: every chord the scales and held keys make, read back by a chord-
-        // symbol reader written here: the root, third, fifth and seventh it
-        // reads are the chord's members, and its add… are the members the
-        // vocabulary has no name for.
-        struct Read { int root = -1, t = 4, f = 7, sv = -1; std::vector<int> adds; bool ok = true; };
-        auto readName = [&](const std::string& name) {
-            Read r;
-            size_t i = 0;
-            auto eat = [&](const std::string& tok) {
-                if (name.compare(i, tok.size(), tok) != 0) return false;
-                i += tok.size();
-                return true;
-            };
-            static const char* kLetters = "C D EF G A B";
-            const char* at = name.empty() ? nullptr : std::strchr(kLetters, name[0]);
-            if (!at || name[0] == ' ') { r.ok = false; return r; }
-            r.root = static_cast<int>(at - kLetters);
-            i = 1;
-            if (eat("#")) ++r.root;
-            if (eat(hd)) { r.t = 3; r.f = 6; r.ok = eat("7"); r.sv = 10; }
-            else if (eat(dg)) { r.t = 3; r.f = 6; if (eat("7")) r.sv = 9; }
-            else if (eat("+")) { r.t = 4; r.f = 8; }
-            else if (name.compare(i, 3, "maj") != 0 && eat("m")) r.t = 3;
-            if (r.sv < 0)
-            {
-                if (eat("7")) r.sv = 10;
-                else if (eat("maj7") || eat("(maj7)")) r.sv = 11;
-                else if (!(r.t == 3 && r.f == 6) && eat("6")) r.sv = 9;   // a sixth over ° is °7
-            }
-            if (r.sv < 0 && i + 1 == name.size() && eat("5")) { r.t = -1; return r; }
-            if (eat("sus2")) r.t = 2;
-            else if (eat("sus4")) r.t = 5;
-            if (eat("(" + fl + "5)")) r.f = 6;
-            else if (eat("(" + sh + "5)")) r.f = 8;
-            const std::vector<std::pair<std::string, int>> ext = {
-                { fl + "13", 8 }, { sh + "11", 6 }, { fl + "9", 1 }, { sh + "9", 3 }, { "maj7", 11 },
-                { "11", 5 }, { "9", 2 }, { "3", 4 }, { "5", 7 }, { "6", 9 }, { "7", 10 } };
-            while (eat("add"))
-            {
-                bool found = false;
-                for (const auto& [tok, iv] : ext)
-                    if (eat(tok)) { r.adds.push_back(iv); found = true; break; }
-                if (!found) { r.ok = false; return r; }
-            }
-            if (eat("no3")) r.t = -1;
-            if (eat("no5")) r.f = -1;
-            r.ok = r.ok && i == name.size();
-            return r;
-        };
+        // B: every chord the scales and held keys make, read back by the
+        // chord-symbol reader written here (readChordName): the root, third,
+        // fifth and seventh it reads are the chord's members, and its add…
+        // are the members the vocabulary has no name for.
         int names = 0, offB = 0, scaleAdds = 0;
         std::string whyB;
         auto verify = [&](const Chord& c, bool fromScale) {
             ++names;
             const std::string name = chordNameText(c);
-            const Read r = readName(name);
+            const ChordRead r = readChordName(name);
             const int t = c.iv[1], f = c.iv[2], sv = c.iv[3];
             const bool tIn = t == 2 || t == 3 || t == 4 || t == 5, fIn = f == 6 || f == 7 || f == 8,
                        sIn = sv == 9 || sv == 10 || sv == 11;
@@ -5113,19 +5186,32 @@ int main(int argc, char** argv)
         check(offB == 0 && scaleAdds == 0, "B. " + std::to_string(names) + " chords (every scale, degree, root and Ext; every held-key set) read back as their members ("
                                                + std::to_string(offB) + " off, " + std::to_string(scaleAdds) + " scale chords needing add)" + whyB);
 
-        // C: step glyphs.
-        auto sv = [](int note, Fn fn, Tone tone, int oct) { StepView v; v.note = note; v.fn = fn; v.tone = tone; v.octave = oct; return v; };
+        // C: step glyphs. A chord tone shows the label the model gave it,
+        // the chord name's word for its pitch; the member it is does not
+        // decide (a Third labelled 4 is Csus4's F).
+        auto sv = [](int note, Fn fn, Tone tone, int oct, ToneLabel label = ToneLabel::None) {
+            StepView v; v.note = note; v.fn = fn; v.tone = tone; v.octave = oct; v.label = label; return v;
+        };
         const std::string dot = "\xc2\xb7", hit = "\xe2\x97\x8f", up = "\xe2\x86\x91", down = "\xe2\x86\x93",
-                          rise = "\xe2\x86\x97", fall = "\xe2\x86\x98", half = "\xc2\xbd";
+                          rise = "\xe2\x86\x97", fall = "\xe2\x86\x98", half = "\xc2\xbd",
+                          flat = "\xe2\x99\xad", sharp = "\xe2\x99\xaf";
+        using L = ToneLabel;
         const std::vector<std::pair<StepView, std::string>> glyphs = {
             { sv(-1, Fn::Rest, Tone::None, 0), dot },          { sv(-1, Fn::ChordTone, Tone::None, 0), dot },
-            { sv(-1, Fn::ChordTone, Tone::Root, 1), dot },     { sv(45, Fn::ChordTone, Tone::Root, 0), "R" },
-            { sv(57, Fn::ChordTone, Tone::Root, 1), "R'" },    { sv(69, Fn::ChordTone, Tone::Root, 2), "R''" },
-            { sv(33, Fn::ChordTone, Tone::Root, -1), "R," },   { sv(48, Fn::ChordTone, Tone::Third, 0), "3" },
-            { sv(52, Fn::ChordTone, Tone::Fifth, 0), "5" },    { sv(55, Fn::ChordTone, Tone::Seventh, 0), "7" },
-            { sv(59, Fn::ChordTone, Tone::Seventh, -1), "7," }, { sv(47, Fn::ChordTone, Tone::Second, 0), "2" },
-            { sv(59, Fn::ChordTone, Tone::Second, 1), "2'" },  { sv(60, Fn::ChordTone, Tone::Chord, 0), hit },
-            { sv(72, Fn::ChordTone, Tone::Chord, 1), hit + "'" }, { sv(52, Fn::Passing, Tone::Fifth, 0), "5" },
+            { sv(-1, Fn::ChordTone, Tone::Root, 1, L::Root), dot },     { sv(45, Fn::ChordTone, Tone::Root, 0, L::Root), "R" },
+            { sv(57, Fn::ChordTone, Tone::Root, 1, L::Root), "R'" },    { sv(69, Fn::ChordTone, Tone::Root, 2, L::Root), "R''" },
+            { sv(33, Fn::ChordTone, Tone::Root, -1, L::Root), "R," },   { sv(48, Fn::ChordTone, Tone::Third, 0, L::Third), "3" },
+            { sv(52, Fn::ChordTone, Tone::Fifth, 0, L::Fifth), "5" },   { sv(55, Fn::ChordTone, Tone::Seventh, 0, L::Seventh), "7" },
+            { sv(59, Fn::ChordTone, Tone::Seventh, -1, L::Seventh), "7," }, { sv(47, Fn::ChordTone, Tone::Second, 0, L::Second), "2" },
+            { sv(59, Fn::ChordTone, Tone::Second, 1, L::Second), "2'" }, { sv(60, Fn::ChordTone, Tone::Chord, 0), hit },
+            { sv(72, Fn::ChordTone, Tone::Chord, 1, L::Root), hit + "'" }, { sv(52, Fn::Passing, Tone::Fifth, 0, L::Fifth), "5" },
+            { sv(50, Fn::ChordTone, Tone::Third, 0, L::Second), "2" },  { sv(53, Fn::ChordTone, Tone::Third, 0, L::Fourth), "4" },
+            { sv(57, Fn::ChordTone, Tone::Seventh, 0, L::Sixth), "6" }, { sv(57, Fn::ChordTone, Tone::Seventh, 1, L::Seventh), "7'" },
+            { sv(49, Fn::ChordTone, Tone::Seventh, 0, L::Flat9), flat + "9" }, { sv(50, Fn::ChordTone, Tone::Fifth, 0, L::Ninth), "9" },
+            { sv(51, Fn::ChordTone, Tone::Third, 0, L::Sharp9), sharp + "9" }, { sv(53, Fn::ChordTone, Tone::Seventh, 0, L::Eleventh), "11" },
+            { sv(54, Fn::ChordTone, Tone::Fifth, 0, L::Sharp11), sharp + "11" }, { sv(56, Fn::ChordTone, Tone::Seventh, 0, L::Flat13), flat + "13" },
+            { sv(59, Fn::ChordTone, Tone::Seventh, 0, L::Major7), "maj7" }, { sv(62, Fn::ChordTone, Tone::Fifth, 1, L::Ninth), "9'" },
+            { sv(48, Fn::ChordTone, Tone::Third, 0), "?" },
             { sv(45, Fn::Repeat, Tone::None, 0), "=" },        { sv(57, Fn::Octave, Tone::None, 0), "8ve" },
             { sv(47, Fn::Passing, Tone::None, 0), "p" },       { sv(47, Fn::NeighbourUp, Tone::None, 0), "n" + up },
             { sv(43, Fn::NeighbourDown, Tone::None, 0), "n" + down }, { sv(43, Fn::ApproachUp, Tone::None, 0), rise },

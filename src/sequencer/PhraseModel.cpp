@@ -313,6 +313,51 @@ struct Triad
 bool inThirdVocabulary(int iv) { return iv == 2 || iv == 3 || iv == 4 || iv == 5; }
 bool inFifthVocabulary(int iv) { return iv == 6 || iv == 7 || iv == 8; }
 
+/** Whether the chord's name names member `m` in its own vocabulary (R, the
+ *  triad, the seventh / sixth); a member it does not is an add…. */
+bool namedByChord(const Chord& c, int m)
+{
+    const int iv = c.iv[static_cast<size_t>(m)];
+    if (m == Third) return inThirdVocabulary(iv);
+    if (m == Fifth) return inFifthVocabulary(iv);
+    if (m == Seventh) return iv == 9 || iv == 10 || iv == 11;
+    return true;
+}
+
+/** An add… member, named by the extension its interval is. */
+ToneLabel addLabel(int iv)
+{
+    static constexpr ToneLabel kAdd[] = {
+        ToneLabel::None,    ToneLabel::Flat9,   ToneLabel::Ninth,  ToneLabel::Sharp9,
+        ToneLabel::Third,   ToneLabel::Eleventh, ToneLabel::Sharp11, ToneLabel::Fifth,
+        ToneLabel::Flat13,  ToneLabel::Sixth,   ToneLabel::Seventh, ToneLabel::Major7 };
+    return iv > 0 && iv < 12 ? kAdd[iv] : ToneLabel::None;
+}
+
+std::string toneLabelText(ToneLabel l)
+{
+    switch (l)
+    {
+        case ToneLabel::Root:     return "R";
+        case ToneLabel::Second:   return "2";
+        case ToneLabel::Third:    return "3";
+        case ToneLabel::Fourth:   return "4";
+        case ToneLabel::Fifth:    return "5";
+        case ToneLabel::Sixth:    return "6";
+        case ToneLabel::Seventh:  return "7";
+        case ToneLabel::Flat9:    return std::string(kFlat) + "9";
+        case ToneLabel::Ninth:    return "9";
+        case ToneLabel::Sharp9:   return std::string(kSharp) + "9";
+        case ToneLabel::Eleventh: return "11";
+        case ToneLabel::Sharp11:  return std::string(kSharp) + "11";
+        case ToneLabel::Flat13:   return std::string(kFlat) + "13";
+        case ToneLabel::Major7:   return "maj7";
+        case ToneLabel::None:
+        case ToneLabel::Count:    break;
+    }
+    return {};
+}
+
 Triad triadOf(int third, int fifth)
 {
     if (!inThirdVocabulary(third)) third = -1;
@@ -327,6 +372,19 @@ Triad triadOf(int third, int fifth)
     t.noThird = third < 0 && !t.power;
     t.noFifth = fifth < 0;
     return t;
+}
+
+/** Member `m` of `c` as chordNameText names it: a sus chord's third its 2
+ *  or 4, any third 3, any fifth 5, a sixth in the seventh's place 6 (7 over
+ *  a diminished triad, the °7), a seventh 7, any other member its add…. */
+ToneLabel toneLabelOf(const Chord& c, int m)
+{
+    const int iv = c.iv[static_cast<size_t>(m)];
+    if (m == Root) return ToneLabel::Root;
+    if (!namedByChord(c, m)) return addLabel(iv);
+    if (m == Third) return iv == 2 ? ToneLabel::Second : iv == 5 ? ToneLabel::Fourth : ToneLabel::Third;
+    if (m == Fifth) return ToneLabel::Fifth;
+    return iv == 9 && !triadOf(c.iv[Third], c.iv[Fifth]).dim ? ToneLabel::Sixth : ToneLabel::Seventh;
 }
 } // namespace
 
@@ -369,20 +427,17 @@ std::string noteNameText(int note)
 std::string chordNameText(const Chord& c)
 {
     static constexpr const char* kHalfDim = "\xc3\xb8";   // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
-    // A member outside the triad / seventh vocabulary, named by the extension
-    // its interval is.
-    static constexpr const char* kAdd[] = { "", "\xe2\x99\xad" "9", "9", "\xe2\x99\xaf" "9", "3", "11",  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
-                                            "\xe2\x99\xaf" "11", "5", "\xe2\x99\xad" "13", "6", "7", "maj7" };  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
     const int third = c.iv[Third], fifth = c.iv[Fifth], seventh = c.iv[Seventh];
     const Triad tr = triadOf(third, fifth);
     const bool hasSeventh = seventh == 9 || seventh == 10 || seventh == 11;
 
+    // A member outside the triad / seventh vocabulary, named by the extension
+    // its interval is (the step glyphs name it the same way).
     std::string adds;
     for (int m = Third; m < kMaxVoices; ++m)
     {
         const int iv = c.iv[static_cast<size_t>(m)];
-        const bool named = m == Third ? inThirdVocabulary(iv) : m == Fifth ? inFifthVocabulary(iv) : hasSeventh;
-        if (iv > 0 && iv < 12 && !named) adds += std::string("add") + kAdd[iv];
+        if (iv > 0 && iv < 12 && !namedByChord(c, m)) adds += "add" + toneLabelText(addLabel(iv));
     }
 
     std::string t = pitchClassName(c.rootPc);
@@ -415,18 +470,10 @@ std::string stepGlyphText(const StepView& v)
     // one Lift puts an embellishment up.
     const std::string marks = std::string(static_cast<size_t>(std::max(0, v.octave)), '\'')
                             + std::string(static_cast<size_t>(std::max(0, -v.octave)), ',');
-    std::string t;
-    switch (v.tone)
-    {
-        case Tone::Root:    t = "R"; break;
-        case Tone::Third:   t = "3"; break;
-        case Tone::Fifth:   t = "5"; break;
-        case Tone::Seventh: t = "7"; break;
-        case Tone::Second:  t = "2"; break;
-        case Tone::Chord:   t = kHit; break;
-        case Tone::None:
-        case Tone::Count:   break;
-    }
+    // A chord tone by its name in the bar's chord: Csus4's F a 4, not the 3
+    // its member is.
+    std::string t = v.tone == Tone::Chord ? std::string(kHit)
+                  : v.tone != Tone::None  ? toneLabelText(v.label) : std::string();
     if (t.empty())
         switch (v.fn)
         {
@@ -1534,6 +1581,9 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             // the one Lift adds to any step (an embellishment showed none
             // and read as unlifted where it sounded an octave up).
             sv->tone = tone;
+            sv->label = tone == Tone::Second ? ToneLabel::Second
+                      : tone == Tone::None   ? ToneLabel::None
+                      : toneLabelOf(ch, static_cast<int>(tone) - static_cast<int>(Tone::Root));
             sv->octave = (tone == Tone::None ? 0 : oct) + octShift / 12;
         }
 
@@ -1815,6 +1865,7 @@ void renderBar(const RenderInput& in, BarRender& out)
                 StepView& v = out.view[static_cast<size_t>(o.barStep)];
                 v.note = voicing[0] + o.octShift;
                 v.tone = Tone::Chord;
+                v.label = ToneLabel::None;
                 v.octave = o.octShift / 12;
             }
         }
