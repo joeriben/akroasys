@@ -398,6 +398,14 @@ Config base()
     c.gate = 0.8f;
     return c;
 }
+
+/** A note's own off: its onset + gate x its step (finishLine), before its
+ *  line's next onset bounds it. For a config in 4/4 without Variation, where
+ *  no slot is cut and no ratchet or fill note plays. */
+double ownOffQ(double onQ, const Config& c)
+{
+    return onQ + std::max(1.0e-3, std::clamp(static_cast<double>(c.gate), 0.1, 1.0) * 4.0 / c.stepsPerBar);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -1518,13 +1526,13 @@ int main(int argc, char** argv)
         // The renderer ends a note at its line's next onset (finishLine): the
         // main line's for the main line, Stab's chord and the Octave and Chord
         // layers, which take its lengths; the Answer's own for the Answer. A
-        // note the replaced render started must end at the earlier of the off
-        // that render gave it and its line's next onset as played after the
+        // note the replaced render started must end at the earlier of its own
+        // off (gate x its step) and its line's next onset as played after the
         // change. Two changes: a denser grid in the bar (the Chord layer's
         // hits end at the main line's next onset, not at its next hit), and a
         // change after the bar's last onset under a shuffled off that reaches
         // past the bar end (the next bar's first onset ends it).
-        int checked = 0, cut = 0, wrong = 0, errs = 0, runs = 0;
+        int checked = 0, cut = 0, wrong = 0, errs = 0, runs = 0, beyondOwn = 0;
         std::string why;
         struct Change { Config from, to; double at; std::string tag; };
         std::vector<Change> changes;
@@ -1592,26 +1600,30 @@ int main(int argc, char** argv)
                         && ref.events[k].ev.note == p.ev.note && ref.events[k].ev.strandId == p.ev.strandId)
                         oldOff = offAfter(ref, k);
                 if (!(oldOff > ch.at)) continue;   // ended before the change: nothing to bound
+                const double own = ownOffQ(p.q, ch.from);
+                beyondOwn += oldOff > own + 2 * kOneSampleQ;   // the formula does not describe it
                 const int lineStrand = lineStrandOf(p.ev.strandId);
                 double nextOn = std::numeric_limits<double>::infinity();
                 for (size_t k = i + 1; k < r.events.size(); ++k)
                     if (r.events[k].ev.type == VoiceEvent::Type::NoteOn && r.events[k].ev.strandId == lineStrand
                         && r.events[k].q > p.q + 2 * kOneSampleQ)
                     { nextOn = r.events[k].q; break; }
-                const double want = std::min(oldOff, nextOn);
+                const double want = std::min(own, nextOn);
                 const double got = offAfter(r, i);
                 ++checked;
                 cut += nextOn < oldOff - 2 * kOneSampleQ;
                 if (std::abs(got - want) > 2 * kOneSampleQ && wrong++ == 0)
                     why = ch.tag + ": note " + std::to_string(p.ev.note) + " strand " + std::to_string(p.ev.strandId)
                         + " from q " + std::to_string(p.q).substr(0, 6) + " ends at q " + std::to_string(got).substr(0, 6)
-                        + ", its line's next onset q " + std::to_string(nextOn).substr(0, 6) + ", its old off q "
-                        + std::to_string(oldOff).substr(0, 6);
+                        + ", its line's next onset q " + std::to_string(nextOn).substr(0, 6) + ", its own off q "
+                        + std::to_string(own).substr(0, 6);
             }
         }
         check(checked > 0 && cut > 0, "note at a change: notes sounding at the change, some ended sooner ("
                                           + std::to_string(checked) + " notes, " + std::to_string(cut) + " sooner)");
-        check(wrong == 0, "note at a change: it ends at min(its old off, its line's next onset) ("
+        check(beyondOwn == 0, "note at a change: no unchanged note sounds past its own off, gate x its step ("
+                                  + std::to_string(beyondOwn) + ")");
+        check(wrong == 0, "note at a change: it ends at min(its own off, its line's next onset) ("
                               + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
         check(errs == 0, "note at a change: no hanging or orphan note, no bad glide (" + std::to_string(errs)
                              + " over " + std::to_string(runs) + " runs)");
@@ -1738,9 +1750,9 @@ int main(int argc, char** argv)
         // that never played. Two changes in a bar (a denser grid and back, or
         // on to a third grid) and a knob dragged across grid sizes, one value
         // per block. Oracle, as 19 for every note: it ends at the earlier of
-        // the off its own render gave it (a run in the config it started
-        // under, same note on the same sample) and its line's next onset as
-        // played.
+        // its own off (gate x its step in the config it started under, where
+        // a run of that config plays it: same note on the same sample) and
+        // its line's next onset as played.
         struct Schedule { Config from; std::vector<std::pair<double, Config>> changes; std::string tag; };
         std::vector<Schedule> schedules;
         static const int sweep[] = { 1, 2, 3, 4, 6, 8, 12, 16, 12, 8, 6, 4, 3, 2, 1 };
@@ -1817,12 +1829,15 @@ int main(int argc, char** argv)
                 size_t k = 0;
                 while (k + 1 < applied.size() && applied[k + 1].first <= p.q + 0.5 * kOneSampleQ) ++k;
                 const Run& ref = refs[k];
-                double ownOff = -1.0;
-                for (size_t j = 0; j < ref.events.size() && ownOff < 0.0; ++j)
+                double refOff = -1.0;
+                for (size_t j = 0; j < ref.events.size() && refOff < 0.0; ++j)
                     if (ref.events[j].sample == p.sample && ref.events[j].ev.type == VoiceEvent::Type::NoteOn
                         && ref.events[j].ev.note == p.ev.note && ref.events[j].ev.strandId == p.ev.strandId)
-                        ownOff = offAfter(ref, j);
-                if (ownOff < 0.0) { ++unmatched; continue; }
+                        refOff = offAfter(ref, j);
+                const double ownOff = ownOffQ(p.q, applied[k].second);
+                if (refOff < 0.0) { ++unmatched; continue; }                         // not in that run
+                if (std::isinf(refOff)) continue;                                    // the run's end
+                if (refOff > ownOff + 2 * kOneSampleQ) { ++unmatched; continue; }   // past its own off
                 const int lineStrand = lineStrandOf(p.ev.strandId);
                 double nextOn = std::numeric_limits<double>::infinity();
                 for (size_t j = i + 1; j < r.events.size(); ++j)
@@ -1867,7 +1882,7 @@ int main(int argc, char** argv)
         }
         check(checked > 0 && longer > 0, "several changes: notes sounding across the changes, some past the first bound ("
                                              + std::to_string(checked) + " notes, " + std::to_string(longer) + " past it)");
-        check(unmatched == 0, "several changes: every note found in a run of the config it started under ("
+        check(unmatched == 0, "several changes: every note found in a run of the config it started under, within its own off ("
                                   + std::to_string(unmatched) + " not)");
         check(wrong == 0, "several changes: a note ends at min(its own off, its line's next onset as played) ("
                               + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
@@ -2070,6 +2085,108 @@ int main(int argc, char** argv)
         check(wrong == 0, "answer: a note ends at min(its next Answer onset, onset + gate x step) ("
                               + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
         check(errs == 0, "answer: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+    }
+
+    std::printf("\n== 24. A change that takes a note's bounding onset away lets the note sound its own length\n");
+    {
+        // A shuffled step's note reaches past the next step's onset: its
+        // render ends it there (finishLine). A change between the two onsets
+        // to a sparser grid takes that onset away; the note then ends at its
+        // own off (gate x its step) or the render now playing's next onset of
+        // its line, not at the onset the old render had. Sixteen steps, the
+        // odd ones shuffled 3/4: the note at 12.4375 would end at 12.5; the
+        // change lands in the block from 12.4587. Oracle, every note: it ends
+        // at min(its own off in the config it started under, its line's next
+        // onset as played).
+        auto offAfter = [](const Run& r, size_t i) {
+            for (size_t j = i + 1; j < r.events.size(); ++j)
+                if (r.events[j].ev.type == VoiceEvent::Type::NoteOff && r.events[j].ev.strandId == r.events[i].ev.strandId
+                    && r.events[j].ev.note == r.events[i].ev.note) return r.events[j].q;
+            return std::numeric_limits<double>::infinity();
+        };
+        auto shuffledConfig = [&](Part part, Layer layer, float gate) {
+            Config c = base();
+            c.part = part;
+            c.layer = layer;
+            c.form = Form::ABAB;   // bar 3 is a B unit: the Answer plays
+            c.stepsPerBar = 16; c.pulses = 16; c.rotation = 0;
+            c.gate = gate;
+            c.shuffle = 0.75f;
+            c.variation = 0.0f;
+            c.slide = 0.0f;
+            return c;
+        };
+        int checked = 0, wrong = 0, longer = 0, errs = 0;
+        std::string why;
+        for (Part part : { Part::Bass, Part::Riff, Part::Lead, Part::Stab })
+            for (Layer layer : { Layer::Off, Layer::Octave, Layer::Chord, Layer::Answer })
+                for (float gate : { 1.0f, 0.6f })
+                    for (int target : { 0, 1, 2 })
+                    {
+                        const Config a = shuffledConfig(part, layer, gate);
+                        Config d = a;
+                        if (target == 0) d.pulses = 1;                          // 16 steps, one onset
+                        else if (target == 1) d.stepsPerBar = d.pulses = 1;     // one step
+                        else d.stepsPerBar = d.pulses = 2;                      // two, the second at 3.5
+                        const double at = 3 * B + 0.45;
+                        double appliedAt = -1.0;
+                        const Run r = play(a, 0.0, 6 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                            if (appliedAt < 0.0 && q >= at) { s.setConfig(d); appliedAt = q; }
+                        });
+                        errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+                        const bool answer = layer == Layer::Answer;
+                        for (size_t i = 0; i < r.events.size(); ++i)
+                        {
+                            const auto& p = r.events[i];
+                            if (p.ev.type != VoiceEvent::Type::NoteOn) continue;
+                            const double got = offAfter(r, i);
+                            if (!(got > appliedAt) || std::isinf(got)) continue;   // before the change, or the run's end
+                            const Config& under = p.q < appliedAt - 0.5 * kOneSampleQ ? a : d;
+                            const double own = ownOffQ(p.q, under);
+                            const int lineStrand = p.ev.strandId >= 0 && answer ? 5 : -1;
+                            double nextOn = std::numeric_limits<double>::infinity();
+                            for (size_t j = i + 1; j < r.events.size(); ++j)
+                                if (r.events[j].ev.type == VoiceEvent::Type::NoteOn && r.events[j].ev.strandId == lineStrand
+                                    && r.events[j].q > p.q + 2 * kOneSampleQ)
+                                { nextOn = r.events[j].q; break; }
+                            const double want = std::min(own, nextOn);
+                            ++checked;
+                            longer += p.q < appliedAt && want > 3 * B + 0.5 + 2 * kOneSampleQ;
+                            if (std::abs(got - want) > 2 * kOneSampleQ && wrong++ == 0)
+                                why = "part " + std::to_string(static_cast<int>(part)) + " layer "
+                                    + std::to_string(static_cast<int>(layer)) + " gate " + std::to_string(gate).substr(0, 3)
+                                    + " target " + std::to_string(target) + ": note " + std::to_string(p.ev.note)
+                                    + " strand " + std::to_string(p.ev.strandId) + " from q " + std::to_string(p.q).substr(0, 7)
+                                    + " ends at q " + std::to_string(got).substr(0, 7) + ", want q "
+                                    + std::to_string(want).substr(0, 7);
+                        }
+                    }
+        // The plain case: Bass, Loop, 16 steps all sounding, gate 1; one
+        // onset from the block at 0.4693. The note at 0.4375 sounds its
+        // quarter-step to 0.6875, not to 0.5 where step 2 no longer plays.
+        {
+            Config a = shuffledConfig(Part::Bass, Layer::Off, 1.0f);
+            a.form = Form::Loop;
+            Config d = a;
+            d.pulses = 1;
+            bool changed = false;
+            const Run r = play(a, 0.0, 2 * B, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!changed && q >= 0.46) { s.setConfig(d); changed = true; }
+            });
+            double off = -1.0;
+            for (size_t i = 0; i < r.events.size(); ++i)
+                if (r.events[i].ev.type == VoiceEvent::Type::NoteOn && std::abs(r.events[i].q - 0.4375) <= 2 * kOneSampleQ)
+                    off = offAfter(r, i);
+            check(std::abs(off - 0.6875) <= 2 * kOneSampleQ,
+                  "own length: Bass 16/16 shuffled, one onset from 0.4693, the note at 0.4375 ends at 0.6875 (q "
+                      + std::to_string(off).substr(0, 6) + ")");
+            errs += r.sounding + r.orphanOffs + r.badGlides + r.hangs;
+        }
+        check(checked > 0 && longer > 0, "own length: notes sounding across the change, some past the old bound ("
+                                             + std::to_string(checked) + " notes, " + std::to_string(longer) + " past it)");
+        check(wrong == 0, "own length: a note ends at min(its own off, its line's next onset as played) ("
+                              + std::to_string(wrong) + " of " + std::to_string(checked) + " do not) " + why);
+        check(errs == 0, "own length: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

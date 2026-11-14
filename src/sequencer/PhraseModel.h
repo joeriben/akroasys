@@ -285,6 +285,11 @@ struct Event
 {
     double onQ   = 0.0;    // quarters from bar start
     double offQ  = 0.0;    // quarters from bar start (may exceed the bar)
+    /** The note's own off: gate x its step, from bar start. offQ is that,
+     *  bounded by its line's next onset in this render; a re-render may take
+     *  that onset away (PhraseSequencer bounds the note again by the render
+     *  then playing). */
+    double gateOffQ = 0.0;
     int    note  = 60;
     float  vel   = 0.67f;  // 0..1
     int    strand = -1;    // VoiceEvent::strandId

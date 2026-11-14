@@ -963,6 +963,7 @@ struct Onset
     bool   ratchetTail = false;
     bool   glide = false, held = false;
     double offQ = 0.0;
+    double gateOffQ = 0.0;     // its own off: gate x durQ, no next onset bounds it
 };
 
 struct OnsetList
@@ -1338,6 +1339,7 @@ void finishLine(OnsetList& l, const LineCtx& x, bool slideIn, bool allowSlides, 
             if (last) endsHeld = true;
             else      l.a[static_cast<size_t>(i + 1)].glide = true;
         }
+        o.gateOffQ = o.onQ + std::max(1.0e-3, gate * o.durQ);
         o.offQ = o.onQ + std::max(1.0e-3, std::min(gate * o.durQ, nextOn - o.onQ));
     }
 }
@@ -1353,7 +1355,7 @@ void emitLine(BarRender& out, const OnsetList& l, int strand, Line line, int tra
     {
         const Onset& o = l.a[static_cast<size_t>(i)];
         Event e;
-        e.onQ = o.onQ; e.offQ = o.offQ;
+        e.onQ = o.onQ; e.offQ = o.offQ; e.gateOffQ = o.gateOffQ;
         e.note = clampNote(o.note + transpose);
         e.vel = o.vel * velScale;
         e.strand = strand; e.line = line; e.glide = o.glide; e.held = o.held;
@@ -1374,7 +1376,7 @@ void emitChords(BarRender& out, const OnsetList& l, const int* voicing, int nv,
         for (int v = 0; v < nv; ++v)
         {
             Event e;
-            e.onQ = o.onQ; e.offQ = o.offQ;
+            e.onQ = o.onQ; e.offQ = o.offQ; e.gateOffQ = o.gateOffQ;
             e.note = clampNote(voicing[v] + shift + o.octShift + transpose);
             e.vel = o.vel * velScale;
             e.strand = oneStrand ? strand : strand + v;

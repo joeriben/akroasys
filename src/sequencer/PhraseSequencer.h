@@ -222,9 +222,9 @@ private:
     std::array<int, PhraseModel::kMaxVoices> entryVoicing {};
     int entryVoicingCount = 0;
 
-    // Sounding notes. `ownQ` is the off the note's render gave it; `q` is
-    // that, bounded by its line's next onset in the render now playing
-    // (endPendingByNextOnset).
+    // Sounding notes. `ownQ` is the note's own off (Event::gateOffQ, gate x
+    // its step); `q` is that, bounded by its line's next onset in the render
+    // now playing (endPendingByNextOnset).
     struct PendingOff { double q; double ownQ; int note; int strand; PhraseModel::Line line; };
     static constexpr int kMaxPending = 128;
     std::array<PendingOff, kMaxPending> pending {};
@@ -249,6 +249,6 @@ private:
     void emitOn(int index, std::vector<VoiceEvent>& out, int offset);
     void emitOff(int note, int strand, std::vector<VoiceEvent>& out, int offset);
     void flushPendingFor(int note, int strand, std::vector<VoiceEvent>& out, int offset);
-    void addPending(double q, int note, int strand, PhraseModel::Line line,
+    void addPending(double q, double ownQ, int note, int strand, PhraseModel::Line line,
                     std::vector<VoiceEvent>& out, int offset);
 };

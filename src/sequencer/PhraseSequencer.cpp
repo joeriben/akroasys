@@ -207,7 +207,7 @@ void T5ynthPhraseSequencer::flushPendingFor(int note, int strand, std::vector<Vo
     }
 }
 
-void T5ynthPhraseSequencer::addPending(double q, int note, int strand, Line line,
+void T5ynthPhraseSequencer::addPending(double q, double ownQ, int note, int strand, Line line,
                                        std::vector<VoiceEvent>& out, int offset)
 {
     if (pendingCount >= kMaxPending)
@@ -220,7 +220,7 @@ void T5ynthPhraseSequencer::addPending(double q, int note, int strand, Line line
         emitOff(pending[static_cast<size_t>(earliest)].note, pending[static_cast<size_t>(earliest)].strand, out, offset);
         pending[static_cast<size_t>(earliest)] = pending[static_cast<size_t>(--pendingCount)];
     }
-    pending[static_cast<size_t>(pendingCount++)] = { q, q, note, strand, line };
+    pending[static_cast<size_t>(pendingCount++)] = { q, ownQ, note, strand, line };
 }
 
 bool T5ynthPhraseSequencer::sharesOnset(int index) const
@@ -274,7 +274,7 @@ void T5ynthPhraseSequencer::emitOn(int index, std::vector<VoiceEvent>& out, int 
     out.push_back(v);
 
     if (e.held) heldNote[static_cast<size_t>(slot)] = e.note;
-    else        addPending(barStartQ + e.offQ, e.note, e.strand, e.line, out, offset);
+    else        addPending(barStartQ + e.offQ, barStartQ + e.gateOffQ, e.note, e.strand, e.line, out, offset);
 }
 
 void T5ynthPhraseSequencer::releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset)
@@ -298,19 +298,21 @@ void T5ynthPhraseSequencer::releaseUnusedHeld(int fromIndex, std::vector<VoiceEv
 
 void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
 {
-    // A note keeps the off its render gave it, bounded by its line's next
-    // onset in THAT render (finishLine). A re-render in the bar can put its
-    // line's next onset sooner — a denser grid, another motif — and the note
-    // would sound on under the new render's notes: it ends at that onset
-    // instead. Its line is the one the renderer bounds it by (Event::line):
-    // the Octave and Chord layers end at the main line's next onset, the
-    // Answer at its own.
+    // A note ends at its own off (gate x its step) or at its line's next
+    // onset, whichever comes first (finishLine). Its render bounded it by the
+    // onsets THAT render had. A re-render in the bar can put its line's next
+    // onset sooner — a denser grid, another motif — and the note would sound
+    // on under the new render's notes: it ends at that onset instead. Its
+    // line is the one the renderer bounds it by (Event::line): the Octave and
+    // Chord layers end at the main line's next onset, the Answer at its own.
     //
     // The bound starts from the note's own off each time, not from the last
-    // bound: a note still pending has not reached any earlier bound, so the
-    // onset that set it has not played, and the render now playing may no
-    // longer have it (a second change before that onset, a knob dragged
-    // across values). Only the render now playing says where the note ends.
+    // bound nor from the off its render gave it: a note still pending has not
+    // reached any earlier bound, so the onset that set it has not played, and
+    // the render now playing may no longer have it (a sparser grid, a second
+    // change before that onset, a knob dragged across values). Only the render
+    // now playing says where the note ends. With no onset of its line left in
+    // this bar, the bar entry bounds it by the next bar's first.
     constexpr double inf = std::numeric_limits<double>::infinity();
     double nextMain = inf, nextAnswer = inf;
     for (int i = fromIndex; i < render.count && (nextMain == inf || nextAnswer == inf); ++i)
