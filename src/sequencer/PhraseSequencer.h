@@ -126,6 +126,10 @@ public:
      *  sequencer's own transport. Returns the number of steps. Tear-tolerant:
      *  a step read mid-update is redrawn on the next generation. */
     int readView(std::array<PhraseModel::StepView, PhraseModel::kMaxBarSteps>& out) const;
+    /** chordForGui decoded: the chord the bar the view shows plays, the one
+     *  it starts on; under Keys, from the beat a new held chord takes effect
+     *  on, that chord. */
+    PhraseModel::Chord readChord() const;
 
 private:
     // ── Motif hand-off ───────────────────────────────────────────────────

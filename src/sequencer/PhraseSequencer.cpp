@@ -825,6 +825,16 @@ int T5ynthPhraseSequencer::readView(std::array<StepView, kMaxBarSteps>& outView)
     return n;
 }
 
+Chord T5ynthPhraseSequencer::readChord() const
+{
+    const std::uint32_t w = chordForGui.load(std::memory_order_relaxed);
+    Chord c;
+    c.rootPc = static_cast<int>(w & 15u);
+    for (int m = 1; m < kMaxVoices; ++m)
+        c.iv[static_cast<size_t>(m)] = static_cast<int>((w >> (4 + 5 * (m - 1))) & 31u) - 1;
+    return c;
+}
+
 // ─── Motif hand-off ────────────────────────────────────────────────────────
 
 T5ynthPhraseSequencer::MotifChannel::MotifChannel()

@@ -495,6 +495,31 @@ std::string stepGlyphText(const StepView& v)
     return "?";
 }
 
+int phraseStrip(const Config& cfg, int bar, const Chord* keysChord,
+                std::array<StripCell, kMaxPhraseBars>& out)
+{
+    const int N = phraseBarsOf(cfg);
+    const int unitBars = N / 4;
+    const int first = bar - floorMod(bar, N);
+    Chord before {};
+    for (int j = 0; j < N; ++j)
+    {
+        StripCell& c = out[static_cast<size_t>(j)];
+        c = StripCell {};
+        if (cfg.form != Form::Loop && j % unitBars == 0)
+            c.form = isBUnit(cfg, first + j) ? 'B' : 'A';
+        if (keysChord != nullptr)
+        {
+            if (first + j == bar) c.chord = chordNameText(*keysChord);
+            continue;
+        }
+        const Chord ch = chordForBar(cfg, first + j);
+        if (j == 0 || !(ch == before)) c.chord = chordNameText(ch);
+        before = ch;
+    }
+    return N;
+}
+
 // ─── Register ──────────────────────────────────────────────────────────────
 
 int partAnchor(Part part)

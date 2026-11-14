@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -5563,6 +5564,217 @@ int main(int argc, char** argv)
               + std::to_string(reversals) + " reversals, "
               + std::to_string(reversalsRelabelled) + " shown other than stored, "
               + std::to_string(repeatReversals) + " of a stored Repeat");
+    }
+
+    std::printf("\n== 42. The phrase strip names the form's units and the chords the phrase plays\n");
+    {
+        // A: the letters written out per form, not read back through
+        // isBUnit: each unit's first bar (every N/4 bars) carries its unit's
+        // letter, a bar inside a unit none, Loop none at all; the same
+        // whichever bar of the phrase plays, a bar before 0 included.
+        static const char* kUnits[] = { "", "AAAB", "AABA", "ABAB" };
+        int offA = 0, stripsA = 0;
+        std::string whyA;
+        for (int f = 0; f < 4; ++f)
+            for (int nb : { 4, 8, 16 })
+                for (int bar : { 0, 1, nb - 1, nb, 3 * nb + 2, -1, -nb - 3 })
+                {
+                    Config c = base();
+                    c.form = static_cast<Form>(f);
+                    c.phraseBars = nb;
+                    std::array<StripCell, kMaxPhraseBars> cells {};
+                    const int n = phraseStrip(c, bar, nullptr, cells);
+                    std::string got, want;
+                    for (int j = 0; j < nb; ++j)
+                    {
+                        got += cells[static_cast<size_t>(j)].form != 0 ? cells[static_cast<size_t>(j)].form : '.';
+                        want += (f != 0 && j % (nb / 4) == 0) ? kUnits[f][j / (nb / 4)] : '.';
+                    }
+                    ++stripsA;
+                    if ((n != nb || got != want) && offA++ < 4)
+                        whyA += " | form " + std::to_string(f) + " N " + std::to_string(nb) + " bar " + std::to_string(bar)
+                              + ": " + std::to_string(n) + " cells " + got + ", want " + want;
+                }
+        check(offA == 0, "A. " + std::to_string(stripsA) + " strips: a letter on each unit's first bar, the form's ("
+                         + std::to_string(offA) + " off)" + whyA);
+
+        // B: against what plays. Pedal and Chords, loops of 1 to 4 slots at
+        // 1, 2 and 4 bars a chord, so most loops do not divide the phrase and
+        // a phrase starts elsewhere in the loop than the one before; from a
+        // locate, so the bars are absolute. On each bar the strip of its
+        // phrase carries forward to the chord readChord() hands the GUI; that
+        // is the chord the bar renders, chordForBar of the absolute bar. A
+        // cell names a chord exactly where the
+        // phrase's first bar is, or where the bar before played another one.
+        // Every bar of a phrase gets the same strip (the view recomputes it
+        // only when the phrase changes).
+        std::mt19937 rng(42);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static const int spbs[] = { 4, 8, 16 };
+        static const int rates[] = { 1, 2, 4 };
+        int bars = 0, offB = 0, offD = 0, offSame = 0, offMark = 0, marks = 0, firstRepeats = 0, phraseShifts = 0;
+        std::string whyB;
+        auto note = [&](std::string& why, int& off, const std::string& w) { if (off++ < 4) why += " | " + w; };
+        for (int t = 0; t < 160; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));
+            c.harm = U(0, 3) == 0 ? Harm::Pedal : Harm::Chords;
+            c.scaleType = U(0, ScaleQuantizer::COUNT - 1);
+            c.scaleRoot = U(0, 11);
+            c.ext7 = U(0, 1) != 0;
+            c.chordDegrees = { U(1, 7), U(0, 7), U(0, 7), U(0, 7) };
+            c.chordRateBars = rates[U(0, 2)];
+            c.phraseBars = 4 << U(0, 2);
+            c.form = static_cast<Form>(U(0, 3));
+            c.stepsPerBar = spbs[U(0, 2)];
+            c.pulses = U(1, c.stepsPerBar);
+            const int tsNum = t % 4 == 0 ? 3 : 4;
+            const int N = phraseBarsOf(c);
+            const int from = U(0, 40);
+            std::map<int, Chord> played;
+            int lastBar = std::numeric_limits<int>::min();
+            bool rendered = false;   // the hook's first call comes before the first block
+            play(c, from * static_cast<double>(tsNum), (from + 2 * N + 3) * static_cast<double>(tsNum), tsNum, 4, {},
+                 static_cast<std::uint32_t>(42000 + t), [&](T5ynthPhraseSequencer& s, double) {
+                if (!rendered) { rendered = true; return; }
+                const int b = s.currentBarForGui.load();
+                if (b == lastBar || b < 0) return;
+                lastBar = b;
+                ++bars;
+                const Chord ch = s.readChord();
+                played[b] = ch;
+                const std::string at = "t" + std::to_string(t) + " bar " + std::to_string(b);
+                if (!(ch == chordForBar(c, b)))
+                    note(whyB, offD, at + ": readChord " + chordNameText(ch) + ", the bar renders " + chordNameText(chordForBar(c, b)));
+                std::array<StripCell, kMaxPhraseBars> cells {}, firstCells {};
+                const int j = floorMod(b, N);
+                phraseStrip(c, b, nullptr, cells);
+                phraseStrip(c, b - j, nullptr, firstCells);
+                for (int i = 0; i < N; ++i)
+                    if (cells[static_cast<size_t>(i)].form != firstCells[static_cast<size_t>(i)].form
+                        || cells[static_cast<size_t>(i)].chord != firstCells[static_cast<size_t>(i)].chord)
+                    { note(whyB, offSame, at + ": the strip differs from its phrase's first bar's at cell " + std::to_string(i)); break; }
+                std::string carried;
+                for (int i = 0; i <= j; ++i)
+                    if (!cells[static_cast<size_t>(i)].chord.empty()) carried = cells[static_cast<size_t>(i)].chord;
+                if (carried != chordNameText(ch))
+                    note(whyB, offB, at + ": the strip carries '" + carried + "' to cell " + std::to_string(j)
+                                     + ", the bar plays " + chordNameText(ch));
+            });
+            for (const auto& [b, ch] : played)
+            {
+                const int j = floorMod(b, N);
+                std::array<StripCell, kMaxPhraseBars> cells {};
+                phraseStrip(c, b, nullptr, cells);
+                const bool marked = !cells[static_cast<size_t>(j)].chord.empty();
+                marks += marked;
+                const auto before = played.find(b - 1);
+                if (j == 0)
+                {
+                    if (!marked) note(whyB, offMark, "t" + std::to_string(t) + " bar " + std::to_string(b) + ": the phrase's first bar names no chord");
+                    if (before != played.end() && before->second == ch) ++firstRepeats;
+                    const auto lastPhrase = played.find(b - N);
+                    if (lastPhrase != played.end() && !(lastPhrase->second == ch)) ++phraseShifts;
+                }
+                else if (before != played.end() && marked != !(before->second == ch))
+                    note(whyB, offMark, "t" + std::to_string(t) + " bar " + std::to_string(b) + ": cell "
+                                        + std::to_string(j) + (marked ? " names " : " names no ") + chordNameText(ch)
+                                        + " after " + chordNameText(before->second));
+            }
+        }
+        check(offD == 0, "B. " + std::to_string(bars) + " bars: readChord() is the chord the bar renders (" + std::to_string(offD) + " off)" + whyB);
+        check(offB == 0 && offSame == 0 && offMark == 0,
+              "B. the strip carries each bar's played chord, the same on every bar of its phrase, named where it changes ("
+                  + std::to_string(offB) + " / " + std::to_string(offSame) + " / " + std::to_string(offMark) + " off)" + whyB);
+        check(bars > 2500 && marks > 600 && firstRepeats > 20 && phraseShifts > 40,
+              "B. coverage: " + std::to_string(bars) + " bars, " + std::to_string(marks) + " named, " + std::to_string(firstRepeats)
+                  + " phrases opening on the chord before, " + std::to_string(phraseShifts) + " phrases opening on another chord than the phrase before");
+
+        // C: Keys. A new key set every two bars, in the middle of its bar
+        // (on beat 1.5), so it is delivered between beats: it takes effect
+        // on the next beat (§3.2), changing the chord inside the bar, and the
+        // bar after enters on it. Before every block readChord() is the chord
+        // the key set in effect spells (chordFromKeys of the lowest key and
+        // the pitch classes), the set in effect being the last one whose beat
+        // lies before the block: a strip one chord change behind fails here.
+        // Wherever the bar or the held chord changes (where the view
+        // recomputes the strip) the strip names that chord on the playing bar
+        // alone; the letters are Chords'.
+        static const std::vector<std::vector<int>> keySets = {
+            { 45, 48, 52 }, { 41, 45, 48, 51 }, { 43, 50 }, { 36, 40, 43, 49 }, { 38, 41, 45, 48 }, { 40, 44, 47, 50 } };
+        auto spell = [](const std::vector<int>& ks) {
+            std::uint16_t mask = 0;
+            for (int k : ks) mask = static_cast<std::uint16_t>(mask | (1u << (k % 12)));
+            return chordFromKeys(*std::min_element(ks.begin(), ks.end()), mask);
+        };
+        int keysBlocks = 0, keysBars = 0, offC = 0, offS = 0, keysChanges = 0, midBarChanges = 0;
+        std::string whyC;
+        for (int t = 0; t < 40; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));
+            c.harm = Harm::Keys;
+            c.scaleType = U(0, ScaleQuantizer::COUNT - 1);
+            c.scaleRoot = U(0, 11);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = static_cast<Form>(U(0, 3));
+            c.stepsPerBar = spbs[U(0, 2)];
+            c.pulses = U(1, c.stepsPerBar);
+            const int N = phraseBarsOf(c);
+            const int from = U(0, 40);
+            std::vector<std::pair<double, std::vector<int>>> keys;
+            for (int i = 0; i < 2 * N + 3; i += 2)
+                keys.push_back({ (from + i) * 4.0 + (i == 0 ? 0.0 : 1.5),
+                                 keySets[static_cast<size_t>(U(0, static_cast<int>(keySets.size()) - 1))] });
+            // Each set's beat: the first beat at or after the block play()
+            // delivers it before (beats are quarters here).
+            std::vector<double> beatOf;
+            int lastBar = std::numeric_limits<int>::min();
+            Chord lastHeld;
+            bool rendered = false;
+            play(c, from * 4.0, (from + 2 * N + 3) * 4.0, 4, 4, keys, static_cast<std::uint32_t>(42500 + t),
+                 [&](T5ynthPhraseSequencer& s, double q) {
+                while (beatOf.size() < keys.size() && keys[beatOf.size()].first <= q) beatOf.push_back(std::ceil(q));
+                if (!rendered) { rendered = true; return; }
+                const int b = s.currentBarForGui.load();
+                if (b < 0) return;
+                ++keysBlocks;
+                size_t inEffect = 0;
+                while (inEffect + 1 < beatOf.size() && beatOf[inEffect + 1] < q) ++inEffect;
+                const Chord want = spell(keys[inEffect].second);
+                const Chord held = s.readChord();
+                const std::string at = "t" + std::to_string(t) + " bar " + std::to_string(b) + " q " + std::to_string(q);
+                if (!(held == want))
+                    note(whyC, offC, at + ": readChord " + chordNameText(held) + ", the keys in effect spell " + chordNameText(want));
+                if (b == lastBar && held == lastHeld) return;
+                if (lastBar != std::numeric_limits<int>::min() && !(held == lastHeld))
+                {
+                    ++keysChanges;
+                    midBarChanges += b == lastBar;
+                }
+                keysBars += b != lastBar;
+                lastBar = b;
+                lastHeld = held;
+                std::array<StripCell, kMaxPhraseBars> cells {}, chords {};
+                const int n = phraseStrip(c, b, &held, cells);
+                phraseStrip(c, b, nullptr, chords);
+                const int j = floorMod(b, N);
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto& x = cells[static_cast<size_t>(i)];
+                    const std::string w = i == j ? chordNameText(held) : std::string();
+                    if (x.chord != w || x.form != chords[static_cast<size_t>(i)].form)
+                    { note(whyC, offS, at + ": cell " + std::to_string(i) + " reads '" + x.chord + "', want '" + w + "'"); break; }
+                }
+            });
+        }
+        check(offC == 0, "C. Keys: " + std::to_string(keysBlocks) + " blocks: readChord() is the chord of the keys in effect ("
+                         + std::to_string(offC) + " off)" + whyC);
+        check(offS == 0, "C. Keys: " + std::to_string(keysBars) + " bars: the strip names the held chord on the playing bar alone ("
+                         + std::to_string(offS) + " off)" + whyC);
+        check(keysBars > 500 && keysChanges > 100 && midBarChanges > 80,
+              "C. coverage: " + std::to_string(keysChanges) + " held-chord changes, " + std::to_string(midBarChanges) + " inside a bar");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

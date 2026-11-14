@@ -27,6 +27,7 @@ static constexpr int kMaxBarSteps   = 16;              // 1/16 grid
 static constexpr int kMaxMotifSteps = 2 * kMaxBarSteps; // Len 2
 static constexpr int kMaxVoices     = 4;               // R 3 5 7
 static constexpr int kMaxEvents     = 256;             // per rendered bar
+static constexpr int kMaxPhraseBars = 16;              // Bars 16
 
 enum class Part : int { Bass = 0, Riff, Lead, Stab };
 enum class Harm : int { Pedal = 0, Keys, Chords };
@@ -431,6 +432,22 @@ std::string chordNameText(const Chord& c);
  *  per octave below: a chord tone's octave, and the one Lift puts on any
  *  step. */
 std::string stepGlyphText(const StepView& v);
+
+/** One bar of the phrase strip (§4). */
+struct StripCell
+{
+    char form = 0;        // 'A' / 'B' on the first bar of a unit of the form; 0 inside a unit and for Loop
+    std::string chord;    // chordNameText of the bar's chord where it is not the bar before's,
+                          // and on the phrase's first bar; empty elsewhere
+};
+
+/** The strip of the phrase holding `bar`: one cell per bar of it
+ *  (phraseBarsOf), from its first bar. Pedal and Chords name each bar's
+ *  chordForBar, so a loop whose length does not divide the phrase shows the
+ *  chords of this phrase. Keys (`keysChord` non-null) names the held chord
+ *  on `bar` alone: no other bar is known to play it. Returns the cell count. */
+int phraseStrip(const Config& cfg, int bar, const Chord* keysChord,
+                std::array<StripCell, kMaxPhraseBars>& out);
 
 // ─── Step → Phrase (§4) ─────────────────────────────────────────────────────
 
