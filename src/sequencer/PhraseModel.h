@@ -314,6 +314,7 @@ enum class Tone : std::uint8_t
     None = 0,   // no chord tone: a rest, a silenced step, an embellishment
     Root, Third, Fifth, Seventh,
     Second,     // scale degree 2: the open cadence over a tonic pedal (§3.7)
+                // where it is no chord tone
     Chord,      // Stab: the whole chord
     Count
 };

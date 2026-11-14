@@ -4800,7 +4800,9 @@ int main(int argc, char** argv)
         // the chord lacks sounds as R an octave up, a missing 3 as the 5 or
         // R, a missing 5 as the 3 or R); the ABAB cadence on the bar's last
         // sounding head R (closed), 5 (open), or scale degree 2 (open over a
-        // tonic pedal); a Stab hit the chord; a rest, a silenced step and an
+        // tonic pedal; the member it is where the scale steps from the root
+        // onto a chord tone, as the minor pentatonic onto the 3); a Stab hit
+        // the chord; a rest, a silenced step and an
         // embellishment nothing. A step a non-Bass Lift raises names its tone
         // an octave up. Oracle: the slot, the bar's variation and the fallback
         // table written out here; and every tone is the note its step plays.
@@ -4846,9 +4848,19 @@ int main(int argc, char** argv)
         };
 
         enum { kSeventhAsRoot, kThirdAsFifth, kThirdAsRoot, kFifthAsThird, kFifthAsRoot,
-               kCadRoot, kCadFifth, kCadSecond, kLifted, kStab, kKeys, kSeen };
+               kCadRoot, kCadFifth, kCadSecond, kCadSecondAsMember, kLifted, kStab, kKeys, kSeen };
         static const char* kSeenName[] = { "7 as R'", "3 as 5", "3 as R", "5 as 3", "5 as R",
-                                           "cadence R", "cadence 5", "cadence 2", "lifted", "Stab hits", "Keys bars" };
+                                           "cadence R", "cadence 5", "cadence 2", "cadence 2 a member", "lifted",
+                                           "Stab hits", "Keys bars" };
+        // The open cadence over a pedal: the scale's next pitch class above
+        // the chord root, named the member it is when it is one.
+        auto secondWant = [](const Chord& ch, std::uint16_t mask) {
+            int d = 1;
+            while (d < 12 && ((mask >> ((ch.rootPc + d) % 12)) & 1u) == 0) ++d;
+            for (int member = Third; member <= Seventh; ++member)
+                if (ch.iv[static_cast<size_t>(member)] == d) return static_cast<Tone>(static_cast<int>(Tone::Root) + member);
+            return Tone::Second;
+        };
         std::array<int, kSeen> seen {};
         int steps = 0, off = 0, offNote = 0;
         std::string why;
@@ -4898,10 +4910,12 @@ int main(int argc, char** argv)
                 {
                     oct = sl.octave;
                     want = var.cadence == 2 ? Tone::Root
-                         : c.harm == Harm::Pedal ? Tone::Second
+                         : c.harm == Harm::Pedal ? secondWant(ch, mask)
                          : memberWant(ch, Fifth, oct);
                     oct += up;
-                    ++seen[var.cadence == 2 ? kCadRoot : c.harm == Harm::Pedal ? kCadSecond : kCadFifth];
+                    ++seen[var.cadence == 2 ? kCadRoot
+                           : c.harm != Harm::Pedal ? kCadFifth
+                           : want == Tone::Second ? kCadSecond : kCadSecondAsMember];
                 }
                 else if (v.fn == Fn::ChordTone)
                 {

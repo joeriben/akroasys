@@ -1228,6 +1228,20 @@ Tone toneOfMember(int member)
     return static_cast<Tone>(static_cast<int>(Tone::Root) + member);
 }
 
+/** The view's name for the open cadence over a tonic pedal: scale degree 2,
+ *  or the chord member it is where the scale steps from the root onto a
+ *  chord tone (the minor pentatonic and the Blues onto the minor 3rd, Ryukyu
+ *  onto the major 3rd). Named 2 there, it read as a second the line does not
+ *  play, and the same pitch on a chord-tone step of the bar read 3. */
+Tone secondTone(const LineCtx& x, const Chord& ch)
+{
+    const int root = chordToneNote(ch, Root, 0, x.tonic);
+    const int d = scaleStep(root, 1, x.mask) - root;
+    for (int member = Third; member <= Seventh; ++member)
+        if (ch.iv[static_cast<size_t>(member)] == d) return toneOfMember(member);
+    return Tone::Second;
+}
+
 /** A bar as its variation plays it (§3.7). The cadence lands on the bar's
  *  last sounding head; Lift (Bass) on the last sounding pulse of the last
  *  beat, which then plays an Octave and no head, so a cadence there lands on
@@ -1489,14 +1503,16 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         {
             sv->note = note + octShift; sv->fn = sl.fn; sv->head = playsHead; sv->accent = sl.accent; sv->slide = false;
             // The chord tone it sounds: the cadence's (scale degree 2 lies
-            // above the root at the slot's octave), or the member the chord
-            // gives a chord-tone step. Bass's Octave pulse is neither.
+            // above the root at the slot's octave, named the member it is
+            // when it is one), or the member the chord gives a chord-tone
+            // step. Bass's Octave pulse is neither.
             int oct = sl.octave;
             Tone tone = Tone::None;
             if (cadence)
             {
                 tone = cadenceTone(x, var.cadence);
                 if (tone == Tone::Fifth) tone = toneOfMember(soundingMember(ch, Fifth, oct));
+                else if (tone == Tone::Second) tone = secondTone(x, ch);
             }
             else if (sl.fn == Fn::ChordTone)
             {
