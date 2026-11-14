@@ -9,7 +9,7 @@
 //      switch segment and action button is as wide as its label needs, every
 //      tag's text fits inside its Label's border, every inline bar is as wide
 //      as its label and widest value need, every Phrase combo as wide as its
-//      longest item needs.
+//      longest item needs (the chord slots in every scale).
 //   C. The bindings: a segment click writes its parameter and lights its
 //      segment only; a parameter changed elsewhere moves the segments; each
 //      combo and bar writes its own parameter.
@@ -36,6 +36,7 @@
 #include "dsp/BlockParams.h"
 #include "gui/SequencerPanel.h"
 #include "gui/T5ynthLookAndFeel.h"
+#include "sequencer/PhraseModel.h"
 
 #include <cmath>
 #include <cstdio>
@@ -381,8 +382,8 @@ void layoutAtSize(int w, int h)
     T5ynthProcessor proc;
     proc.prepareToPlay(kRate, kBlock);
     setDistinctBarValues(proc);
-    // Minor's labels for the slot-width check (the longest of the
-    // heptatonic Roman numerals: ♭VII, ii°).
+    // A scale with chords; the slot-width check below goes through every
+    // scale.
     setPlain(proc, PID::scaleType, static_cast<float>(ScaleType::Min));
     setPlain(proc, PID::seqEngine, static_cast<float>(SeqEngine::Phrase));
     blocks(proc, 4);
@@ -479,7 +480,20 @@ void layoutAtSize(int w, int h)
                             box.getItemText(i).toRawUTF8(), box.getWidth());
             }
     };
-    for (auto* box : ui.chordSlots) allItemsFit(*box, "chord slot");
+    // The chord slots relabel with the scale: every scale's labels fit, the
+    // longest of them VIIsus2♭5 (Persian) and ♭IIIno5 (Hirajoshi, Pelog).
+    int relabelled = 0;
+    for (int st = 0; st < ScaleType::kCount; ++st)
+    {
+        setPlain(proc, PID::scaleType, static_cast<float>(st));
+        if (PhraseModel::chordsAvailable(st)
+            && ui.chordSlots[0]->getItemText(1) == juce::String::fromUTF8(
+                   PhraseModel::chordLabelText(PhraseModel::chordLabel(0, st)).c_str()))
+            ++relabelled;
+        for (auto* box : ui.chordSlots) allItemsFit(*box, "chord slot");
+    }
+    check("the chord slots relabel with every scale but Chromatic",
+          relabelled == ScaleType::kCount - 1);
     allItemsFit(*ui.layer, "Layer");
     allItemsFit(*ui.form, "Form");
     if (auto* root = scaleRootBox(panel)) allItemsFit(*root, "Key root");

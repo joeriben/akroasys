@@ -4781,7 +4781,12 @@ int main(int argc, char** argv)
         expect(5,  "Harm.Min", "i ii" + dg + " " + fl + "III+ iv V " + fl + "VI vii" + dg);
         expect(11, "MinPent",  "i " + fl + "III IV5 v" + sh + "5 " + fl + "VII5");
         expect(23, "Persian",  "I" + fl + "5 " + fl + "II IIIsus2 iv " + fl + "Vsus4 " + fl + "VI+ VIIsus2" + fl + "5");
-        expect(16, "Iwato",    "I" + fl + "5no3 " + fl + "II IV5 " + sh + "IV " + fl + "vii");
+        // A degree with a third and no fifth in the scale plays root and third
+        // only (chordToneNote's 5 → 3 fallback): no5, not the bare triad name.
+        expect(16, "Iwato",    "I" + fl + "5no3 " + fl + "IIno5 IV5 " + sh + "IV " + fl + "vii");
+        expect(14, "Hirajoshi", "i II" + fl + "5no3 " + fl + "IIIno5 V5 " + fl + "VI");
+        expect(18, "Ryukyu",   "I iii IV5 Vno5 VII" + fl + "5no3");
+        expect(26, "Pelog",    "i " + fl + "II5 " + fl + "IIIno5 V" + fl + "5no3 " + fl + "VI");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

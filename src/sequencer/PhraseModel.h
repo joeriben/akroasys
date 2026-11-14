@@ -207,7 +207,8 @@ struct ChordLabel
 ChordLabel chordLabel(int degree0, int scaleType);
 /** The label as UTF-8 text: ♭/♯, the numeral (lower case on a minor third),
  *  then ° (diminished), + (augmented), sus2 / sus4, 5 (open fifth, no
- *  third), or no3, and ♭5 / ♯5 for a fifth the triad's name does not imply.
+ *  third), or no3, and ♭5 / ♯5 for a fifth the triad's name does not imply,
+ *  or no5 when the scale has no fifth above the degree.
  *  Aeolian: i ii° ♭III iv v ♭VI ♭VII. */
 std::string chordLabelText(const ChordLabel& l);
 

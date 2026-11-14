@@ -311,6 +311,10 @@ std::string chordLabelText(const ChordLabel& l)
     if (l.fifth == 6)                t += std::string(kFlat) + "5";
     else if (l.fifth == 8)           t += std::string(kSharp) + "5";
     if (l.third < 0)                 t += "no3";
+    // A scale with no fifth above the degree (Hirajoshi ♭III, Iwato ♭II,
+    // Ryukyu V, Pelog ♭III) plays root and third only; the bare numeral
+    // would read as the full triad.
+    if (l.fifth < 0)                 t += "no5";
     return t;
 }
 
