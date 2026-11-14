@@ -305,15 +305,25 @@ void T5ynthPhraseSequencer::skipOn(int index, std::vector<VoiceEvent>& out, int 
 
 void T5ynthPhraseSequencer::releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset)
 {
-    // A held note waits for its strand's next onset. When the (re)rendered bar
-    // has none left on that strand — the layer was switched off, the motif
-    // changed — it is released here instead of hanging.
+    // A held note waits for its strand's next onset: one the (re)rendered bar
+    // has left on that strand, or the next bar's first when the bar as
+    // rendered now still ends held on it (entering that bar releases the
+    // note when it has none). When neither — the layer was switched off, the
+    // motif changed — it is released here instead of hanging. Without the
+    // second, a re-render between the bar's last onset and the next downbeat
+    // cut the slide into that downbeat.
     for (int s = 0; s < kStrandSlots; ++s)
     {
         if (heldNote[static_cast<size_t>(s)] < 0) continue;
         bool used = false;
         for (int i = fromIndex; i < render.count && !used; ++i)
             used = slotOf(render.events[static_cast<size_t>(i)].strand) == s;
+        for (int i = fromIndex - 1; i >= 0 && !used; --i)
+            if (slotOf(render.events[static_cast<size_t>(i)].strand) == s)
+            {
+                used = render.events[static_cast<size_t>(i)].held;
+                break;
+            }
         if (!used)
         {
             emitOff(heldNote[static_cast<size_t>(s)], s - 1, out, offset);

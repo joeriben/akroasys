@@ -36,6 +36,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace PhraseModel;
@@ -3566,6 +3567,299 @@ int main(int argc, char** argv)
         check(offOnset == 0, "the cadence sounds as an onset at its step (" + std::to_string(offOnset) + " off)");
         check(octaves > 1000 && offOctave == 0, "Bass's last pulse plays an Octave of the note before it ("
                                                     + std::to_string(offOctave) + " of " + std::to_string(octaves) + " off)");
+    }
+
+    std::printf("\n== 35. A re-render after a bar's last onset keeps the slide into the next downbeat\n");
+    {
+        // A held note waits for its strand's next onset. A re-render in the
+        // bar released it when the bar had no onset left on that strand,
+        // though the bar still ended held: the slide was cut, the note went
+        // silent before the downbeat, and the next bar's first onset on the
+        // strand started fresh. Bars that end held (in the same trial
+        // unchanged); the change falls after the strand's last onset in the
+        // bar, before the downbeat.
+        //  - Evolve turns in a bar whose lookahead does not reach the next
+        //    phrase: every bar up to the two before the phrase end renders
+        //    as it did, so every event before them is the unchanged trial's.
+        //  - Keys: the chord changes on a beat after the bar's last onset.
+        //    Every event before the downbeat is the unchanged trial's, and
+        //    in the next bar up to the glide the same events start and end,
+        //    gliding as they did (the notes follow the new chord).
+        std::mt19937 rng(35);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static const int kPhraseBars[] = { 4, 8, 16 };
+        using Key = std::tuple<int, int, int, int, int>;   // sample, type, note, strand, artic
+        auto keyOf = [](const Played& p, bool note) {
+            return Key { p.sample, static_cast<int>(p.ev.type), note ? p.ev.note : 0, p.ev.strandId,
+                         static_cast<int>(p.ev.artic) };
+        };
+        auto between = [&](const Run& r, double fromQ, double toQ, bool note) {
+            std::vector<Key> v;
+            for (const Played& p : r.events)
+                if (p.q >= fromQ && p.q < toQ) v.push_back(keyOf(p, note));
+            return v;
+        };
+        // The bars that end held: a strand's first onset in the next bar
+        // glides. `strandOn`: that strand's last onset in the bar; `lastOn`:
+        // the bar's last onset on any strand; `glideQ`: the glide.
+        struct Held { int bar, strand, note; double strandOn, lastOn, glideQ; };
+        auto heldBars = [&](const Run& r, int fromBar, int toBar, const std::function<bool(int)>& ok) {
+            std::vector<Held> v;
+            for (int b = fromBar; b < toBar; ++b)
+            {
+                if (!ok(b)) continue;
+                const double barQ = 4.0 * b, nextQ = 4.0 * (b + 1);
+                double lastOn = -1.0;
+                std::map<int, double> strandOn, firstNext;
+                std::map<int, int> strandNote;
+                std::map<int, bool> glides;
+                for (const Played& p : r.events)
+                {
+                    if (p.ev.type != VoiceEvent::Type::NoteOn) continue;
+                    if (p.q >= barQ - 1.0e-3 && p.q < nextQ - 1.0e-3)
+                    {
+                        lastOn = p.q;
+                        strandOn[p.ev.strandId] = p.q;
+                        strandNote[p.ev.strandId] = p.ev.note;
+                    }
+                    else if (p.q >= nextQ - 1.0e-3 && !firstNext.count(p.ev.strandId))
+                    {
+                        firstNext[p.ev.strandId] = p.q;
+                        glides[p.ev.strandId] = p.ev.artic == VoiceEvent::Articulation::Glide;
+                    }
+                }
+                for (const auto& [strand, on] : strandOn)
+                    if (glides[strand] && firstNext[strand] < nextQ + 4.0)
+                    {
+                        v.push_back({ b, strand, strandNote[strand], on, lastOn, firstNext[strand] });
+                        break;
+                    }
+            }
+            return v;
+        };
+        // Drawn slides (Passing / Approach into a head) end a bar held
+        // rarely; half the trials add forced ones (From Step) on half the
+        // motif's steps.
+        auto withSlides = [&](Motif m) {
+            if (U(0, 1))
+                for (int s = 0; s < m.numSteps(); ++s)
+                    if (m.slots[static_cast<size_t>(s)].fn != Fn::Rest && U(0, 1)) m.slots[static_cast<size_t>(s)].slide = true;
+            return m;
+        };
+        const double dq = kBlock * kBpm / (60.0 * kSr);
+
+        int evoTrials = 0, evoInGap = 0, evoChanged = 0, evoErrs = 0;
+        std::string evoWhy;
+        for (int t = 0; t < 600; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.phraseBars = kPhraseBars[U(0, 2)];
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = static_cast<float>(U(0, 5)) / 5.0f;
+            c.slide = U(0, 1) ? 1.0f : 0.5f;
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.layer = U(0, 1) ? Layer::Off : Layer::Octave;
+            c.evolve = static_cast<float>(U(0, 10)) / 10.0f;
+            c.len = U(1, 2); c.pulses = U(1, 8); c.rotation = U(0, 7);
+            const Motif m = withSlides(generateMotif(static_cast<std::uint32_t>(35000 + t), 0, c));
+            const int N = phraseBarsOf(c);
+            auto run = [&](double turnQ, double& turnedAt) {
+                bool loaded = false;
+                turnedAt = -1.0;
+                return play(c, 0.0, 4.0 * (2 * N + 1), 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                    if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
+                    if (turnQ < 0.0 || turnedAt >= 0.0 || q < turnQ) return;
+                    Config n = c;
+                    n.evolve = c.evolve >= 0.5f ? 0.0f : 1.0f;
+                    s.setConfig(n);
+                    turnedAt = q;
+                });
+            };
+            double none = -1.0;
+            const Run r0 = run(-1.0, none);
+            const auto bars = heldBars(r0, 0, 2 * N, [&](int b) { return floorMod(b, N) <= N - 4; });
+            if (bars.empty()) continue;
+            const Held h = bars[static_cast<size_t>(U(0, static_cast<int>(bars.size()) - 1))];
+            const int b = h.bar;
+            const double downQ = 4.0 * (b + 1);
+            const double turnQ = h.strandOn + (downQ - h.strandOn) * U(5, 95) / 100.0;
+            double turnedAt = -1.0;
+            const Run r1 = run(turnQ, turnedAt);
+            ++evoTrials;
+            evoInGap += turnedAt > h.strandOn && turnedAt < downQ;
+            evoErrs += r1.hangs + r1.orphanOffs + r1.badGlides + r1.polyMain;
+            const double cutQ = 4.0 * (floorDiv(b, N) * N + N - 2);
+            if (between(r0, 0.0, cutQ, true) != between(r1, 0.0, cutQ, true) && evoChanged++ < 3)
+                evoWhy += " | t " + std::to_string(t) + " part " + std::to_string(static_cast<int>(c.part)) + " bar "
+                        + std::to_string(b) + " turned at " + std::to_string(turnedAt);
+        }
+        check(evoErrs == 0, "Evolve turned: no hanging or orphan note, no bad glide (" + std::to_string(evoErrs) + ")");
+        check(evoInGap > 100, "Evolve turned between a held strand's last onset in the bar and the downbeat ("
+                                  + std::to_string(evoInGap) + " of " + std::to_string(evoTrials) + ")");
+        check(evoChanged == 0, "Evolve turned: every event before the bars that lead into the next phrase is the "
+                               "unturned trial's (" + std::to_string(evoChanged) + " trials off)" + evoWhy);
+
+        static const std::vector<int> kChords[] = { { 57, 60, 64 }, { 55, 59, 62 }, { 53, 57, 60 }, { 52, 55, 59 } };
+        int keysTrials = 0, keysInGap = 0, keysChanged = 0, keysErrs = 0;
+        std::string keysWhy;
+        for (int t = 0; t < 1500; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.harm = Harm::Keys;
+            c.phraseBars = kPhraseBars[U(0, 2)];
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = static_cast<float>(U(0, 5)) / 5.0f;
+            c.slide = U(0, 1) ? 1.0f : 0.5f;
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.layer = U(0, 1) ? Layer::Off : Layer::Octave;
+            c.len = U(1, 2); c.pulses = U(1, 8); c.rotation = U(0, 7);
+            const Motif m = withSlides(generateMotif(static_cast<std::uint32_t>(35600 + t), 0, c));
+            const int from = U(0, 3);
+            const int to = (from + U(1, 3)) % 4;
+            const double untilQ = 4.0 * 10;
+            auto run = [&](double pressQ) {
+                std::vector<std::pair<double, std::vector<int>>> keys { { 0.0, kChords[from] } };
+                if (pressQ >= 0.0) keys.push_back({ pressQ, kChords[to] });
+                bool loaded = false;
+                return play(c, 0.0, untilQ, 4, 4, keys, 0, [&](T5ynthPhraseSequencer& s, double) {
+                    if (!loaded) { s.setStoredMotif(m); loaded = true; }
+                });
+            };
+            const Run r0 = run(-1.0);
+            // A beat after the bar's last onset (on any strand: the new chord
+            // must not reach an onset in the bar), before the downbeat.
+            const auto bars = heldBars(r0, 1, 9, [&](int) { return true; });
+            std::vector<Held> fit;
+            for (const Held& h : bars)
+                if (std::floor(h.lastOn - 4.0 * h.bar) + 1.0 < 4.0) fit.push_back(h);
+            if (fit.empty()) continue;
+            const Held h = fit[static_cast<size_t>(U(0, static_cast<int>(fit.size()) - 1))];
+            const int b = h.bar;
+            const double beatQ = 4.0 * b + std::floor(h.lastOn - 4.0 * b) + 1.0;
+            const double lo = std::max(h.lastOn, beatQ - 1.0) + 1.0e-3, hi = beatQ - dq - 1.0e-3;
+            if (hi <= lo) continue;
+            const double pressQ = lo + (hi - lo) * U(0, 100) / 100.0;
+            const Run r1 = run(pressQ);
+            ++keysTrials;
+            const double downQ = 4.0 * (b + 1), endQ = h.glideQ + 1.0e-3;
+            keysErrs += r1.hangs + r1.orphanOffs + r1.badGlides + r1.polyMain;
+            const bool changedHere = between(r0, 0.0, downQ - 1.0e-3, true) != between(r1, 0.0, downQ - 1.0e-3, true)
+                                  || between(r0, downQ - 1.0e-3, endQ, false) != between(r1, downQ - 1.0e-3, endQ, false);
+            // The next bar plays the new chord: the change reached it.
+            keysInGap += between(r0, downQ - 1.0e-3, endQ, true) != between(r1, downQ - 1.0e-3, endQ, true);
+            if (changedHere && keysChanged++ < 3)
+                keysWhy += " | t " + std::to_string(t) + " part " + std::to_string(static_cast<int>(c.part)) + " bar "
+                         + std::to_string(b) + " beat " + std::to_string(beatQ);
+        }
+        check(keysErrs == 0, "Keys changed: no hanging or orphan note, no bad glide (" + std::to_string(keysErrs) + ")");
+        check(keysInGap > 50, "Keys changed on a beat after a held bar's last onset, the next bar on the new chord ("
+                                  + std::to_string(keysInGap) + " of " + std::to_string(keysTrials) + ")");
+        check(keysChanged == 0, "Keys changed: what sounds before the downbeat is unchanged, the next bar glides as it did ("
+                                    + std::to_string(keysChanged) + " trials off)" + keysWhy);
+
+        // Slide turned to 0 after a held onset, before the downbeat: the
+        // re-render keeps a forced slide (From Step), which the next bar's
+        // first onset on the strand glides, and drops a drawn one. A dropped
+        // slide's note no longer waits for that onset; it ends at the turn.
+        // Whether the onset glides is what it does with Slide at 0 from the
+        // start (bars render from the motif and the config alone, Evolve 0).
+        int slTrials = 0, slKept = 0, slEnded = 0, slOff = 0, slErrs = 0, slMixed = 0;
+        std::string slWhy;
+        for (int t = 0; t < 1500; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.phraseBars = kPhraseBars[U(0, 2)];
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = static_cast<float>(U(0, 5)) / 5.0f;
+            c.slide = 1.0f;
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.layer = U(0, 1) ? Layer::Off : Layer::Octave;
+            c.len = U(1, 2); c.pulses = U(1, 8); c.rotation = U(0, 7);
+            Motif m = generateMotif(static_cast<std::uint32_t>(37100 + t), 0, c);
+            // Forced slides on a quarter of the steps: drawn and forced ones
+            // meet in one bar.
+            for (int k = 0; k < m.numSteps(); ++k)
+                if (m.slots[static_cast<size_t>(k)].fn != Fn::Rest && U(0, 3) == 0) m.slots[static_cast<size_t>(k)].slide = true;
+            auto run = [&](const Config& from, double turnQ, double& turnedAt) {
+                bool loaded = false;
+                turnedAt = -1.0;
+                return play(from, 0.0, 4.0 * 10, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                    if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
+                    if (turnQ < 0.0 || turnedAt >= 0.0 || q < turnQ) return;
+                    Config n = from;
+                    n.slide = 0.0f;
+                    s.setConfig(n);
+                    turnedAt = q;
+                });
+            };
+            double none = -1.0;
+            const Run r0 = run(c, -1.0, none);
+            Config c0 = c;
+            c0.slide = 0.0f;
+            const Run rz = run(c0, -1.0, none);
+            const auto bars = heldBars(r0, 0, 9, [&](int) { return true; });
+            if (bars.empty()) continue;
+            const Held h = bars[static_cast<size_t>(U(0, static_cast<int>(bars.size()) - 1))];
+            const double downQ = 4.0 * (h.bar + 1);
+            const double turnQ = h.strandOn + (downQ - h.strandOn) * U(5, 95) / 100.0;
+            double turnedAt = -1.0;
+            const Run r1 = run(c, turnQ, turnedAt);
+            if (!(turnedAt > h.strandOn && turnedAt < downQ)) continue;
+            ++slTrials;
+            slErrs += r1.hangs + r1.orphanOffs + r1.badGlides + r1.polyMain;
+            // The strand's first onset at or after the downbeat, and the held
+            // note's first off after its onset.
+            double nextOn = -1.0, offQ = -1.0;
+            bool glides = false, glidesAt0 = false, heldBefore = false;
+            for (const Played& p : rz.events)
+                if (p.ev.strandId == h.strand && p.ev.type == VoiceEvent::Type::NoteOn && p.q >= downQ - 1.0e-3)
+                {
+                    glidesAt0 = p.ev.artic == VoiceEvent::Articulation::Glide;
+                    break;
+                }
+            // A slide earlier in the bar on the strand, kept at 0: the bar's
+            // last onset glides from it.
+            for (const Played& p : rz.events)
+                heldBefore |= p.ev.strandId == h.strand && p.ev.type == VoiceEvent::Type::NoteOn
+                           && p.ev.artic == VoiceEvent::Articulation::Glide
+                           && p.q > 4.0 * h.bar + 1.0e-3 && p.q < downQ - 1.0e-3;
+            slMixed += heldBefore && !glidesAt0;
+            for (const Played& p : r1.events)
+            {
+                if (p.ev.strandId != h.strand) continue;
+                if (p.ev.type == VoiceEvent::Type::NoteOn && p.q >= downQ - 1.0e-3 && nextOn < 0.0)
+                {
+                    nextOn = p.q;
+                    glides = p.ev.artic == VoiceEvent::Articulation::Glide;
+                }
+                if (p.ev.type == VoiceEvent::Type::NoteOff && p.ev.note == h.note && p.q > h.strandOn + 1.0e-3 && offQ < 0.0)
+                    offQ = p.q;
+            }
+            bool ok = glides == glidesAt0;
+            if (glidesAt0) { ++slKept; ok = ok && (offQ < 0.0 || offQ > nextOn - 1.0e-3); }
+            else           { ++slEnded; ok = ok && offQ >= 0.0 && std::abs(offQ - turnedAt) < 1.0e-3; }
+            if (!ok && slOff++ < 3)
+                slWhy += " | t " + std::to_string(t) + " part " + std::to_string(static_cast<int>(c.part)) + " bar "
+                       + std::to_string(h.bar) + (glides ? " kept" : " dropped") + " turned at "
+                       + std::to_string(turnedAt) + " off at " + std::to_string(offQ);
+        }
+        check(slErrs == 0, "Slide turned to 0: no hanging or orphan note, no bad glide (" + std::to_string(slErrs) + ")");
+        check(slKept > 50 && slEnded > 50 && slMixed > 10,
+              "Slide turned to 0 after a held onset: forced slides kept (" + std::to_string(slKept)
+                  + "), drawn slides dropped (" + std::to_string(slEnded) + ", " + std::to_string(slMixed)
+                  + " after a kept slide in the bar)");
+        check(slOff == 0, "Slide turned to 0: a kept slide's note sounds into its glide, a dropped one's ends at the turn ("
+                              + std::to_string(slOff) + " of " + std::to_string(slTrials) + " off)" + slWhy);
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
