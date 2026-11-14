@@ -34,8 +34,9 @@ public:
      *  .t5seq preset. Returns true on success. Used by SequenceLibraryPanel. */
     bool writePatternTo(const juce::File& file);
 
-    /** Load a .t5seq partial preset and refresh the grid. Returns true on
-     *  success (false if the file is missing or the import fails). */
+    /** Load a .t5seq partial preset; the grid follows at the next timer tick.
+     *  Returns true on success (false if the file is missing or the import
+     *  fails). */
     bool loadPatternFrom(const juce::File& file);
 
 private:

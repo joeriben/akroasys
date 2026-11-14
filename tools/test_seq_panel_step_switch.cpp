@@ -1,9 +1,9 @@
-// The step grid after a switch into Step made while the transport is stopped.
+// The step grid after changes made while the transport is stopped.
 //
 // The sequencer panel's 10 Hz timer skips most of its work while the audio
 // path is idle (docs/PERFORMANCE_GUIDE.md, the audioIdle gate), and its
-// step-count sync sits below that gate. Two ways the grid used to stay stale
-// until PLAY:
+// step-count sync used to sit below that gate. Ways the grid used to stay
+// stale until PLAY:
 //
 //   A. Phrase -> Step and Gen -> Step copy the other engine's pattern into
 //      the grid, on the audio thread, in the first block after the switch.
@@ -19,6 +19,14 @@
 //      step columns equal the loaded count at the first tick.
 //   C. The control for the signal A uses: a step preset picked in Step mode
 //      redraws the grid at the next tick (the refresh that existed for it).
+//   D. A preset import that stays in Step, with Step shown. The import writes
+//      the grid itself, on the calling thread, and the audio thread has
+//      nothing to react to, so nothing told the panel. With another step count
+//      the columns stayed at the old count; with the same count the grid was
+//      not redrawn. The case asserts both at the first tick, before any block.
+//   E. Init in Step with a hand-set step count (the step preset unchanged):
+//      only seqSteps moves. The first tick shows the default count.
+//   F. The host sets seqSteps with Step shown. The first tick shows it.
 //
 // All start in deep idle.
 //
@@ -281,6 +289,121 @@ void stepPresetInStep()
         check("the next tick repaints the step grid", ! grid.isEmpty() && probe->covers(grid));
     }
 }
+
+/** Every step of the grid gets `note`, enabled. */
+void fillGrid(T5ynthProcessor& proc, int note)
+{
+    const juce::ScopedLock sl(proc.getCallbackLock());
+    auto& st = proc.getStepSequencer();
+    for (int i = 0; i < 32; ++i) { st.setStepNote(i, note); st.setStepEnabled(i, true); }
+}
+
+/** D: a preset import that stays in Step while Step is shown, in deep idle.
+ *  The tick runs before any audio block. */
+void importInStep(bool otherCount)
+{
+    std::printf("D. a preset import that stays in Step (%s)\n",
+                otherCount ? "24 -> 8 steps" : "16 steps, other notes");
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    const int loaded = otherCount ? 8 : 16;
+    const int shown  = otherCount ? 24 : 16;
+    setPlain(proc, PID::seqSteps, static_cast<float>(loaded));
+    blocks(proc, 2);
+    fillGrid(proc, 72);
+    const auto preset = proc.exportJsonPreset();
+    setPlain(proc, PID::seqSteps, static_cast<float>(shown));
+    blocks(proc, 2);
+    fillGrid(proc, 50);
+    {
+        SequencerPanel panel(proc);
+        auto* probe = new RepaintProbe();
+        panel.setCachedComponentImage(probe);
+        panel.setVisible(true);
+        panel.setSize(864, 208);
+        tick();
+        if (! reachIdle(proc)) { check("deep idle before the import", false); return; }
+        tick();
+        check("Step shows the steps before the import", visibleStepColumns(panel) == shown);
+        const auto grid = stepGridBounds(panel);
+        probe->reset();
+
+        check("the import succeeds", proc.importJsonPreset(preset));
+        std::printf("    after the import: engine %d, seqSteps %d, note0 %d, audioIdle %d\n",
+                    plain(proc, PID::seqEngine), plain(proc, PID::seqSteps),
+                    proc.getStepSequencer().getStep(0).note, proc.audioIdle.load() ? 1 : 0);
+        check("the import stays in Step", plain(proc, PID::seqEngine) == SeqEngine::Step);
+        check("the import wrote the notes", proc.getStepSequencer().getStep(0).note == 72);
+        tick();
+        std::printf("    first tick: columns %d\n", visibleStepColumns(panel));
+        if (otherCount)
+            check("the first tick shows the loaded 8 steps", visibleStepColumns(panel) == loaded);
+        else
+            check("the first tick repaints the step grid", ! grid.isEmpty() && probe->covers(grid));
+        blocks(proc, 3);
+        tick();
+        check("and keeps the loaded count after the audio thread ran",
+              visibleStepColumns(panel) == loaded);
+    }
+}
+
+/** E: Init in Step mode, in deep idle, with a hand-set step count. The tick
+ *  runs before any audio block. */
+void initInStep()
+{
+    std::printf("E. Init in Step with a hand-set step count\n");
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    setPlain(proc, PID::seqSteps, 24.0f);
+    blocks(proc, 2);
+    {
+        SequencerPanel panel(proc);
+        panel.setSize(864, 208);
+        tick();
+        if (! reachIdle(proc)) { check("deep idle before Init", false); return; }
+        tick();
+        check("Step shows the 24 steps before Init", visibleStepColumns(panel) == 24);
+        const int presetBefore = plain(proc, PID::seqPreset);
+
+        proc.resetParametersToDefaults();
+        const int steps = plain(proc, PID::seqSteps);
+        std::printf("    after Init: seqSteps %d, seqPreset %d -> %d, audioIdle %d\n",
+                    steps, presetBefore, plain(proc, PID::seqPreset),
+                    proc.audioIdle.load() ? 1 : 0);
+        check("Init moved the step count", steps != 24);
+        check("and left the step preset as it was", plain(proc, PID::seqPreset) == presetBefore);
+        tick();
+        std::printf("    first tick: columns %d\n", visibleStepColumns(panel));
+        check("the first tick shows Init's step count", visibleStepColumns(panel) == steps);
+    }
+}
+
+/** F: the host sets seqSteps while Step is shown, in deep idle. */
+void hostSetsSteps()
+{
+    std::printf("F. the host sets the step count\n");
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    setPlain(proc, PID::seqSteps, 16.0f);
+    blocks(proc, 2);
+    {
+        SequencerPanel panel(proc);
+        panel.setSize(864, 208);
+        tick();
+        if (! reachIdle(proc)) { check("deep idle before the change", false); return; }
+        tick();
+        check("Step shows the 16 steps before the change", visibleStepColumns(panel) == 16);
+
+        setPlain(proc, PID::seqSteps, 12.0f);
+        tick();
+        std::printf("    first tick: columns %d, audioIdle %d\n", visibleStepColumns(panel),
+                    proc.audioIdle.load() ? 1 : 0);
+        check("the first tick shows the 12 steps", visibleStepColumns(panel) == 12);
+    }
+}
 } // namespace
 
 int main()
@@ -293,6 +416,10 @@ int main()
     transferIntoStep(SeqEngine::Gen);
     loadIntoStep();
     stepPresetInStep();
+    importInStep(true);
+    importInStep(false);
+    initInStep();
+    hostSetsSteps();
 
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::printf(failures == 0 ? "ALL PASS\n" : "%d FAIL\n", failures);

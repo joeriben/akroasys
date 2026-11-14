@@ -13043,6 +13043,10 @@ bool T5ynthProcessor::importJsonPreset(const juce::String& json)
                 }
             }
         }
+        // The grid was written here, not by the audio thread, and nothing in
+        // processBlock reacts to it (lastSeqPreset is synced above), so this
+        // publishes it: the panel redraws the grid even with the audio idle.
+        stepSequencer.markPatternReplaced();
         // Octave 0 is index 2 and 1/16 is index 4 — an absent key used to drop
         // the pattern two octaves and slow it to whole notes.
         setChoiceParamFromJson(parameters, PID::seqOctave, seq, "octaveShift", SeqOctave::kEntries);

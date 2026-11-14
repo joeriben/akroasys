@@ -1075,15 +1075,9 @@ bool SequencerPanel::loadPatternFrom(const juce::File& file)
 
     // importJsonPreset is tolerant: missing sub-objects (synth, engine, …)
     // are skipped, so a partial .t5seq only touches sequencer / arp / gen /
-    // phrase.
-    if (!processorRef.importJsonPreset(file.loadFileAsString()))
-        return false;
-
-    // The 10 Hz timer skips syncStepCount() while idle, so the grid would
-    // otherwise keep the old step count until PLAY — refresh it explicitly.
-    syncStepCount();
-    repaint();
-    return true;
+    // phrase. It publishes the grid it writes (markPatternReplaced), and the
+    // timer redraws the grid from that, with the audio idle too.
+    return processorRef.importJsonPreset(file.loadFileAsString());
 }
 
 void SequencerPanel::showHeaderOverflowMenu()
@@ -1198,8 +1192,8 @@ void SequencerPanel::timerCallback()
         repaint();
     }
 
-    // A step preset or an engine switch's transfer rewrites the pattern on the
-    // audio thread — possibly while stopped, and possibly after this timer
+    // A step preset, an engine switch's transfer or a preset import rewrites
+    // the pattern — possibly while stopped, and possibly after this timer
     // already laid out the switch into Step. Refresh the grid once when it
     // happens, BEFORE the idle early-return below, or a pattern replaced while
     // stopped would never appear.
@@ -1212,6 +1206,23 @@ void SequencerPanel::timerCallback()
             syncStepCount();   // step count + column visibility follow the new pattern
             repaint();         // redraw its notes
         }
+    }
+
+    // The step count set from outside the panel (Init, host automation, a
+    // load), also above the idle early-return: it is configuration, seen while
+    // stopped. Compare against the CLAMPED value, not the raw param. seqSteps'
+    // range is 1..64 but the grid caps at [2, MAX_COLS]; syncStepCount()
+    // clamps into that window and never writes the param back (its slider set
+    // is dontSend). A raw value outside the window (1, or 33..64 from a
+    // preset/DAW automation) would otherwise keep steps != numVisibleSteps
+    // permanently true, firing syncStepCount() (and its resized()) every
+    // 100 ms — an idle-CPU regression.
+    if (stepMode)
+    {
+        const int steps = static_cast<int>(processorRef.getValueTreeState()
+                              .getRawParameterValue(PID::seqSteps)->load());
+        if (juce::jlimit(2, MAX_COLS, steps) != numVisibleSteps)
+            syncStepCount();
     }
 
     // ── Step-record (double-click Step latch) ───────────────────────────────
@@ -1298,22 +1309,6 @@ void SequencerPanel::timerCallback()
         midiLedDisplayedOn = on;
         if (!midiLedBounds.isEmpty())
             repaint(midiLedBounds.getSmallestIntegerContainer());
-    }
-
-    // Sync step count if changed externally (step seq mode).
-    // Compare against the CLAMPED value, not the raw param. seqSteps' range is
-    // 1..64 but the grid caps at [2, MAX_COLS]; syncStepCount() clamps into that
-    // window and never writes the param back (its slider set is dontSend). A raw
-    // value outside the window (1, or 33..64 from a preset/DAW automation) would
-    // otherwise keep steps != numVisibleSteps permanently true, firing
-    // syncStepCount() (and its resized()) every 100 ms — an idle-CPU regression.
-    if (stepMode)
-    {
-        int steps = static_cast<int>(processorRef.getValueTreeState()
-                        .getRawParameterValue(PID::seqSteps)->load());
-        const int clamped = juce::jlimit(2, MAX_COLS, steps);
-        if (clamped != numVisibleSteps)
-            syncStepCount();
     }
 }
 
