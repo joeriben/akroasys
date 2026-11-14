@@ -987,10 +987,17 @@ struct LineCtx
     std::uint16_t mask = 0x0FFF;
     bool   lead = false, bass = false;
     const BarVariation* var = nullptr;
-    /** The line plays in the next bar. The Answer plays only in B units, so
-     *  before an A unit it has no next-bar onset to end its last note. */
-    bool   nextBarPlays = true;
+    /** The line plays only in B units (the Answer). */
+    bool   bUnitsOnly = false;
 };
+
+/** The line plays in `bar`. A bar it does not play in has neither an onset
+ *  to end its last note before it nor a head for a note before it to lead
+ *  to. */
+bool playsIn(const LineCtx& x, int bar)
+{
+    return !x.bUnitsOnly || isBUnit(*x.cfg, bar);
+}
 
 int barStepsFor(int spb, double barLenQ)
 {
@@ -1029,7 +1036,9 @@ int headNote(const Slot& sl, const Chord& ch, int tonic)
 }
 
 /** The next head after bar-step k of the bar (k = −1: from the bar start),
- *  rendered against the chord valid at its own position (§3.4). */
+ *  rendered against the chord valid at its own position (§3.4). Bars the
+ *  line does not play in have no head; −1 when none follows in the next two
+ *  bars. */
 int lookaheadHead(const LineCtx& x, int k, bool fromNextBar)
 {
     const Motif& m = *x.motif;
@@ -1050,6 +1059,7 @@ int lookaheadHead(const LineCtx& x, int k, bool fromNextBar)
     for (int ahead = 1; ahead <= 2; ++ahead)
     {
         const int nb = x.bar + ahead;
+        if (!playsIn(x, nb)) continue;
         const int mb = floorMod(nb, nm.len);
         const int steps = barStepsFor(nm.stepsPerBar, x.barLenQ);
         const Chord ch = chordAt(x, nb);
@@ -1286,7 +1296,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
  *  A line that does not play in the next bar has no onset there. */
 void nextBarOnset(const LineCtx& x, double& onQ, bool& step, bool& head)
 {
-    if (!x.nextBarPlays)
+    if (!playsIn(x, x.bar + 1))
     {
         onQ = std::numeric_limits<double>::infinity();
         step = head = false;
@@ -1497,7 +1507,7 @@ void renderBar(const RenderInput& in, BarRender& out)
             a.tonic = tonicNote(partAnchor(m.part) + octaveShift, cfg.scaleRoot);
             a.center = a.tonic + 6;
             a.var = nullptr;
-            a.nextBarPlays = isBUnit(cfg, in.bar + 1);
+            a.bUnitsOnly = true;
             int aP = chordRootNote(out.chord, a.tonic), aPP = aP;
             OnsetList al;
             collectLine(a, aP, aPP, al, nullptr);

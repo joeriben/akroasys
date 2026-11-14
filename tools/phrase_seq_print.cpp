@@ -2489,6 +2489,101 @@ int main(int argc, char** argv)
         check(errs == 0, "host ahead: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 27. The Answer leads to a head only in a bar where it plays\n");
+    {
+        // The Answer plays only in B units. A note after its bar's last head
+        // resolves toward the next head (§3.2: an approach note targets it);
+        // a bar the Answer does not play in has none, so the target is the
+        // head where it plays next, or none (renderSlot then resolves against
+        // the previous note). The crafted Answer motif has, in each of its two
+        // bars, a head on step 0 and an Approach-up on step 2, the bar's last
+        // onset, so that note resolves toward a head of a later bar. Changing
+        // a head the Answer never plays must leave it as it is.
+        auto answerOf = [](Member head0, Member head1) {
+            Motif a;
+            a.len = 2; a.stepsPerBar = 16; a.pulses = 2; a.rotation = 0; a.part = Part::Riff;
+            for (int b = 0; b < 2; ++b)
+            {
+                Slot& h = a.slots[static_cast<size_t>(b * 16)];
+                h.fn = Fn::ChordTone;
+                h.member = b == 0 ? head0 : head1;
+                a.slots[static_cast<size_t>(b * 16 + 2)].fn = Fn::ApproachUp;
+            }
+            return a;
+        };
+        auto cfgOf = [](Form form, int bars, std::array<int, 4> chords) {
+            Config c = base();
+            c.part = Part::Riff;
+            c.harm = Harm::Chords;
+            c.chordDegrees = chords;
+            c.chordRateBars = 1;
+            c.form = form;
+            c.phraseBars = bars;
+            c.layer = Layer::Answer;
+            c.variation = 0.0f; c.slide = 0.0f; c.shuffle = 0.0f;
+            return c;
+        };
+        // The Answer's notes in `bar` as (onset, note).
+        auto answerNotes = [](const Config& c, const Motif& answer, int bar) {
+            const Motif main = generateMotif(7, 0, c);
+            RenderInput in;
+            in.cfg = &c; in.motif = &main; in.nextMotif = &main; in.answer = &answer;
+            in.bar = bar; in.barLenQ = 4.0;
+            BarRender r;
+            renderBar(in, r);
+            std::vector<std::pair<double, int>> v;
+            for (int i = 0; i < r.count; ++i)
+                if (r.events[static_cast<size_t>(i)].line == Line::Answer)
+                    v.emplace_back(r.events[static_cast<size_t>(i)].onQ, r.events[static_cast<size_t>(i)].note);
+            return v;
+        };
+        auto show = [](const std::vector<std::pair<double, int>>& v) {
+            std::string s;
+            for (const auto& [q, n] : v) s += " " + std::to_string(n) + "@" + std::to_string(q).substr(0, 4);
+            return s.empty() ? std::string(" none") : s;
+        };
+        const std::array<int, 4> chords { 1, 6, 4, 5 };
+
+        // AABA, 8 bars: B units are bars 4-5. Bar 4 leads into bar 5, where
+        // the Answer plays (the control: its approach follows bar 5's head);
+        // bar 5 into bars 6-7, both A.
+        {
+            const Config c = cfgOf(Form::AABA, 8, chords);
+            const auto into5a = answerNotes(c, answerOf(Root, Root), 4);
+            const auto into5b = answerNotes(c, answerOf(Root, Fifth), 4);
+            check(into5a.size() == 2 && into5a != into5b,
+                  "answer: AABA bar 4's approach follows bar 5's head (" + show(into5a) + " /" + show(into5b) + " )");
+            const auto into6a = answerNotes(c, answerOf(Root, Root), 5);
+            const auto into6b = answerNotes(c, answerOf(Fifth, Root), 5);
+            check(into6a.size() == 2 && into6a == into6b,
+                  "answer: AABA bar 5's approach follows no head of the A unit after it (" + show(into6a) + " /"
+                      + show(into6b) + " )");
+        }
+        // AAAB, 4 bars: bar 3 is the B unit; the next two bars are A.
+        {
+            const Config c = cfgOf(Form::AAAB, 4, chords);
+            const auto a = answerNotes(c, answerOf(Root, Root), 3);
+            const auto b = answerNotes(c, answerOf(Fifth, Root), 3);
+            check(a.size() == 2 && a == b,
+                  "answer: AAAB bar 3's approach follows no head of the next phrase's A units (" + show(a) + " /"
+                      + show(b) + " )");
+        }
+        // ABAB, 4 bars: B units are bars 1 and 3. Bar 1 leads across bar 2
+        // (A) to bar 3's head: bar 2's head leaves it as it is, bar 3's chord
+        // changes it.
+        {
+            const Config c = cfgOf(Form::ABAB, 4, chords);
+            const auto a = answerNotes(c, answerOf(Root, Root), 1);
+            const auto b = answerNotes(c, answerOf(Fifth, Root), 1);
+            check(a.size() == 2 && a == b,
+                  "answer: ABAB bar 1's approach follows no head of bar 2, an A unit (" + show(a) + " /" + show(b) + " )");
+            const Config c2 = cfgOf(Form::ABAB, 4, { 1, 6, 4, 2 });
+            const auto d = answerNotes(c2, answerOf(Root, Root), 1);
+            check(a.size() == 2 && a != d,
+                  "answer: ABAB bar 1's approach follows bar 3's head, chord V / ii (" + show(a) + " /" + show(d) + " )");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
