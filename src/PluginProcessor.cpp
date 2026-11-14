@@ -1214,7 +1214,9 @@ void T5ynthProcessor::parameterChanged(const juce::String& parameterID, float ne
 
 void T5ynthProcessor::beginBulkParamLoad()
 {
-    // Message thread (PresetFormat::loadFromFile, around parameters.replaceState).
+    // Message thread: BulkParamLoadGuard (importJsonPreset, setStateInformation)
+    // and MainPanel::applyLoadedPreset. A legacy XML preset's replaceState
+    // (importLegacyXmlPreset) runs before applyLoadedPreset and is under neither.
     eventLogSuppressParamEvents_.store(true, std::memory_order_relaxed);
 }
 
