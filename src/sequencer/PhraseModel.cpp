@@ -1569,6 +1569,8 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     // the run left them resolved against the step before it, with a run note
     // sounding in between (a Repeat repeated that step, not the run note).
     std::array<int, 4> runNote {};
+    std::array<int, 4> runPrev {};   // the note that sounds before each, for the view
+    int runTarget = -1, runDir = 0;
     bool runSet = false;
     int runPlayed = 0;   // run notes the line has gone on from
     auto setRun = [&] {
@@ -1576,18 +1578,33 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         if (sh.fillN == 0) return;
         // No head ahead: into the note before the run.
         const int T = lookaheadHead(x, ahead, steps, true);
-        const int target = T >= 0 ? T : pBeforeLastBeat >= 0 ? pBeforeLastBeat : chordRootNote(ch, x.tonic);
-        const int from = pBeforeLastBeat >= 0 ? pBeforeLastBeat : target;
-        const int dir = target >= from ? -1 : 1;   // counted back from the target
+        runTarget = T >= 0 ? T : pBeforeLastBeat >= 0 ? pBeforeLastBeat : chordRootNote(ch, x.tonic);
+        const int from = pBeforeLastBeat >= 0 ? pBeforeLastBeat : runTarget;
+        runDir = runTarget >= from ? -1 : 1;   // counted back from the target
         for (int i = 0; i < sh.fillN; ++i)
-            runNote[static_cast<size_t>(i)] = scaleSteps(target, dir * (4 - sh.fillJ[static_cast<size_t>(i)]), x.mask);
+            runNote[static_cast<size_t>(i)] = scaleSteps(runTarget, runDir * (4 - sh.fillJ[static_cast<size_t>(i)]), x.mask);
     };
     auto playRunBefore = [&](double q) {
         for (; runPlayed < sh.fillN && sh.fillQ[static_cast<size_t>(runPlayed)] < q - kEps; ++runPlayed)
         {
+            runPrev[static_cast<size_t>(runPlayed)] = P;
             PP = P;
             P = runNote[static_cast<size_t>(runPlayed)];
         }
+    };
+    // What a run note is in the line, for the view: a passing note where it
+    // is the scale step from the note before it towards the target, strictly
+    // between the two (§3.4's Passing); otherwise a note of the approach run
+    // into the target, from below or above. Shown as p throughout, a run
+    // note the line leaps to claimed a step it does not take.
+    auto runFn = [&](int i) {
+        const int prev = runPrev[static_cast<size_t>(i)], n = runNote[static_cast<size_t>(i)];
+        if (prev >= 0)
+        {
+            const int d = runTarget > prev ? 1 : -1;
+            if (n == scaleStep(prev, d, x.mask) && (d > 0 ? n < runTarget : n > runTarget)) return Fn::Passing;
+        }
+        return runDir < 0 ? Fn::ApproachUp : Fn::ApproachDown;
     };
     for (int k = 0; k < steps; ++k)
     {
@@ -1708,8 +1725,11 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         PP = P; P = note;
     }
 
-    // The run's notes where no step of the bar lies in its last beat.
+    // The run's notes where no step of the bar lies in its last beat, and
+    // the line on through those after its last step (P and PP are handed to
+    // the next bar from the sorted onsets below).
     if (!runSet) setRun();
+    playRunBefore(std::numeric_limits<double>::infinity());
     for (int i = 0; i < sh.fillN; ++i)
     {
         const double q = sh.fillQ[static_cast<size_t>(i)];
@@ -1748,7 +1768,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
                 StepView& v = view->view[static_cast<size_t>(k)];
                 v = StepView {};
                 v.note = f.note;
-                v.fn = Fn::Passing;
+                v.fn = runFn(i);
                 v.octave = f.octShift / 12;
             }
         }

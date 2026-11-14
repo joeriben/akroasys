@@ -3458,14 +3458,17 @@ int main(int argc, char** argv)
         // functions and heads; a lifted last beat (not Bass) is read an octave
         // down, and Bass's octave pulse is no head and leads into none (the
         // pulses passed are counted where the motif has a head). Every
-        // approach note whose next sounding head lies within two bars lies
+        // approach step whose next sounding head lies within two bars lies
         // where its function puts it from that head; every Fill note (the
         // played events, by velocity) lies its distance from the next bar's
-        // first sounding head on the scale. All forms, ABAB weighted;
+        // first sounding head on the scale. A Fill note on a step (one the
+        // motif leaves a rest: nothing else sounds there) is no approach
+        // step: the view shows it as the run it approaches the head with,
+        // and the Fill check places it. All forms, ABAB weighted;
         // phrases of 4, 8 and 16 bars; Variation 0, 2/5, 3/5 and 1.
         std::mt19937 rng(32);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
-        struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, motifHead = false, octave = false; };
+        struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, motifHead = false, octave = false, fill = false; };
         using Bar = std::array<Note, kMaxBarSteps>;
         using Line = std::vector<Bar>;
         constexpr int kBars = 40;
@@ -3517,10 +3520,13 @@ int main(int argc, char** argv)
                 Bar& bar = line[static_cast<size_t>(b)];
                 bar = Bar {};
                 for (int k = 0; k < n; ++k)
+                {
+                    const int s2 = floorMod(b, m.len) * m.stepsPerBar + k;
                     bar[static_cast<size_t>(k)] = { v[static_cast<size_t>(k)].note, v[static_cast<size_t>(k)].fn,
-                                                    v[static_cast<size_t>(k)].head,
-                                                    heads[static_cast<size_t>(floorMod(b, m.len) * m.stepsPerBar + k)],
-                                                    false };
+                                                    v[static_cast<size_t>(k)].head, heads[static_cast<size_t>(s2)], false,
+                                                    v[static_cast<size_t>(k)].note >= 0
+                                                        && m.slots[static_cast<size_t>(s2)].fn == Fn::Rest };
+                }
             });
         };
 
@@ -3607,7 +3613,7 @@ int main(int argc, char** argv)
                 for (int k = 0; k < kMaxBarSteps; ++k)
                 {
                     const Note& a = line[static_cast<size_t>(b)][static_cast<size_t>(k)];
-                    if (a.note < 0 || !isApproachFn(a.fn)) continue;
+                    if (a.note < 0 || a.fill || !isApproachFn(a.fn)) continue;
                     if (4.0 * b + k * stepQ < fromQ + 1.0e-6) continue;
                     const Target h = nextHead(line, b, k);
                     if (h.note < 0) continue;
@@ -5800,13 +5806,20 @@ int main(int argc, char** argv)
         // of the next two bars, rendered here. Rendered after the steps,
         // the run left a step after a run note resolved against the step
         // before it.
+        // B: a run note on a step's grid position is shown as what it is
+        // there: p where it is the scale step from the note before it
+        // towards the run's head (the next bars' first, else the note
+        // before the last beat), strictly between the two; otherwise the
+        // approach into that head, from below or above. Shown p throughout,
+        // the run's first note claimed a step from a note it leapt from.
         std::mt19937 rng(43);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         static const int spbs[] = { 4, 8, 16 };
         const float kTailVel = 85.0f / 127.0f * 0.9f, kFillVel = 72.0f / 127.0f;
         int bars = 0, checked = 0, afterRun = 0, off = 0;
         int afterRunRepeat = 0, afterRunNeighbour = 0, afterRunPassing = 0, afterRunOctave = 0, afterRunReversal = 0;
-        std::string why;
+        int runShown = 0, offB = 0, runPasses = 0, runRises = 0, runFalls = 0, runAfterStep = 0, runNoHead = 0;
+        std::string why, whyB;
         for (int t = 0; t < 30000; ++t)
         {
             Config c = base();
@@ -5893,6 +5906,17 @@ int main(int argc, char** argv)
                 if (e.strand == -1 && e.line == Line::Main && std::abs(e.vel - kTailVel) > 1e-4) line.push_back(&e);
             }
             std::stable_sort(line.begin(), line.end(), [](const Event* a, const Event* b) { return a->onQ < b->onQ; });
+            // The run's head: the next bars' first, else the note before the
+            // last beat.
+            int runHead = firstHead(next[0], in.bar + 1, 0);
+            if (runHead < 0) runHead = firstHead(next[1], in.bar + 2, 0);
+            if (runHead < 0)
+            {
+                ++runNoHead;
+                runHead = in.prevNote;
+                for (const Event* e : line)
+                    if (e->onQ < lastBeatQ - 1e-9) runHead = unlifted(r, in.bar, e->onQ, e->note);
+            }
             int P = in.prevNote, PP = in.prevPrevNote;
             bool pIsRun = false;
             for (const Event* e : line)
@@ -5900,6 +5924,28 @@ int main(int argc, char** argv)
                 const int u = unlifted(r, in.bar, e->onQ, e->note);
                 if (std::abs(e->vel - kFillVel) < 1e-4)
                 {
+                    const int k = static_cast<int>(std::lround(e->onQ / stepQ));
+                    if (std::abs(k * stepQ - e->onQ) < 1e-9 && k < r.viewSteps)
+                    {
+                        const StepView& v = r.view[static_cast<size_t>(k)];
+                        const int d = runHead > P ? 1 : -1;
+                        const bool passes = P != runHead && u == scaleStep(P, d, mask) && (d > 0 ? u < runHead : u > runHead);
+                        const Fn wantFn = passes ? Fn::Passing : u < runHead ? Fn::ApproachUp : Fn::ApproachDown;
+                        ++runShown;
+                        runPasses += passes;
+                        runRises += wantFn == Fn::ApproachUp;
+                        runFalls += wantFn == Fn::ApproachDown;
+                        runAfterStep += !pIsRun;
+                        if ((v.note != e->note || v.fn != wantFn) && offB++ < 4)
+                        {
+                            StepView want = v;
+                            want.fn = wantFn;
+                            whyB += " | t" + std::to_string(t) + " bar " + std::to_string(in.bar) + " k" + std::to_string(k)
+                                  + ": run note " + std::to_string(u) + " after " + std::to_string(P) + (pIsRun ? " (a run note)" : "")
+                                  + " into " + std::to_string(runHead) + ": shown " + std::to_string(v.note) + " " + stepGlyphText(v)
+                                  + ", want " + std::to_string(e->note) + " " + stepGlyphText(want);
+                        }
+                    }
                     PP = P; P = u; pIsRun = true;
                     continue;
                 }
@@ -5973,6 +6019,12 @@ int main(int argc, char** argv)
               "coverage: " + std::to_string(afterRun) + " after a run note: " + std::to_string(afterRunRepeat) + " Repeat, "
                   + std::to_string(afterRunNeighbour) + " Neighbour, " + std::to_string(afterRunPassing) + " Passing, "
                   + std::to_string(afterRunOctave) + " Octave, " + std::to_string(afterRunReversal) + " reversals");
+        check(offB == 0, "B. " + std::to_string(runShown) + " run notes on a step are shown p where they pass into the head, "
+                         "an approach otherwise (" + std::to_string(offB) + " off)" + whyB);
+        check(runPasses > 0 && runRises > 0 && runFalls > 0 && runAfterStep > 0 && runNoHead > 0,
+              "B. coverage: " + std::to_string(runPasses) + " p, " + std::to_string(runRises) + " rising, "
+                  + std::to_string(runFalls) + " falling, " + std::to_string(runAfterStep) + " after a step, "
+                  + std::to_string(runNoHead) + " bars without a head ahead");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
