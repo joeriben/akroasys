@@ -342,6 +342,12 @@ enum class ToneLabel : std::uint8_t
 struct StepView
 {
     int  note   = -1;      // −1 = rest
+    /** The function the note has as it plays. A Fill run note on a step is
+     *  Passing where it is the scale step from the note before it towards
+     *  the run's head, strictly between the two; otherwise ApproachUp or
+     *  ApproachDown for the side of the head the run comes from, at any
+     *  distance from it (the run counts up to 4 scale steps back from its
+     *  head), not only the adjacent step. */
     Fn   fn     = Fn::Rest;
     /** The chord tone the step sounds, its name in the bar's chord, and its
      *  octave against the part's register: the member the chord gives
