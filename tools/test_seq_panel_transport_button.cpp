@@ -18,6 +18,10 @@
 // only; in Step the column the STOP puts out repaints on the same tick.
 //   B. A panel built while the transport runs (an editor opened during
 //      playback) reads STOP after its first tick, and a click stops it.
+//   C. A host writes seq_running as exactly 0.5: the raw value the label and
+//      the processor read rounds it to on, and a click on the STOP it shows
+//      stops the transport (the click read the normalised value, took 0.5
+//      for stopped and started it again).
 //
 // Build: the processor-level recipe of tools/test_seq_engine_idle.cpp
 // (libakroasys_SharedCode.a + libT5ynthData.a). Exits non-zero on failure.
@@ -171,6 +175,30 @@ void builtWhileRunning()
     tick();
     check("and the next tick reads PLAY", shows(*button, false));
 }
+/** C: a host writes seq_running as exactly 0.5 (normalised). The raw value
+ *  rounds it to on, so the transport runs and the label reads STOP; a
+ *  click has to stop it, as the label says. */
+void halfWrittenStopsOnClick()
+{
+    std::printf("C. seq_running written as 0.5 by a host: a click stops it\n");
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    setPlain(proc, PID::seqEngine, static_cast<float>(SeqEngine::Step));
+    blocks(proc, 4);
+    SequencerPanel panel(proc);
+    panel.setSize(864, 208);
+    auto* button = transportButton(panel);
+    check("the transport button is found", button != nullptr);
+    if (! button) return;
+    proc.getValueTreeState().getParameter(PID::seqRunning)->setValueNotifyingHost(0.5f);
+    blocks(proc, 8);
+    tick();
+    check("the transport runs, and the button reads STOP", running(proc) && shows(*button, true));
+    button->onClick();
+    check("a click on STOP stops the transport", ! running(proc));
+    tick();
+    check("and the next tick reads PLAY", shows(*button, false));
+}
 } // namespace
 
 int main()
@@ -182,6 +210,7 @@ int main()
     paramStopThenIdle(SeqEngine::Step, "Step");
     paramStopThenIdle(SeqEngine::Phrase, "Phrase");
     builtWhileRunning();
+    halfWrittenStopsOnClick();
 
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::printf(failures == 0 ? "ALL PASS\n" : "%d FAIL\n", failures);

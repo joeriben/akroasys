@@ -524,7 +524,11 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     transportBtn.onClick = [this] {
         auto* par = processorRef.getValueTreeState().getParameter(PID::seqRunning);
         if (!par) return;
-        bool playing = par->getValue() > 0.5f;
+        // The raw value, as the label (timerCallback) and the processor read
+        // it: the normalised getValue() of a host write of exactly 0.5 reads
+        // stopped while the transport runs, and the click started it again.
+        const bool playing = processorRef.getValueTreeState()
+            .getRawParameterValue(PID::seqRunning)->load() > 0.5f;
         par->setValueNotifyingHost(playing ? 0.0f : 1.0f);
         if (playing) showCurrentStep(-1);
     };
