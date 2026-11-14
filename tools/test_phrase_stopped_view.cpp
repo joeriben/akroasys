@@ -24,7 +24,18 @@
 //
 // A view rendered while stopped is not heard: a motif diced while stopped
 // keeps its open origin and Keep does nothing with it, and a second Dice
-// still anchors where playback next starts.
+// still anchors where playback next starts; a start, from a count-in or from
+// the middle of the song, resolves that origin to the phrase it enters.
+//
+// A kept lead-in is refitted with the parameters: a Part change made while
+// stopped must reach the bar through the lead-in as a load of the same state
+// renders it. The lead-in reaches bar 0 only through an embellishment before
+// the first head, and a scale change does not refit at all, so the case uses
+// rotation 3, changes Part and searches dice for one whose lead-in shows
+// (asserted: a load without the lead-in must differ).
+//
+// The Phrase -> Step transfer asks the sequencer whether it runs, not PLAY: a
+// Dice, PLAY and the switch in one block copy the stopped view.
 //
 // Build: the processor-level recipe of tools/test_preset_missing_key_defaults.cpp
 // (libakroasys_SharedCode.a + libT5ynthData.a). Exits non-zero on failure.
@@ -329,6 +340,99 @@ int main()
     }
 
     {
+        // The stopped view shows a motif diced while stopped as heard at the
+        // first bar's phrase, but the motif keeps its open origin: a host
+        // start resolves it to the phrase the start enters, a count-in's
+        // included.
+        for (const double startPpq : { -32.0, 32.0 })
+        {
+            const int expected = startPpq < 0.0 ? -1 : 1;   // phrases of 8 bars
+            std::printf("A host start at quarter %.0f after a Dice while idle\n", startPpq);
+            Rig r;
+            const bool idleBefore = r.waitIdle();
+            r.proc.phraseDice();
+            r.blocks(3);
+            const int stoppedOrigin = r.proc.getPhraseSequencer().getStoredMotif().origin;
+            r.head.playing = true;
+            r.head.ppq = startPpq;
+            r.set(PID::seqRunning, 1.0f);
+            r.blocks(2);
+            const int heardOrigin = r.proc.getPhraseSequencer().getStoredMotif().origin;
+            std::printf("    origin stopped %d, after the start %d (expected %d)\n",
+                        stoppedOrigin, heardOrigin, expected);
+            check("  the dice was made in deep idle", idleBefore);
+            check("  the rendered motif's origin stays open",
+                  stoppedOrigin == PhraseModel::kOriginAtNextEntry);
+            check("  the start resolves it to the phrase the start enters", heardOrigin == expected);
+        }
+    }
+    {
+        // A kept motif carries the motif its phrase was entered from as its
+        // lead-in, fitted to the parameters as they are now. Changed while
+        // stopped, the view refits it: the bar the view shows is the bar a
+        // load of the same state shows. The lead-in reaches the bar only
+        // through an embellishment before its first head, and only a change
+        // of Part or of the rhythm refits it at all (fitMotif ignores the
+        // scale), so the case dices until a load of the same state without
+        // the lead-in shows another bar, or it would prove nothing.
+        std::printf("Keep with a lead-in, then Part while idle\n");
+        bool hasLeadIn = true, idleBefore = true, idleAgain = true, viewIsLoaded = true;
+        int reached = 0, attempts = 0;
+        for (; attempts < 12 && reached == 0; ++attempts)
+        {
+            Rig r;
+            r.set(PID::phrRotation, 3.0f);   // the bar opens off a head
+            // Diced in a host's count-in (phrase -1 of 8 bars), played into
+            // phrase 0 and kept there: origin 0, phrase -1's motif the lead-in.
+            r.head.playing = true;
+            r.head.ppq = -32.0;
+            r.set(PID::seqRunning, 1.0f);
+            r.blocks(2);
+            r.proc.phraseDice();
+            while (r.head.ppq < 2.0) r.blocks(1);
+            r.proc.phraseKeep();
+            r.blocks(2);
+            r.set(PID::seqRunning, 0.0f);
+            r.head.playing = false;
+            r.blocks(2);
+            const auto kept = r.proc.getPhraseSequencer().getStoredMotif();
+            hasLeadIn = hasLeadIn && kept.leadInKept && kept.origin == 0 && kept.leadInPhrase == 0;
+            idleBefore = r.waitIdle() && idleBefore;
+            r.set(PID::phrPart, PhrPart::Lead);
+            r.blocks(3);
+            const Shown view = shown(r.proc);
+            idleAgain = r.waitIdle() && idleAgain;
+
+            const juce::String json = r.proc.exportJsonPreset();
+            auto loadedView = [](const juce::String& preset) {
+                Rig fresh;
+                fresh.proc.importJsonPreset(preset);
+                fresh.blocks(3);
+                return shown(fresh.proc);
+            };
+            const Shown loaded = loadedView(json);
+            juce::var parsed = juce::JSON::parse(json);
+            bool stripped = false;
+            if (auto* ph = parsed.getProperty("phraseSeq", {}).getDynamicObject())
+                if (auto* mo = ph->getProperty("motif").getDynamicObject())
+                {
+                    stripped = mo->hasProperty("leadIn");
+                    mo->removeProperty("leadIn");
+                }
+            const Shown noLeadIn = loadedView(juce::JSON::toString(parsed));
+            if (stripped && ! same(noLeadIn, loaded)) ++reached;
+            viewIsLoaded = viewIsLoaded && same(view, loaded);
+            std::printf("    view       %s\n    loaded     %s\n    no lead-in %s\n",
+                        str(view).c_str(), str(loaded).c_str(), str(noLeadIn).c_str());
+        }
+        std::printf("    dice: %d\n", attempts);
+        check("  the kept motif carries a lead-in into phrase 0", hasLeadIn);
+        check("  the change was made in deep idle", idleBefore);
+        check("  the instrument idles again", idleAgain);
+        check("  the lead-in reaches the bar (a load without it differs)", reached > 0);
+        check("  the view is the bar a load of the same state shows", viewIsLoaded);
+    }
+    {
         // A change and Phrase -> Step in one block: the phrase section, which
         // brings the stopped view up to date, does not run in a block that
         // switches away from Phrase, so the switch must take the change into
@@ -372,6 +476,11 @@ int main()
                               [](Rig& r) { r.set(PID::phrPart, PhrPart::Lead); });
         switchInBlockOfChange("3/4 and Phrase -> Step in one block, idle", true,
                               [](Rig& r) { r.head.num = 3; });
+        // PLAY in the same block: the sequencer has not started yet, the
+        // view it shows is still the stopped one, and the switch copies it
+        // with the change (the transfer asks the sequencer, not PLAY).
+        switchInBlockOfChange("Dice, PLAY and Phrase -> Step in one block, idle", true,
+                              [](Rig& r) { r.proc.phraseDice(); r.set(PID::seqRunning, 1.0f); });
     }
 
     std::printf("failures=%d\n", failures);
