@@ -405,7 +405,9 @@ std::string chordLabelText(const ChordLabel& l)
     // (double harmonic iii, Todi VII): named 6 as the strip names it, Em6.
     // Over a diminished triad that 9 is the °7.
     const bool sixth = l.seventh == 9 && !tr.dim;
-    // As in chordNameText, 5 names an open fifth with nothing above it.
+    // 5 names an open fifth, as in chordNameText; under Ext = 7 a 7 above it
+    // is implied as above any bare numeral (the strip names C7no3). A 6 is
+    // named in the 5's place: I6no3.
     const bool power = tr.power && !sixth;
     if (tr.dim)                  t += kDegree;
     else if (tr.aug)             t += "+";

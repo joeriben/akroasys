@@ -14,10 +14,11 @@
 //      segment only; a parameter changed elsewhere moves the segments; each
 //      combo and bar writes its own parameter.
 //   D. The chord slots follow the scale, Ext and Harm. They show the key's
-//      Roman numerals (no7 under Ext 7 where the scale has no seventh above
-//      the degree) and are relabelled at once when the scale or Ext changes
-//      on the message thread. There the attachment updates its combo, and the combo
-//      calls onChange, before the APVTS stores the new value (JUCE calls a
+//      Roman numerals (under Ext 7: 6 where the 7 is a major sixth, no7
+//      where the scale has no seventh above the degree) and are relabelled
+//      at once when the scale or Ext changes on the message thread. There
+//      the attachment updates its combo, and the combo calls onChange,
+//      before the APVTS stores the new value (JUCE calls a
 //      parameter's listeners in reverse order of registration), so a relabel
 //      that read the parameter would show the previous scale. The slots and
 //      Rate are enabled only for Harm = Chords in a scale with chords; a
