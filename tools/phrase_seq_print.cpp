@@ -2213,7 +2213,7 @@ int main(int argc, char** argv)
                             const double reached = beat + side;
                             const double beatQ = 4.0 / m.den;
                             const double barLenQ = 4.0 * m.num / m.den;
-                            const double next = std::ceil(reached / beatQ - 1.0e-6) * beatQ;
+                            const double next = std::ceil(reached / beatQ) * beatQ;
                             const double dq = block * kBpm / (60.0 * kSr);
                             // The runs end apart by the jitter: compare up to a point between
                             // two steps (0.25 q), a bar and more after where playback reached.
@@ -2582,6 +2582,126 @@ int main(int argc, char** argv)
             check(a.size() == 2 && a != d,
                   "answer: ABAB bar 1's approach follows bar 3's head, chord V / ii (" + show(a) + " /" + show(d) + " )");
         }
+    }
+
+    std::printf("\n== 28. A Keys chord latched after a block that ended a hair past a beat sounds from the next beat\n");
+    {
+        // A host's block starts land a hair off the beats: it accumulates its
+        // position block by block, or derives it from a sample count while the
+        // sequencer adds the block length to it. The block before a latch can
+        // end a hair past a beat, with that beat's onset played. The chord
+        // takes effect at the first beat whose onset has not played: the first
+        // note it changes is the first onset from that beat on (a bar longer
+        // than 16 sixteenths, 3/2, leaves its last beat empty), and every note
+        // before it is the run's without the change. The oracle takes what
+        // played from the notes emitted before the latch, not from the
+        // sequencer's arithmetic: every step of a bar's 16 plays (16 pulses),
+        // so that beat is the first after the last onset emitted.
+        Config c = base();
+        c.harm = Harm::Keys;
+        c.form = Form::Loop;
+        c.pulses = 16;
+        c.variation = 0.0f;
+        c.slide = 0.0f;
+        c.layer = Layer::Off;
+        int wrong = 0, errs = 0, cases = 0, beatPlayed = 0, beatAhead = 0;
+        std::string why;
+        struct Meter { int num, den; };
+        for (bool accumulated : { true, false })
+            for (const Meter& m : { Meter { 4, 4 }, Meter { 6, 8 }, Meter { 3, 2 } })
+                for (int block : { 32, 64, 128, 256, 512 })
+                {
+                    const double beatQ = 4.0 / m.den;
+                    const int stepsPerBeat = static_cast<int>(beatQ / 0.25);
+                    const double dq = block * kBpm / (60.0 * kSr);
+                    const int afterBlocks = static_cast<int>(std::ceil((2.0 * beatQ + 0.5) / dq));
+                    std::vector<double> starts;
+                    for (long n = 0; starts.empty() || starts.back() < 24.0 + 2.0 * beatQ + 1.0; ++n)
+                        starts.push_back(accumulated ? (n == 0 ? 0.0 : starts.back() + dq)
+                                                     : static_cast<double>(n * block) * kBpm / (60.0 * kSr));
+                    struct On { int block, step, note; };
+                    // Main-line onsets of the blocks before `end`, the chord
+                    // changing before block `latchAt` (none when negative).
+                    auto run = [&](int latchAt, int end, std::vector<On>& ons) {
+                        T5ynthPhraseSequencer seq;
+                        seq.prepare(kSr);
+                        seq.setTimeSignature(m.num, m.den);
+                        seq.setConfig(c);
+                        seq.start();
+                        auto latch = [&](std::initializer_list<int> notes) {
+                            seq.clearKeys();
+                            for (int n : notes) seq.keyOn(n);
+                            for (int n : notes) seq.keyOff(n);
+                        };
+                        latch({ 45, 48, 52 });   // A minor
+                        std::vector<VoiceEvent> out;
+                        out.reserve(1024);
+                        VoiceSim sim;
+                        for (int b = 0; b < end; ++b)
+                        {
+                            if (b == latchAt) latch({ 50, 53, 57 });   // D minor
+                            out.clear();
+                            seq.processBlock(block, kBpm, true, starts[static_cast<size_t>(b)], out);
+                            std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& x, const VoiceEvent& y) {
+                                if (x.sampleOffset != y.sampleOffset) return x.sampleOffset < y.sampleOffset;
+                                return x.type == VoiceEvent::Type::NoteOff && y.type == VoiceEvent::Type::NoteOn;
+                            });
+                            for (const auto& e : out)
+                            {
+                                if (e.type == VoiceEvent::Type::NoteOn) sim.on(e); else sim.off(e);
+                                if (e.type == VoiceEvent::Type::NoteOn && e.strandId == -1)
+                                {
+                                    const double q = starts[static_cast<size_t>(b)] + e.sampleOffset * kOneSampleQ;
+                                    ons.push_back({ b, static_cast<int>(std::lround(q / 0.25)), e.note });
+                                }
+                            }
+                        }
+                        out.clear();
+                        seq.allNotesOff(out, 0);
+                        for (const auto& e : out) sim.off(e);
+                        return static_cast<int>(sim.live.size()) + sim.orphanOffs + sim.badGlides;
+                    };
+                    std::vector<On> still;
+                    errs += run(-1, static_cast<int>(starts.size()), still);
+                    int taken = 0;
+                    for (size_t n = 1; n + static_cast<size_t>(afterBlocks) < starts.size() && taken < 6; ++n)
+                    {
+                        const double beat = std::round(starts[n] / beatQ) * beatQ;
+                        if (starts[n] < 1.0 || std::abs(starts[n] - beat) > 1.0e-6) continue;
+                        ++taken;
+                        ++cases;
+                        const int latchAt = static_cast<int>(n);
+                        std::vector<On> got;
+                        errs += run(latchAt, latchAt + afterBlocks, got);
+                        int lastStep = -1;
+                        for (const On& o : got)
+                            if (o.block < latchAt) lastStep = std::max(lastStep, o.step);
+                        const int beatStep = (lastStep / stepsPerBeat + 1) * stepsPerBeat;
+                        int expectStep = -1;
+                        for (size_t i = 0; expectStep < 0 && i < still.size(); ++i)
+                            if (still[i].step >= beatStep) expectStep = still[i].step;
+                        (lastStep >= static_cast<int>(std::lround(beat / 0.25)) ? beatPlayed : beatAhead)++;
+                        int firstStep = -1;
+                        for (size_t i = 0; firstStep < 0 && i < got.size() && i < still.size(); ++i)
+                            if (got[i].step != still[i].step || got[i].note != still[i].note) firstStep = got[i].step;
+                        if (firstStep != expectStep && wrong++ < 3)
+                        {
+                            char tag[200];
+                            std::snprintf(tag, sizeof tag, "%s%s host, %d/%d, %d-sample blocks, latch before q %.17g:"
+                                          " first changed note at q %g, beat q %g, its first onset q %g",
+                                          why.empty() ? "" : "; ", accumulated ? "accumulating" : "sample-count",
+                                          m.num, m.den, block, starts[n], firstStep * 0.25, beatStep * 0.25,
+                                          expectStep * 0.25);
+                            why += tag;
+                        }
+                    }
+                }
+        check(beatPlayed > 0 && beatAhead > 0,
+              "Keys beat a hair off the block: both kinds occur, the block-start beat played before the latch ("
+                  + std::to_string(beatPlayed) + ") and not (" + std::to_string(beatAhead) + ")");
+        check(wrong == 0, "Keys beat a hair off the block: the chord's first note is the first unplayed beat's ("
+                              + std::to_string(wrong) + " of " + std::to_string(cases) + " elsewhere) " + why);
+        check(errs == 0, "Keys beat a hair off the block: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

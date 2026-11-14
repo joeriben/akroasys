@@ -584,12 +584,15 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         {
             if (cfg.harm == Harm::Keys)
             {
-                // The next beat from where playback has reached, not from
-                // where the host reports this block: a report a little off
-                // (under kJumpQ) must not move the change to another beat.
-                const double from = std::max(resumeQ, barStartQ);
-                const double k = std::ceil((from - barStartQ) / beatQ - 1.0e-6);
-                tBeat = barStartQ + k * beatQ;
+                // The first beat playback has not passed, from where it has
+                // reached, not from where the host reports this block: a
+                // report a little off (under kJumpQ) must not move the change
+                // to another beat. An onset before resumeQ has played, so a
+                // beat counts as passed exactly when it lies before resumeQ,
+                // even by a hair (a host accumulating its position ends a
+                // block a hair past a beat). Beats are multiples of beatQ, a
+                // power of two: the division and the ceiling are exact.
+                tBeat = std::ceil(std::max(resumeQ, barStartQ) / beatQ) * beatQ;
             }
             else
             {
@@ -636,10 +639,9 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             keysEverSet = true;
             keysChanged = false;
             renderCurrent();
-            // The chord takes effect at the beat. A beat that lies before
-            // resumeQ (playback reached a hair past it, inside the beat
-            // rounding above) brings back no onset the blocks before played.
-            nextEvent = firstEventNotPlayed(std::max(t, resumeQ));
+            // The chord takes effect at the beat, which lies at or after
+            // where playback reached: the onsets from it on have not played.
+            nextEvent = firstEventNotPlayed(t);
             releaseUnusedHeld(nextEvent, out, offset);
             endPendingByNextOnset(nextEvent);
             continue;
