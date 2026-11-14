@@ -4803,8 +4803,9 @@ int main(int argc, char** argv)
         // tonic pedal; the member it is where the scale steps from the root
         // onto a chord tone, as the minor pentatonic onto the 3); a Stab hit
         // the chord; a rest, a silenced step and an
-        // embellishment nothing. A step a non-Bass Lift raises names its tone
-        // an octave up. Oracle: the slot, the bar's variation and the fallback
+        // embellishment nothing. A step a non-Bass Lift raises, a chord tone,
+        // an embellishment or a Fill note on a step the motif leaves empty,
+        // shows the octave it goes up (an embellishment showed none). Oracle: the slot, the bar's variation and the fallback
         // table written out here; and every tone is the note its step plays.
         // Scales whose degrees lack members, Ext 3 and 7, Pedal, Chords and
         // Keys (one to four held keys: chords with no 3, no 5, neither).
@@ -4848,10 +4849,11 @@ int main(int argc, char** argv)
         };
 
         enum { kSeventhAsRoot, kThirdAsFifth, kThirdAsRoot, kFifthAsThird, kFifthAsRoot,
-               kCadRoot, kCadFifth, kCadSecond, kCadSecondAsMember, kLifted, kStab, kKeys, kSeen };
+               kCadRoot, kCadFifth, kCadSecond, kCadSecondAsMember, kLifted, kLiftedEmbellishment, kLiftedFill,
+               kStab, kKeys, kSeen };
         static const char* kSeenName[] = { "7 as R'", "3 as 5", "3 as R", "5 as 3", "5 as R",
                                            "cadence R", "cadence 5", "cadence 2", "cadence 2 a member", "lifted",
-                                           "Stab hits", "Keys bars" };
+                                           "lifted embellishment", "lifted Fill", "Stab hits", "Keys bars" };
         // The open cadence over a pedal: the scale's next pitch class above
         // the chord root, named the member it is when it is one.
         auto secondWant = [](const Chord& ch, std::uint16_t mask) {
@@ -4928,7 +4930,9 @@ int main(int argc, char** argv)
                     oct += up;
                 }
                 if (want != Tone::None && up) ++seen[kLifted];
-                if (want == Tone::None) oct = 0;
+                if (want == Tone::None && v.note >= 0 && up)
+                    ++seen[sl.fn == Fn::Rest ? kLiftedFill : kLiftedEmbellishment];
+                if (want == Tone::None) oct = v.note >= 0 ? up : 0;
                 ++steps;
                 if (v.tone != want || v.octave != oct)
                     fail(off, t, k, "names tone " + std::to_string(static_cast<int>(v.tone)) + " octave "
@@ -5126,6 +5130,8 @@ int main(int argc, char** argv)
             { sv(47, Fn::Passing, Tone::None, 0), "p" },       { sv(47, Fn::NeighbourUp, Tone::None, 0), "n" + up },
             { sv(43, Fn::NeighbourDown, Tone::None, 0), "n" + down }, { sv(43, Fn::ApproachUp, Tone::None, 0), rise },
             { sv(47, Fn::ApproachDown, Tone::None, 0), fall }, { sv(44, Fn::ApproachChromatic, Tone::None, 0), half + rise },
+            { sv(59, Fn::Passing, Tone::None, 1), "p'" },      { sv(55, Fn::NeighbourUp, Tone::None, 1), "n" + up + "'" },
+            { sv(57, Fn::Repeat, Tone::None, 1), "='" },       { sv(56, Fn::ApproachChromatic, Tone::None, 1), half + rise + "'" },
         };
         int offC = 0;
         std::string whyC;

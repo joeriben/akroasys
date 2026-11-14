@@ -411,6 +411,10 @@ std::string stepGlyphText(const StepView& v)
     static constexpr const char* kFall     = "\xe2\x86\x98";          // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
     static constexpr const char* kSemitone = "\xc2\xbd";               // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
     if (v.note < 0) return kRest;
+    // ' per octave above, , per octave below: a chord tone's octave, and the
+    // one Lift puts an embellishment up.
+    const std::string marks = std::string(static_cast<size_t>(std::max(0, v.octave)), '\'')
+                            + std::string(static_cast<size_t>(std::max(0, -v.octave)), ',');
     std::string t;
     switch (v.tone)
     {
@@ -423,23 +427,22 @@ std::string stepGlyphText(const StepView& v)
         case Tone::None:
         case Tone::Count:   break;
     }
-    if (!t.empty())
-        return t + std::string(static_cast<size_t>(std::max(0, v.octave)), '\'')
-                 + std::string(static_cast<size_t>(std::max(0, -v.octave)), ',');
-    switch (v.fn)
-    {
-        case Fn::Repeat:            return "=";
-        case Fn::Octave:            return "8ve";
-        case Fn::Passing:           return "p";
-        case Fn::NeighbourUp:       return std::string("n") + kUp;
-        case Fn::NeighbourDown:     return std::string("n") + kDown;
-        case Fn::ApproachUp:        return kRise;
-        case Fn::ApproachDown:      return kFall;
-        case Fn::ApproachChromatic: return std::string(kSemitone) + kRise;
-        case Fn::Rest:
-        case Fn::ChordTone:
-        case Fn::Count:             break;
-    }
+    if (t.empty())
+        switch (v.fn)
+        {
+            case Fn::Repeat:            t = "="; break;
+            case Fn::Octave:            t = "8ve"; break;
+            case Fn::Passing:           t = "p"; break;
+            case Fn::NeighbourUp:       t = std::string("n") + kUp; break;
+            case Fn::NeighbourDown:     t = std::string("n") + kDown; break;
+            case Fn::ApproachUp:        t = kRise; break;
+            case Fn::ApproachDown:      t = kFall; break;
+            case Fn::ApproachChromatic: t = std::string(kSemitone) + kRise; break;
+            case Fn::Rest:
+            case Fn::ChordTone:
+            case Fn::Count:             break;
+        }
+    if (!t.empty()) return t + marks;
     // A sounding step with neither a tone nor an embellishment does not
     // occur (a chord tone always names its tone); ? shows one should it.
     return "?";
@@ -1527,8 +1530,11 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             {
                 tone = toneOfMember(soundingMember(ch, sl.member, oct));
             }
+            // The octave: a chord tone's against the part's register, and
+            // the one Lift adds to any step (an embellishment showed none
+            // and read as unlifted where it sounded an octave up).
             sv->tone = tone;
-            sv->octave = tone == Tone::None ? 0 : oct + octShift / 12;
+            sv->octave = (tone == Tone::None ? 0 : oct) + octShift / 12;
         }
 
         if (!inLast) pBeforeLastBeat = note;
@@ -1589,6 +1595,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
                     v = StepView {};
                     v.note = f.note;
                     v.fn = Fn::Passing;
+                    v.octave = f.octShift / 12;
                 }
             }
             out.push(f);

@@ -326,7 +326,8 @@ struct StepView
     Fn   fn     = Fn::Rest;
     /** The chord tone the step sounds and its octave against the part's
      *  register: the member the chord gives (soundingMember), the tone a
-     *  cadence puts on its head, the octave a Lift adds. */
+     *  cadence puts on its head. `octave` adds the one a Lift puts on any
+     *  step, an embellishment's or a Fill note's (tone None) included. */
     Tone tone   = Tone::None;
     int  octave = 0;
     bool head   = false;
