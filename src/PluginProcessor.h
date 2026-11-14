@@ -788,7 +788,8 @@ public:
     /** Init's parameters: every parameter to its layout default, as a load
      *  (SeqTransferHold). Init sets the engine to Step, and that switch carries
      *  no pattern over: from Gen or Phrase, the step grid stays as Init from
-     *  Step leaves it. Message thread. */
+     *  Step leaves it. The phrase motif becomes the empty record and its Undo
+     *  ends, as with a preset that carries none. Message thread. */
     void resetParametersToDefaults();
     /** A legacy XML preset (an APVTS dump, the .t5p format of 2026-03/04)
      *  replaces the parameter state as a load (SeqTransferHold): the engine

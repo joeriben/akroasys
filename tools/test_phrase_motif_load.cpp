@@ -15,6 +15,10 @@
 // the motif diced before it, with its Undo. Found 2026-11-14 in the review of
 // the phrase sequencer's load paths.
 //
+// Init (resetParametersToDefaults, MainPanel::loadInitPreset) is such a load
+// too and set only the parameters: the motif diced before it, and its Undo,
+// played on in the Init patch. Found in the same review.
+//
 // Each case dices first, so the motif before the load is not the empty record
 // and Undo is available; the dice is asserted, so a case whose dice did not
 // take fails instead of passing vacuously.
@@ -68,7 +72,7 @@ bool sameMotif(const PhraseModel::Motif& a, const PhraseModel::Motif& b)
     return true;
 }
 
-enum class Load { LegacyXml, JsonWithout, JsonWith, StateWithout, StateWith };
+enum class Load { LegacyXml, JsonWithout, JsonWith, StateWithout, StateWith, Init };
 
 /** Dices, then loads. `with` loads carry a motif diced and saved before the
  *  one now stored. Returns whether the stored motif after the load is the
@@ -118,6 +122,11 @@ bool loadReplacesMotif(Load load)
             if (auto* root = parsed.getDynamicObject())
                 root->removeProperty("phraseSeq");
         loaded = proc.importJsonPreset(juce::JSON::toString(parsed));
+    }
+    else if (load == Load::Init)
+    {
+        proc.resetParametersToDefaults();
+        loaded = true;
     }
     else
     {
@@ -169,6 +178,8 @@ int main()
           loadReplacesMotif(Load::StateWithout));
     check("host state with a motif: that motif",
           loadReplacesMotif(Load::StateWith));
+    check("Init: the empty record",
+          loadReplacesMotif(Load::Init));
 
     std::printf("failures=%d\n", failures);
     return failures == 0 ? 0 : 1;

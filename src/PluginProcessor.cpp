@@ -12170,6 +12170,10 @@ void T5ynthProcessor::resetParametersToDefaults()
     for (auto* param : getParameters())
         if (param != nullptr)
             param->setValueNotifyingHost(param->getDefaultValue());
+    // And like a preset without a phrase block, it replaces the phrase motif
+    // with the empty record, which the seed and the parameters fill, and ends
+    // its Undo: the patch before Init does not play on in it.
+    phraseSequencer.setStoredMotif(PhraseModel::Motif {});
 }
 
 void T5ynthProcessor::importLegacyXmlPreset(const juce::ValueTree& state)
