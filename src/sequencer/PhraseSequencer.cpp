@@ -338,18 +338,32 @@ void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
     // change before that onset, a knob dragged across values). Only the render
     // now playing says where the note ends. With no onset of its line left in
     // this bar, the bar entry bounds it by the next bar's first.
+    //
+    // It also ends at its strand's next onset, whatever line that is: a layer
+    // switch puts another line on the strand (the Answer and the Octave and
+    // Chord layers all play on strand 5), and a note of the old line would
+    // sound on under the new line's note on its own strand. Within one render
+    // a strand carries one line, and the line's bound is the stricter one.
     constexpr double inf = std::numeric_limits<double>::infinity();
     double nextMain = inf, nextAnswer = inf;
-    for (int i = fromIndex; i < render.count && (nextMain == inf || nextAnswer == inf); ++i)
+    std::array<double, kStrandSlots> nextOnStrand;
+    nextOnStrand.fill(inf);
+    for (int i = fromIndex; i < render.count; ++i)
     {
         const Event& e = render.events[static_cast<size_t>(i)];
+        const double on = barStartQ + e.onQ;   // sorted by onset: the first is the next
         double& next = e.line == Line::Answer ? nextAnswer : nextMain;
-        if (next == inf) next = barStartQ + e.onQ;   // sorted by onset: the first is the next
+        if (next == inf) next = on;
+        const int slot = slotOf(e.strand);
+        if (slot >= 0 && slot < kStrandSlots && nextOnStrand[static_cast<size_t>(slot)] == inf)
+            nextOnStrand[static_cast<size_t>(slot)] = on;
     }
     for (int i = 0; i < pendingCount; ++i)
     {
         auto& p = pending[static_cast<size_t>(i)];
-        p.q = std::min(p.ownQ, p.line == Line::Answer ? nextAnswer : nextMain);
+        const int slot = slotOf(p.strand);
+        const double strandNext = slot >= 0 && slot < kStrandSlots ? nextOnStrand[static_cast<size_t>(slot)] : inf;
+        p.q = std::min({ p.ownQ, p.line == Line::Answer ? nextAnswer : nextMain, strandNext });
     }
 }
 

@@ -2704,6 +2704,123 @@ int main(int argc, char** argv)
         check(errs == 0, "Keys beat a hair off the block: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 29. A layer switch: a note of the old line ends at its strand's next onset\n");
+    {
+        // The Answer and the Octave and Chord layers all play on strand 5. A
+        // shuffled step's note ends past the next grid step, where the other
+        // line can start a note on that strand. Switched while such a note
+        // sounded, a note of the old line kept its own off (its line has no
+        // onset left in the new render) and sounded on under the new line's
+        // note on its strand. Oracle: no note-on (other than a glide, which
+        // continues the strand's voice) while a note of its strand sounds and
+        // did not start on the same sample (a chord's voices start together).
+        // Non-vacuity: notes sounding at an Answer -> Octave / Chord switch end
+        // earlier than in the same run switched to no layer at the same block,
+        // where nothing else plays on their strand and an Answer note keeps its
+        // own off. (Against the run without a switch the count is thin: there
+        // the Answer's next onset mostly falls on the new line's.) The reverse
+        // switches keep the main line, which bounds a note before any Answer
+        // onset; they are checked for overlap only.
+        std::mt19937 rng(29);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        auto F = [&](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+        struct Pair { Layer from, to; const char* name; };
+        const Pair pairs[] = { { Layer::Answer, Layer::Octave, "Answer -> Octave" },
+                               { Layer::Answer, Layer::Chord, "Answer -> Chord" },
+                               { Layer::Octave, Layer::Answer, "Octave -> Answer" },
+                               { Layer::Chord, Layer::Answer, "Chord -> Answer" } };
+        for (const Pair& pr : pairs)
+        {
+            int overlaps = 0, cut = 0, runs = 0;
+            std::string why;
+            for (int t = 0; t < 1000; ++t)
+            {
+                Config a = base();
+                a.part = static_cast<Part>(U(0, 2));
+                const int grids[] = { 4, 8, 16 };
+                a.stepsPerBar = grids[U(0, 2)];
+                a.pulses = U(1, 12);
+                a.rotation = U(0, 7);
+                a.form = static_cast<Form>(U(1, 3));
+                a.variation = static_cast<float>(F(0.0, 1.0));
+                a.slide = U(0, 1) ? static_cast<float>(F(0.0, 1.0)) : 0.0f;
+                a.gate = static_cast<float>(F(0.3, 1.0));
+                a.shuffle = static_cast<float>(F(0.2, 0.75));
+                a.layer = pr.from;
+                Config b = a;
+                b.layer = pr.to;
+                const double at = F(0.0, 32.0);
+                Config off = a;
+                off.layer = Layer::Off;
+                double switchQ = -1.0, offQ = -1.0;
+                const Run ref = play(a, 0.0, 40.0, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                    if (offQ < 0.0 && q >= at) { s.setConfig(off); offQ = q; }
+                });
+                const Run sw = play(a, 0.0, 40.0, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                    if (switchQ < 0.0 && q >= at) { s.setConfig(b); switchQ = q; }
+                });
+                ++runs;
+                std::map<int, std::vector<std::pair<int, int>>> live;   // strand -> (note, onset sample)
+                for (size_t i = 0; i < sw.events.size(); ++i)
+                {
+                    const Played& p = sw.events[i];
+                    auto& v = live[p.ev.strandId];
+                    if (p.ev.type == VoiceEvent::Type::NoteOff)
+                    {
+                        for (auto it = v.begin(); it != v.end(); ++it)
+                            if (it->first == p.ev.note) { v.erase(it); break; }
+                        continue;
+                    }
+                    if (p.ev.type != VoiceEvent::Type::NoteOn) continue;
+                    if (p.ev.artic == VoiceEvent::Articulation::Glide) { v.clear(); v.push_back({ p.ev.note, p.sample }); continue; }
+                    bool over = false;
+                    for (const auto& n : v) over = over || n.second != p.sample;
+                    if (over && overlaps++ < 2)
+                    {
+                        char tag[200];
+                        std::snprintf(tag, sizeof tag, "%strial %d, switch at q %.4f: note %d on strand %d at q %.4f under note %d",
+                                      why.empty() ? "" : "; ", t, switchQ, p.ev.note, p.ev.strandId, p.q, v.front().first);
+                        why += tag;
+                    }
+                    v.push_back({ p.ev.note, p.sample });
+                }
+                // A layer note sounding at the switch: its off in both runs. Not
+                // counted: a glide continues it, and the same note starting
+                // again on its strand ends it whatever bounds it (a retrigger,
+                // with or without the strand's onset bound).
+                auto offAfter = [](const Run& r, size_t from, int note, int strand) {
+                    for (size_t j = from + 1; j < r.events.size(); ++j)
+                    {
+                        const VoiceEvent& e = r.events[j].ev;
+                        if (e.strandId != strand) continue;
+                        if (e.type == VoiceEvent::Type::NoteOn
+                            && (e.artic == VoiceEvent::Articulation::Glide || e.note == note)) return -1;
+                        if (e.type != VoiceEvent::Type::NoteOff || e.note != note) continue;
+                        for (size_t k = j + 1; k < r.events.size() && r.events[k].sample == r.events[j].sample; ++k)
+                            if (r.events[k].ev.strandId == strand && r.events[k].ev.type == VoiceEvent::Type::NoteOn
+                                && r.events[k].ev.note == note) return -1;
+                        return r.events[j].sample;
+                    }
+                    return -1;
+                };
+                for (size_t i = 0; i < sw.events.size() && i < ref.events.size(); ++i)
+                {
+                    const Played& p = sw.events[i];
+                    if (p.q >= switchQ) break;
+                    if (p.ev.type != VoiceEvent::Type::NoteOn || p.ev.strandId < 5) continue;
+                    const int offSw = offAfter(sw, i, p.ev.note, p.ev.strandId);
+                    const int offRef = offAfter(ref, i, p.ev.note, p.ev.strandId);
+                    if (offSw >= 0 && offRef >= 0 && offSw < offRef && offRef > static_cast<int>(switchQ / kOneSampleQ)) ++cut;
+                }
+            }
+            check(overlaps == 0, std::string("layer switch ") + pr.name + ": no note starts on a strand under a note of it ("
+                                     + std::to_string(overlaps) + " in " + std::to_string(runs) + " runs) " + why);
+            if (pr.from == Layer::Answer)
+                check(cut > 0, std::string("layer switch ") + pr.name + ": notes sounding at the switch end at the new line's onset ("
+                                   + std::to_string(cut) + ")");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

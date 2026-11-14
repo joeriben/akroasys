@@ -236,8 +236,8 @@ private:
     int entryVoicingCount = 0;
 
     // Sounding notes. `ownQ` is the note's own off (Event::gateOffQ, gate x
-    // its step); `q` is that, bounded by its line's next onset in the render
-    // now playing (endPendingByNextOnset).
+    // its step); `q` is that, bounded by its line's and its strand's next
+    // onset in the render now playing (endPendingByNextOnset).
     struct PendingOff { double q; double ownQ; int note; int strand; PhraseModel::Line line; };
     static constexpr int kMaxPending = 128;
     std::array<PendingOff, kMaxPending> pending {};
@@ -260,7 +260,7 @@ private:
     void renderStoppedView();
     void releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset);
     /** Sets each pending off to its own off, ended no later than its line's
-     *  first onset in render.events from `fromIndex` on. */
+     *  or its strand's first onset in render.events from `fromIndex` on. */
     void endPendingByNextOnset(int fromIndex);
     /** Another event of the same strand starts at render.events[index]'s onset. */
     bool sharesOnset(int index) const;
