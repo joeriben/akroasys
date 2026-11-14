@@ -4004,6 +4004,250 @@ int main(int argc, char** argv)
                   + " after a kept slide in the bar)");
         check(slOff == 0, "Slide turned to 0: a kept slide's note sounds into its glide, a dropped one's ends at the turn ("
                               + std::to_string(slOff) + " of " + std::to_string(slTrials) + " off)" + slWhy);
+
+        static const Layer kLayers[] = { Layer::Off, Layer::Octave, Layer::Chord, Layer::Answer };
+        auto turnRun = [&](const Motif& m, const Config& from, const Config& to, double turnQ, double& turnedAt) {
+            bool loaded = false;
+            turnedAt = -1.0;
+            return play(from, 0.0, 4.0 * 10, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
+                if (turnQ < 0.0 || turnedAt >= 0.0 || q < turnQ) return;
+                s.setConfig(to);
+                turnedAt = q;
+            });
+        };
+        auto strandKeys = [&](const Run& r, int strand) {
+            std::vector<Key> v;
+            for (const Played& p : r.events)
+                if (p.ev.strandId == strand) v.push_back(keyOf(p, true));
+            return v;
+        };
+        // An onset within a block of the turn: whether it plays before the
+        // re-render or from it is the block grid's, not the rule's.
+        auto nearTurn = [&](const Run& r, double turnedAt) {
+            for (const Played& p : r.events)
+                if (p.ev.type == VoiceEvent::Type::NoteOn && std::abs(p.q - turnedAt) < dq + 1.0e-3) return true;
+            return false;
+        };
+        auto randomConfig = [&]() {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.phraseBars = kPhraseBars[U(0, 2)];
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = static_cast<float>(U(0, 5)) / 5.0f;
+            c.slide = U(0, 1) ? 1.0f : 0.5f;
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.len = U(1, 2); c.pulses = U(1, 8); c.rotation = U(0, 7);
+            return c;
+        };
+
+        // The layer switched after the bar's last onset, before the downbeat.
+        // The line does not depend on the layer: every event of it is the
+        // unswitched trial's, its slide into the downbeat kept whatever the
+        // new layer puts beside it in the bar — an Answer onset after the
+        // turn, a Chord hit on the held onset. The Octave layer's held copy
+        // waits for its own strand's next onset; where the new layer leaves
+        // none in the bar (Off, Chord, a bar without an Answer onset) it ends
+        // at the turn, not at the downbeat nor in a glide.
+        int lyTrials = 0, lyAfter = 0, lyBeside = 0, lyReleased = 0, lyOff = 0, lyErrs = 0;
+        std::string lyWhy;
+        for (int t = 0; t < 3000; ++t)
+        {
+            Config c = randomConfig();
+            const int fromLayer = U(0, 3), toLayer = (fromLayer + U(1, 3)) % 4;
+            c.layer = kLayers[fromLayer];
+            // The Answer plays the motif's rhythm, without the line's
+            // variation: only a Drop (Variation at full, a B unit's last bar)
+            // leaves it onsets after the line's last.
+            // Half the switches to the Answer aim at that bar: Variation at
+            // full, a bar where the Answer's last onset follows the line's,
+            // the turn between them.
+            const bool aim = kLayers[toLayer] == Layer::Answer && U(0, 1);
+            if (aim) c.variation = 1.0f;
+            Config to = c;
+            to.layer = kLayers[toLayer];
+            const Motif m = withSlides(generateMotif(static_cast<std::uint32_t>(38600 + t), 0, c));
+            double none = -1.0;
+            const Run r0 = turnRun(m, c, c, -1.0, none);
+            const Run rt = turnRun(m, to, to, -1.0, none);   // the new layer from the start
+            auto lastOn = [&](const Run& r, int b, bool line) {
+                double q = -1.0;
+                for (const Played& p : r.events)
+                    if (p.ev.type == VoiceEvent::Type::NoteOn && (p.ev.strandId == -1) == line
+                        && p.q > 4.0 * b - 1.0e-3 && p.q < 4.0 * (b + 1) - 1.0e-3)
+                        q = p.q;
+                return q;
+            };
+            // The Answer sounds only in B units: a switch to it elsewhere
+            // only switches the Octave copy off.
+            const auto bars = heldBars(r0, 0, 9, [&](int b) {
+                if (to.layer != Layer::Answer) return true;
+                return isBUnit(to, b) && (!aim || lastOn(rt, b, false) > lastOn(r0, b, true) + 4.0 * dq);
+            });
+            if (bars.empty()) continue;
+            const Held h = bars[static_cast<size_t>(U(0, static_cast<int>(bars.size()) - 1))];
+            if (h.strand != -1) continue;
+            const double downQ = 4.0 * (h.bar + 1);
+            const double turnEnd = aim ? lastOn(rt, h.bar, false) : downQ;
+            const double turnQ = h.strandOn + (turnEnd - h.strandOn) * U(5, 95) / 100.0;
+            double turnedAt = -1.0;
+            const Run r1 = turnRun(m, c, to, turnQ, turnedAt);
+            if (!(turnedAt > h.strandOn && turnedAt < downQ) || nearTurn(rt, turnedAt)) continue;
+            ++lyTrials;
+            lyErrs += r1.hangs + r1.orphanOffs + r1.badGlides + r1.polyMain;
+            bool after = false, after5 = false, beside = false;
+            for (const Played& p : rt.events)
+            {
+                if (p.ev.type != VoiceEvent::Type::NoteOn || p.ev.strandId == -1) continue;
+                if (p.q > turnedAt && p.q < downQ - 1.0e-3) { after = true; after5 |= p.ev.strandId == 5; }
+                beside |= p.q > h.strandOn - 1.0e-3 && p.q < turnedAt;
+            }
+            lyAfter += after;
+            lyBeside += beside && to.layer != Layer::Octave;
+            bool ok = strandKeys(r0, -1) == strandKeys(r1, -1);
+            std::string what = ok ? "" : " line changed";
+            if (c.layer == Layer::Octave && !after5)
+            {
+                int copy = -1;
+                for (const Played& p : r0.events)
+                    if (p.ev.strandId == 5 && p.ev.type == VoiceEvent::Type::NoteOn && std::abs(p.q - h.strandOn) < 1.0e-3)
+                        copy = p.ev.note;
+                double offQ = -1.0;
+                for (const Played& p : r1.events)
+                    if (p.ev.strandId == 5 && p.ev.type == VoiceEvent::Type::NoteOff && p.ev.note == copy
+                        && p.q > h.strandOn + 1.0e-3)
+                    {
+                        offQ = p.q;
+                        break;
+                    }
+                ++lyReleased;
+                if (!(copy >= 0 && std::abs(offQ - turnedAt) < 1.0e-3))
+                {
+                    ok = false;
+                    what += " Octave copy off at " + std::to_string(offQ);
+                }
+            }
+            if (!ok && lyOff++ < 3)
+                lyWhy += " | t " + std::to_string(t) + " layer " + std::to_string(static_cast<int>(c.layer)) + ">"
+                       + std::to_string(static_cast<int>(to.layer)) + " bar " + std::to_string(h.bar) + " turned at "
+                       + std::to_string(turnedAt) + what;
+        }
+        check(lyErrs == 0, "Layer switched: no hanging or orphan note, no bad glide (" + std::to_string(lyErrs) + ")");
+        check(lyAfter > 20 && lyBeside > 150 && lyReleased > 100,
+              "Layer switched after a held bar's last onset: the new layer has an onset after the turn ("
+                  + std::to_string(lyAfter) + "), one from the held onset to the turn (" + std::to_string(lyBeside)
+                  + "), the Octave copy has none left on its strand (" + std::to_string(lyReleased) + ")");
+        check(lyOff == 0, "Layer switched: the line plays as unswitched, its slide into the downbeat kept; the Octave copy "
+                          "with no onset left on its strand ends at the turn ("
+                              + std::to_string(lyOff) + " of " + std::to_string(lyTrials) + " off)" + lyWhy);
+
+        // A Part or the rhythm switched after the bar's last onset, before
+        // the downbeat: the bar re-renders as the new line, which plays as a
+        // run with the new settings from the start plays it (§3.9). The held
+        // note waits for that line's next onset when the line has one left in
+        // the bar, or when its last onset before the turn is held into the
+        // next bar; otherwise it ends at the turn. Stab's chord continues no
+        // voice: the held note ends at its onset. Any layer beside the line.
+        int swTrials = 0, swIn = 0, swAcross = 0, swEnded = 0, swStab = 0, swOff = 0, swErrs = 0;
+        std::string swWhy;
+        for (int t = 0; t < 1500; ++t)
+        {
+            Config c = randomConfig();
+            c.layer = kLayers[U(0, 3)];
+            Config to = c;
+            const int change = U(0, 5);
+            if (change == 0)
+            {
+                // A Part alone keeps the rhythm: Stab's chords fall on the
+                // line's onsets, none after its last. With a rotation, some do.
+                to.part = static_cast<Part>((static_cast<int>(c.part) + U(1, 3)) % 4);
+                if (to.part == Part::Stab || U(0, 1)) to.rotation = (c.rotation + U(1, 7)) % 8;
+            }
+            else if (change == 1) to.pulses = (c.pulses - 1 + U(1, 7)) % 8 + 1;
+            else if (change == 2) to.rotation = (c.rotation + U(1, 7)) % 8;
+            else if (change == 3) to.shuffle = c.shuffle > 0.0f ? 0.0f : 0.3f;
+            else if (change == 4) to.len = 3 - c.len;
+            else                  to.stepsPerBar = c.stepsPerBar == 16 ? 8 : 16;
+            const Motif m = withSlides(generateMotif(static_cast<std::uint32_t>(40100 + t), 0, c));
+            double none = -1.0;
+            const Run r0 = turnRun(m, c, c, -1.0, none);
+            const auto bars = heldBars(r0, 0, 9, [&](int) { return true; });
+            if (bars.empty()) continue;
+            const Held h = bars[static_cast<size_t>(U(0, static_cast<int>(bars.size()) - 1))];
+            if (h.strand != -1) continue;
+            const double downQ = 4.0 * (h.bar + 1);
+            const double turnQ = h.strandOn + (downQ - h.strandOn) * U(5, 95) / 100.0;
+            double turnedAt = -1.0;
+            const Run r1 = turnRun(m, c, to, turnQ, turnedAt);
+            const Run rf = turnRun(m, to, to, -1.0, none);   // the new settings from the start
+            if (!(turnedAt > h.strandOn && turnedAt < downQ) || nearTurn(rf, turnedAt)) continue;
+            ++swTrials;
+            // Stab's chord is the main strand's: its voices sound together.
+            swErrs += r1.hangs + r1.orphanOffs + r1.badGlides + (to.part == Part::Stab ? 0 : r1.polyMain);
+            // The new line: its last onset in the bar before the turn, its
+            // next onset from the turn on and whether that glides.
+            double fLast = -1.0, fNext = -1.0;
+            bool fNextGlides = false;
+            for (const Played& p : rf.events)
+            {
+                if (p.ev.strandId != -1 || p.ev.type != VoiceEvent::Type::NoteOn) continue;
+                if (p.q < turnedAt) { if (p.q > 4.0 * h.bar - 1.0e-3) fLast = p.q; }
+                else if (fNext < 0.0)
+                {
+                    fNext = p.q;
+                    fNextGlides = p.ev.artic == VoiceEvent::Articulation::Glide;
+                }
+            }
+            const bool inBar = fNext >= 0.0 && fNext < downQ - 1.0e-3;
+            const bool keep = inBar || (fLast >= 0.0 && fNextGlides);
+            double rNext = -1.0, offQ = -1.0;
+            bool rNextGlides = false;
+            for (const Played& p : r1.events)
+            {
+                if (p.ev.strandId != -1) continue;
+                if (p.ev.type == VoiceEvent::Type::NoteOn && p.q > turnedAt && rNext < 0.0)
+                {
+                    rNext = p.q;
+                    rNextGlides = p.ev.artic == VoiceEvent::Articulation::Glide;
+                }
+                if (p.ev.type == VoiceEvent::Type::NoteOff && p.ev.note == h.note && p.q > h.strandOn + 1.0e-3 && offQ < 0.0)
+                    offQ = p.q;
+            }
+            bool ok = (rNext < 0.0 && fNext < 0.0) || std::abs(rNext - fNext) < 1.0e-3;
+            const char* expect = "";
+            if (keep && to.part != Part::Stab)
+            {
+                ++(inBar ? swIn : swAcross);
+                expect = inBar ? " glides into the bar's next onset" : " glides into the next bar";
+                ok = ok && rNextGlides && (offQ < 0.0 || offQ > rNext - 1.0e-3);
+            }
+            else if (keep)
+            {
+                ++swStab;
+                expect = " ends at the chord";
+                ok = ok && !rNextGlides && std::abs(offQ - rNext) < 1.0e-3;
+            }
+            else
+            {
+                ++swEnded;
+                expect = " ends at the turn";
+                ok = ok && !rNextGlides && std::abs(offQ - turnedAt) < 1.0e-3;
+            }
+            if (!ok && swOff++ < 3)
+                swWhy += " | t " + std::to_string(t) + " change " + std::to_string(change) + " bar " + std::to_string(h.bar)
+                       + " turned at " + std::to_string(turnedAt) + expect + "; next on " + std::to_string(rNext)
+                       + (rNextGlides ? " glides" : "") + ", off " + std::to_string(offQ);
+        }
+        check(swErrs == 0, "Part or rhythm switched: no hanging or orphan note, no bad glide (" + std::to_string(swErrs) + ")");
+        check(swIn > 30 && swAcross > 90 && swEnded > 120 && swStab > 7,
+              "Part or rhythm switched after a held bar's last onset: the held note continues into the new line's "
+              "onset in the bar (" + std::to_string(swIn) + "), into the next bar (" + std::to_string(swAcross)
+                  + "), ends at the turn (" + std::to_string(swEnded) + "), at Stab's chord (" + std::to_string(swStab) + ")");
+        check(swOff == 0, "Part or rhythm switched: the held note continues where the new line continues it, else ends at "
+                          "the turn (" + std::to_string(swOff) + " of " + std::to_string(swTrials) + " off)" + swWhy);
     }
 
     std::printf("\n== 36. The pulse Bass's Lift turns into an Octave is no head\n");
