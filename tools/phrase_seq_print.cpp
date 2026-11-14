@@ -3806,9 +3806,15 @@ int main(int argc, char** argv)
 
             if (bass && lastPulse >= 0)
             {
+                // The note before it is the one that sounds before it: a
+                // step's, or a Fill run note on a 16th the motif leaves free.
                 int p = in.prevNote;
-                for (int k = 0; k < lastPulse; ++k)
-                    if (slotOf(k).fn != Fn::Rest && r.view[static_cast<size_t>(k)].note >= 0) p = r.view[static_cast<size_t>(k)].note;
+                double pQ = -1.0;
+                for (int e = 0; e < r.count; ++e)
+                {
+                    const Event& ev = r.events[static_cast<size_t>(e)];
+                    if (ev.line == Line::Main && ev.onQ < lastPulse * stepQ - 1.0e-9 && ev.onQ > pQ) { pQ = ev.onQ; p = ev.note; }
+                }
                 ++octaves;
                 offOctave += std::abs(r.view[static_cast<size_t>(lastPulse)].note - p) != 12;
             }
@@ -5775,6 +5781,198 @@ int main(int argc, char** argv)
                          + std::to_string(offS) + " off)" + whyC);
         check(keysBars > 500 && keysChanges > 100 && midBarChanges > 80,
               "C. coverage: " + std::to_string(keysChanges) + " held-chord changes, " + std::to_string(midBarChanges) + " inside a bar");
+    }
+
+    std::printf("\n== 43. A step after a Fill note is resolved against it\n");
+    {
+        // Variation bars with a Fill, read from what plays (shuffle off, so a
+        // note starts on its grid position): the line's notes in the order
+        // they sound, the Fill run's notes (72/127) among them, a ratchet's
+        // repeats (85/127 x 0.9) not, each unlifted (Lift puts the last beat
+        // an octave up, the run with it; Bass's Lift is its Octave pulse). An
+        // embellishment step plays against the note that sounds before it,
+        // a run note included (§3.4: P is the previous sounding note): a
+        // Repeat that note, a Neighbour the scale step above or below it, a
+        // Passing step the scale step from it towards the head (§41's rule
+        // where none lies between), an Octave that note an octave away; a
+        // Lead embellishment after a leap of more than 4 semitones the step
+        // back. The head is the next of the bar as it plays, else the first
+        // of the next two bars, rendered here. Rendered after the steps,
+        // the run left a step after a run note resolved against the step
+        // before it.
+        std::mt19937 rng(43);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static const int spbs[] = { 4, 8, 16 };
+        const float kTailVel = 85.0f / 127.0f * 0.9f, kFillVel = 72.0f / 127.0f;
+        int bars = 0, checked = 0, afterRun = 0, off = 0;
+        int afterRunRepeat = 0, afterRunNeighbour = 0, afterRunPassing = 0, afterRunOctave = 0, afterRunReversal = 0;
+        std::string why;
+        for (int t = 0; t < 30000; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.harm = static_cast<Harm>(U(0, 2));
+            c.scaleType = U(0, ScaleQuantizer::COUNT - 1);
+            c.scaleRoot = U(0, 11);
+            c.ext7 = U(0, 1) != 0;
+            c.chordDegrees = { U(1, 7), U(0, 7), U(0, 7), U(0, 7) };
+            c.stepsPerBar = spbs[U(0, 2)];
+            c.pulses = U(1, c.stepsPerBar);
+            c.rotation = U(0, c.stepsPerBar - 1);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = 0.2f * static_cast<float>(U(3, 5));
+            c.layer = static_cast<Layer>(U(0, 3));
+            c.shuffle = 0.0f;
+            c.transpose = 0;
+            Motif drawn;
+            if (U(0, 1))
+            {
+                std::array<StepInput, kMaxBarSteps> steps {};
+                int last = U(55, 79);
+                for (int i = 0; i < c.stepsPerBar; ++i)
+                {
+                    if (U(0, 2) != 0) last = U(55, 79);
+                    steps[static_cast<size_t>(i)] = { last, U(0, 2) != 0 || i == 0, false, 0.8f };
+                }
+                drawn = motifFromSteps(steps.data(), c.stepsPerBar, c, static_cast<std::uint32_t>(43000 + t), 0);
+                c.len = drawn.len; c.pulses = drawn.pulses; c.rotation = 0;
+            }
+            else
+            {
+                drawn = generateMotif(static_cast<std::uint32_t>(43000 + t), 0, c);
+            }
+            const Motif m = fitMotif(drawn, c);
+            std::array<bool, kMaxMotifSteps> heads {};
+            computeHeads(m, heads);
+            const int N = phraseBarsOf(c);
+            std::vector<int> fillBars;
+            for (int b = 0; b < N; ++b)
+                if (variationForBar(m, heads, c, b).fill) fillBars.push_back(b);
+            if (fillBars.empty()) continue;
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m; in.answer = &m;
+            in.bar = fillBars[static_cast<size_t>(U(0, static_cast<int>(fillBars.size()) - 1))];
+            in.barLenQ = U(0, 3) == 0 ? 3.0 : 4.0;
+            in.prevNote = U(36, 72); in.prevPrevNote = U(36, 72);
+            if (c.harm == Harm::Keys) { in.keys = true; in.keysChord = chordFromKeys(U(36, 60), static_cast<std::uint16_t>(U(1, 4095))); }
+            BarRender r;
+            renderBar(in, r);
+            ++bars;
+            const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
+            const double stepQ = 4.0 / c.stepsPerBar;
+            const double lastBeatQ = in.barLenQ - 1.0;
+            const int mb = ((in.bar % m.len) + m.len) % m.len;
+            const bool bass = c.part == Part::Bass;
+            // A note as played without Lift.
+            auto unlifted = [&](const BarRender& b, int bar, double q, int note) {
+                const bool lift = variationForBar(m, heads, c, bar).lift;
+                return lift && !bass && q >= in.barLenQ - 1.0 - 1e-9 ? note - 12 : note;
+            };
+            // The first head of `b` from step `from`, as it plays; -1 none.
+            auto firstHead = [&](const BarRender& b, int bar, int from) {
+                for (int k2 = from; k2 < b.viewSteps; ++k2)
+                {
+                    const StepView& v = b.view[static_cast<size_t>(k2)];
+                    if (v.head && v.note >= 0) return unlifted(b, bar, k2 * stepQ, v.note);
+                }
+                return -1;
+            };
+            std::array<BarRender, 2> next;
+            for (int i = 0; i < 2; ++i)
+            {
+                RenderInput a = in;
+                a.bar = in.bar + 1 + i;
+                renderBar(a, next[static_cast<size_t>(i)]);
+            }
+            const BarVariation var = variationForBar(m, heads, c, in.bar);
+            std::vector<const Event*> line;
+            for (int i = 0; i < r.count; ++i)
+            {
+                const Event& e = r.events[static_cast<size_t>(i)];
+                if (e.strand == -1 && e.line == Line::Main && std::abs(e.vel - kTailVel) > 1e-4) line.push_back(&e);
+            }
+            std::stable_sort(line.begin(), line.end(), [](const Event* a, const Event* b) { return a->onQ < b->onQ; });
+            int P = in.prevNote, PP = in.prevPrevNote;
+            bool pIsRun = false;
+            for (const Event* e : line)
+            {
+                const int u = unlifted(r, in.bar, e->onQ, e->note);
+                if (std::abs(e->vel - kFillVel) < 1e-4)
+                {
+                    PP = P; P = u; pIsRun = true;
+                    continue;
+                }
+                const int k = static_cast<int>(std::lround(e->onQ / stepQ));
+                const StepView& v = r.view[static_cast<size_t>(k)];
+                std::string bad;
+                if (std::abs(k * stepQ - e->onQ) > 1e-9 || k >= r.viewSteps)
+                    bad = "an onset off the grid at " + std::to_string(e->onQ);
+                else if (v.tone == Tone::None)
+                {
+                    const int s = mb * c.stepsPerBar + k;
+                    const Fn stored = s == var.repitchStep ? var.repitchFn : m.slots[static_cast<size_t>(s)].fn;
+                    int T = firstHead(r, in.bar, k + 1);
+                    if (T < 0) T = firstHead(next[0], in.bar + 1, 0);
+                    if (T < 0) T = firstHead(next[1], in.bar + 2, 0);
+                    if (T < 0) T = P;
+                    const bool reversal = c.part == Part::Lead && std::abs(P - PP) > 4
+                        && (stored == Fn::Repeat || stored == Fn::Passing
+                            || stored == Fn::NeighbourUp || stored == Fn::NeighbourDown);
+                    Fn wantFn = Fn::Rest;
+                    int want = -1;
+                    if (v.fn == Fn::Octave)
+                    {
+                        wantFn = Fn::Octave;
+                        want = std::abs(u - P) == 12 ? u : P + 12;
+                        afterRunOctave += pIsRun;
+                    }
+                    else if (reversal)
+                    {
+                        wantFn = P > PP ? Fn::NeighbourDown : Fn::NeighbourUp;
+                        want = scaleStep(P, P > PP ? -1 : 1, mask);
+                        afterRunReversal += pIsRun;
+                    }
+                    else if (stored == Fn::Repeat) { wantFn = Fn::Repeat; want = P; afterRunRepeat += pIsRun; }
+                    else if (stored == Fn::NeighbourUp || stored == Fn::NeighbourDown)
+                    {
+                        wantFn = stored;
+                        want = scaleStep(P, stored == Fn::NeighbourUp ? 1 : -1, mask);
+                        afterRunNeighbour += pIsRun;
+                    }
+                    else if (stored == Fn::Passing)
+                    {
+                        const int toward = scaleStep(P, T < P ? -1 : 1, mask);
+                        const bool room = T > P ? toward < T : T < P && toward > T;
+                        wantFn = room ? Fn::Passing : T < P ? Fn::NeighbourUp : T > P ? Fn::NeighbourDown : Fn::NeighbourUp;
+                        want = room ? toward : scaleStep(P, wantFn == Fn::NeighbourUp ? 1 : -1, mask);
+                        afterRunPassing += pIsRun;
+                    }
+                    StepView storedView;
+                    storedView.note = 0;
+                    storedView.fn = stored;
+                    if (want >= 0)
+                    {
+                        ++checked;
+                        afterRun += pIsRun;
+                        if (u != want || v.fn != wantFn)
+                            bad = "stored " + stepGlyphText(storedView) + " after " + std::to_string(P)
+                                + (pIsRun ? " (a run note)" : "") + " into " + std::to_string(T) + ": plays "
+                                + std::to_string(u) + " shown " + stepGlyphText(v) + ", want " + std::to_string(want);
+                    }
+                }
+                if (!bad.empty() && off++ < 4)
+                    why += " | t" + std::to_string(t) + " bar " + std::to_string(in.bar) + " k" + std::to_string(k) + ": " + bad;
+                PP = P; P = u; pIsRun = false;
+            }
+        }
+        check(off == 0, std::to_string(checked) + " embellishment steps in " + std::to_string(bars)
+                        + " Fill bars play against the note before them (" + std::to_string(off) + " off)" + why);
+        check(afterRun > 2000 && afterRunRepeat > 100 && afterRunNeighbour > 200 && afterRunPassing > 200
+                  && afterRunOctave > 50 && afterRunReversal > 100,
+              "coverage: " + std::to_string(afterRun) + " after a run note: " + std::to_string(afterRunRepeat) + " Repeat, "
+                  + std::to_string(afterRunNeighbour) + " Neighbour, " + std::to_string(afterRunPassing) + " Passing, "
+                  + std::to_string(afterRunOctave) + " Octave, " + std::to_string(afterRunReversal) + " reversals");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

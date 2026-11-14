@@ -1255,6 +1255,18 @@ double slotEnd(double posQ, double lenQ, double barLenQ)
     return std::min(posQ + lenQ, barLenQ);
 }
 
+/** Ratchet (§3.7 op 4): how often the step sounds, and the distance between
+ *  its repeats on the straight grid: they divide what is left of its slot. */
+int ratchetHitsOf(const BarVariation& var)
+{
+    return std::clamp(var.ratchetHits, 2, 3);
+}
+
+double ratchetGridHitQ(double posQ, double stepQ, double barLenQ, int hits)
+{
+    return (slotEnd(posQ, stepQ, barLenQ) - posQ) / hits;
+}
+
 /** Onset of grid step k: an odd step is delayed by `shuffle` of its slot.
  *  Taken of the slot rather than of a full step, so a slot the bar cuts short
  *  keeps its onset inside the bar (the scheduler plays a bar's events before
@@ -1328,6 +1340,11 @@ struct BarShape
     int    mb = 0, steps = 0;
     double stepQ = 0.25, lastBeatQ = 3.0;
     int    lastHeadK = -1, lastPulseInLastBeat = -1, ratchetK = -1;
+    /** Fill: the free 16ths of the last beat in order, and the 16th of the
+     *  beat each is (the run note there lies 4 - j scale steps from its head). */
+    std::array<double, 4> fillQ {};
+    std::array<int, 4>    fillJ {};
+    int    fillN = 0;
 
     bool inLastBeat(int k) const { return static_cast<double>(k) * stepQ >= lastBeatQ - kEps; }
 };
@@ -1366,6 +1383,33 @@ BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, 
         const bool head = heads[static_cast<size_t>(b.mb * spb + k)] && k != octavePulse;
         const int w = (head ? 16 : 0) + metricWeight16(t16Of(k, spb));
         if (w > ratchetW) { ratchetW = w; b.ratchetK = k; }
+    }
+    // Fill (§3.7 op 3): the 16ths of the last beat that carry no onset of the
+    // line. Taken on the straight grid, so Shuffle never removes a run note:
+    // a step's onset or a ratchet repeat within half a 16th takes one. Read
+    // from the shape, before a note is rendered, so the line can go on from a
+    // run note to the steps after it.
+    if (var.fill)
+    {
+        auto taken = [&](double q) {
+            for (int k = 0; k < b.steps; ++k)
+                if (sounds(k) && std::abs(static_cast<double>(k) * b.stepQ - q) < 0.125 - kEps) return true;
+            if (!var.ratchet || b.ratchetK < 0) return false;
+            const double posQ = static_cast<double>(b.ratchetK) * b.stepQ;
+            const int hits = ratchetHitsOf(var);
+            const double gridHitQ = ratchetGridHitQ(posQ, b.stepQ, barLenQ, hits);
+            for (int h = 1; h < hits; ++h)
+                if (std::abs(posQ + h * gridHitQ - q) < 0.125 - kEps) return true;
+            return false;
+        };
+        for (int j = 0; j < 4; ++j)
+        {
+            const double q = b.lastBeatQ + 0.25 * j;
+            if (q >= barLenQ - kEps || taken(q)) continue;
+            b.fillQ[static_cast<size_t>(b.fillN)] = q;
+            b.fillJ[static_cast<size_t>(b.fillN)] = j;
+            ++b.fillN;
+        }
     }
     return b;
 }
@@ -1507,7 +1551,6 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     const double stepQ = sh.stepQ;
     const int steps = sh.steps;
     const int mb = sh.mb;
-    const double lastBeatQ = sh.lastBeatQ;
     const Chord ch = chordAt(x, x.bar);
     const int lastHeadK = sh.lastHeadK, lastPulseInLastBeat = sh.lastPulseInLastBeat, ratchetK = sh.ratchetK;
 
@@ -1518,6 +1561,34 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     // octave again from P (two or three octaves up), and the Fill run stayed
     // below the notes around it.
     int pBeforeLastBeat = P;   // where a Fill run starts from
+    // The Fill run: on the free 16ths of the last beat, scale steps counted
+    // back from the next bar's first head, from the note before that beat
+    // (§3.7 op 3). Its notes are set when the line reaches the beat, and the
+    // line goes on from each: a step after a run note is resolved against it,
+    // the note that sounds before the step (§3.4). Rendered after the steps,
+    // the run left them resolved against the step before it, with a run note
+    // sounding in between (a Repeat repeated that step, not the run note).
+    std::array<int, 4> runNote {};
+    bool runSet = false;
+    int runPlayed = 0;   // run notes the line has gone on from
+    auto setRun = [&] {
+        runSet = true;
+        if (sh.fillN == 0) return;
+        // No head ahead: into the note before the run.
+        const int T = lookaheadHead(x, ahead, steps, true);
+        const int target = T >= 0 ? T : pBeforeLastBeat >= 0 ? pBeforeLastBeat : chordRootNote(ch, x.tonic);
+        const int from = pBeforeLastBeat >= 0 ? pBeforeLastBeat : target;
+        const int dir = target >= from ? -1 : 1;   // counted back from the target
+        for (int i = 0; i < sh.fillN; ++i)
+            runNote[static_cast<size_t>(i)] = scaleSteps(target, dir * (4 - sh.fillJ[static_cast<size_t>(i)]), x.mask);
+    };
+    auto playRunBefore = [&](double q) {
+        for (; runPlayed < sh.fillN && sh.fillQ[static_cast<size_t>(runPlayed)] < q - kEps; ++runPlayed)
+        {
+            PP = P;
+            P = runNote[static_cast<size_t>(runPlayed)];
+        }
+    };
     for (int k = 0; k < steps; ++k)
     {
         const int s = mb * spb + k;
@@ -1527,6 +1598,8 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         const bool head = x.heads[static_cast<size_t>(s)];
         const bool inLast = sh.inLastBeat(k);
         StepView* sv = view ? &view->view[static_cast<size_t>(k)] : nullptr;
+        if (inLast && !runSet) setRun();
+        playRunBefore(posQ);
         if (sl.fn == Fn::Rest) { if (sv) *sv = StepView {}; continue; }
         if (s == var.repitchStep) sl.fn = var.repitchFn;
         if (var.drop && inLast)
@@ -1581,10 +1654,10 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             // The repeats divide what is left of the step's slot after its
             // (shuffled) onset: they stay inside the slot, so none lands on
             // the next step's onset or past the bar end.
-            const int hits = std::clamp(var.ratchetHits, 2, 3);
+            const int hits = ratchetHitsOf(var);
             const double endQ = slotEnd(posQ, stepQ, x.barLenQ);
             const double hitQ = (endQ - onQ) / hits;
-            const double gridHitQ = (endQ - posQ) / hits;
+            const double gridHitQ = ratchetGridHitQ(posQ, stepQ, x.barLenQ, hits);
             o.durQ = hitQ;
             o.slideWanted = o.forcedSlide = false;
             out.push(o);
@@ -1635,65 +1708,51 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         PP = P; P = note;
     }
 
-    if (var.fill)
+    // The run's notes where no step of the bar lies in its last beat.
+    if (!runSet) setRun();
+    for (int i = 0; i < sh.fillN; ++i)
     {
-        // A scale run on the 16ths of the last beat that carry no onset, into
-        // the next bar's first head.
-        const int T = lookaheadHead(x, ahead, steps, true);
-        const int target = T >= 0 ? T : (P >= 0 ? P : chordRootNote(ch, x.tonic));
-        const int from = pBeforeLastBeat >= 0 ? pBeforeLastBeat : target;
-        const int dir = target >= from ? -1 : 1;   // counted back from the target
-        for (int j = 0; j < 4; ++j)
+        const double q = sh.fillQ[static_cast<size_t>(i)];
+        // The run swings with the line: inside the slot of the step it falls
+        // in, it divides what follows that step's (shuffled) onset, as the
+        // ratchet repeats do. Shuffling it on the 16th grid instead put it on
+        // the onset of a coarser odd step that shuffle had moved into this
+        // 16th: two notes of the line on one tick. At 1/16 the two coincide.
+        const int k = static_cast<int>(std::floor((q + kEps) / stepQ));
+        const double slotQ = static_cast<double>(k) * stepQ;
+        const double slotOnQ = shuffled(k, stepQ, cfg.shuffle, x.barLenQ);
+        const double slotEndQ = slotEnd(slotQ, stepQ, x.barLenQ);
+        const double onQ = slotOnQ + (q - slotQ) * (slotEndQ - slotOnQ) / (slotEndQ - slotQ);
+        Onset f;
+        f.onQ = onQ; f.gridQ = q;
+        f.durQ = 0.25;
+        // The run goes up with its beat, as the lifted steps around it
+        // (§3.7): led into the head as played without Lift, it ends an
+        // octave above an unlifted downbeat and lands on a lifted head.
+        // Bass's Lift is the Octave pulse; its run stays in place.
+        f.octShift = var.lift && !x.bass ? 12 : 0;
+        f.note = runNote[static_cast<size_t>(i)] + f.octShift;
+        f.vel = kVelFill;
+        f.fn = Fn::Passing;
+        // A run note on a step's own grid position is that step's: the
+        // motif leaves the step empty (an onset there would have taken the
+        // 16th), and the view showed a rest where the run plays (Stab: a hit
+        // of the whole chord). Between steps (a grid coarser than 16ths) or
+        // past the bar's last step it is no step's, as the ratchet repeats
+        // are not.
+        if (k < steps && std::abs(q - slotQ) < kEps)
         {
-            const double q = lastBeatQ + 0.25 * j;
-            if (q >= x.barLenQ - kEps) continue;
-            // Taken on the straight grid, so Shuffle never removes a run note.
-            bool taken = false;
-            for (int i = 0; i < out.n; ++i)
-                taken = taken || std::abs(out.a[static_cast<size_t>(i)].gridQ - q) < 0.125 - kEps;
-            if (taken) continue;
-            // The run swings with the line: inside the slot of the step it
-            // falls in, it divides what follows that step's (shuffled) onset,
-            // as the ratchet repeats do. Shuffling it on the 16th grid instead
-            // put it on the onset of a coarser odd step that shuffle had moved
-            // into this 16th: two notes of the line on one tick. At 1/16 the
-            // two coincide.
-            const int k = static_cast<int>(std::floor((q + kEps) / stepQ));
-            const double slotQ = static_cast<double>(k) * stepQ;
-            const double slotOnQ = shuffled(k, stepQ, cfg.shuffle, x.barLenQ);
-            const double slotEndQ = slotEnd(slotQ, stepQ, x.barLenQ);
-            const double onQ = slotOnQ + (q - slotQ) * (slotEndQ - slotOnQ) / (slotEndQ - slotQ);
-            Onset f;
-            f.onQ = onQ; f.gridQ = q;
-            f.durQ = 0.25;
-            // The run goes up with its beat, as the lifted steps around it
-            // (§3.7): led into the head as played without Lift, it ends an
-            // octave above an unlifted downbeat and lands on a lifted head.
-            // Bass's Lift is the Octave pulse; its run stays in place.
-            f.octShift = var.lift && !x.bass ? 12 : 0;
-            f.note = scaleSteps(target, dir * (4 - j), x.mask) + f.octShift;
-            f.vel = kVelFill;
-            f.fn = Fn::Passing;
-            // A run note on a step's own grid position is that step's: the
-            // motif leaves the step empty (an onset there would have taken
-            // the 16th), and the view showed a rest where the run plays (Stab:
-            // a hit of the whole chord). Between steps (a grid coarser than
-            // 16ths) or past the bar's last step it is no step's, as the
-            // ratchet repeats are not.
-            if (k < steps && std::abs(q - slotQ) < kEps)
+            f.barStep = k;
+            if (view)
             {
-                f.barStep = k;
-                if (view)
-                {
-                    StepView& v = view->view[static_cast<size_t>(k)];
-                    v = StepView {};
-                    v.note = f.note;
-                    v.fn = Fn::Passing;
-                    v.octave = f.octShift / 12;
-                }
+                StepView& v = view->view[static_cast<size_t>(k)];
+                v = StepView {};
+                v.note = f.note;
+                v.fn = Fn::Passing;
+                v.octave = f.octShift / 12;
             }
-            out.push(f);
         }
+        out.push(f);
     }
 
     insertionSort(out.a.data(), out.n, [](const Onset& a, const Onset& b) { return a.onQ < b.onQ; });
