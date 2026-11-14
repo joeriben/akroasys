@@ -291,20 +291,25 @@ std::string chordLabelText(const ChordLabel& l)
 {
     static constexpr const char* kUpper[] = { "I", "II", "III", "IV", "V", "VI", "VII" };
     static constexpr const char* kLower[] = { "i", "ii", "iii", "iv", "v", "vi", "vii" };
+    // The label is UTF-8 in a std::string: this file has no JUCE, and the
+    // readers of chordLabelText decode it as UTF-8.
+    static constexpr const char* kFlat   = "\xe2\x99\xad";  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by chordLabelText's readers
+    static constexpr const char* kSharp  = "\xe2\x99\xaf";  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by chordLabelText's readers
+    static constexpr const char* kDegree = "\xc2\xb0";      // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by chordLabelText's readers
     const int idx = std::clamp(l.numeral, 1, 7) - 1;
 
-    std::string t = l.accidental < 0 ? "\xe2\x99\xad" : l.accidental > 0 ? "\xe2\x99\xaf" : "";
+    std::string t = l.accidental < 0 ? kFlat : l.accidental > 0 ? kSharp : "";
     t += l.third == 3 ? kLower[idx] : kUpper[idx];
 
     const bool dim = l.third == 3 && l.fifth == 6;
     const bool aug = l.third == 4 && l.fifth == 8;
-    if (dim)                         return t + "\xc2\xb0";
+    if (dim)                         return t + kDegree;
     if (aug)                         return t + "+";
     if (l.third < 0 && l.fifth == 7) return t + "5";
     if (l.third == 2)                t += "sus2";
     else if (l.third == 5)           t += "sus4";
-    if (l.fifth == 6)                t += "\xe2\x99\xad" "5";
-    else if (l.fifth == 8)           t += "\xe2\x99\xaf" "5";
+    if (l.fifth == 6)                t += std::string(kFlat) + "5";
+    else if (l.fifth == 8)           t += std::string(kSharp) + "5";
     if (l.third < 0)                 t += "no3";
     return t;
 }
