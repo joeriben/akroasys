@@ -229,8 +229,9 @@ values for the listening phase, not derived from data.
   to the last bar of every phrase:
   1. **Re-pitch**: one embellishment changes kind (e.g. Neighbour → Passing).
   2. **Register lift**: the last beat goes up an octave (Bass: an Octave
-     embellishment instead). It transposes the line as it plays without
-     Lift, Fill notes included; the bar after it enters from that line.
+     embellishment on its last pulse instead, which is then no head). It
+     transposes the line as it plays without Lift, Fill notes included;
+     the bar after it enters from that line.
      A Fill run is led into the next head as played without Lift and goes
      up with its beat: it ends an octave above an unlifted downbeat and
      lands on a lifted head (a bar of one beat or less is all last beat).
@@ -297,8 +298,9 @@ One extra layer per instance, using the strand mechanism, panned centre
 
 - **Off**
 - **Octave**: the line doubled (Bass +12, Riff/Lead −12).
-- **Chord**: the chord, voice-led as in Stab, on the line's head positions.
-  Not available for Stab.
+- **Chord**: the chord, voice-led as in Stab, on the heads the line plays
+  (not on the pulse Bass's Lift turns into an Octave). Not available for
+  Stab.
 - **Answer**: a second motif (own seed, register +12 or −12 relative to the
   Part) that sounds only in B units — call and response.
 

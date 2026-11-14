@@ -1080,28 +1080,31 @@ BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, 
     b.steps = barStepsFor(spb, barLenQ);
     b.stepQ = 4.0 / spb;
     b.lastBeatQ = std::max(0.0, barLenQ - 1.0);
-    int ratchetW = -1;
     int headBefore = -1;   // the head before lastHeadK
+    auto sounds = [&](int k) {
+        return m.slots[static_cast<size_t>(b.mb * spb + k)].fn != Fn::Rest && !(var.drop && b.inLastBeat(k));
+    };
     for (int k = 0; k < b.steps; ++k)
     {
-        const int s = b.mb * spb + k;
-        if (m.slots[static_cast<size_t>(s)].fn == Fn::Rest) continue;
-        const bool inLast = b.inLastBeat(k);
-        if (var.drop && inLast) continue;
-        const bool head = heads[static_cast<size_t>(s)];
-        if (head) { headBefore = b.lastHeadK; b.lastHeadK = k; }
-        if (inLast)
-        {
-            b.lastPulseInLastBeat = k;
-            const int w = (head ? 16 : 0) + metricWeight16(t16Of(k, spb));
-            if (w > ratchetW) { ratchetW = w; b.ratchetK = k; }
-        }
+        if (!sounds(k)) continue;
+        if (heads[static_cast<size_t>(b.mb * spb + k)]) { headBefore = b.lastHeadK; b.lastHeadK = k; }
+        if (b.inLastBeat(k)) b.lastPulseInLastBeat = k;
     }
     // Bass's Lift plays an Octave on the last pulse of the last beat in place
-    // of what is there. When that pulse is the last head, the cadence lands on
-    // the head before it; a bar whose only head it is has none (as under Drop).
-    if (var.lift && m.part == Part::Bass && b.lastHeadK >= 0 && b.lastHeadK == b.lastPulseInLastBeat)
+    // of what is there: that pulse is no head. When it is the last head, the
+    // cadence lands on the head before it; a bar whose only head it is has
+    // none (as under Drop).
+    const int octavePulse = var.lift && m.part == Part::Bass ? b.lastPulseInLastBeat : -1;
+    if (octavePulse >= 0 && b.lastHeadK == octavePulse)
         b.lastHeadK = headBefore;
+    int ratchetW = -1;
+    for (int k = 0; k < b.steps; ++k)
+    {
+        if (!sounds(k) || !b.inLastBeat(k)) continue;
+        const bool head = heads[static_cast<size_t>(b.mb * spb + k)] && k != octavePulse;
+        const int w = (head ? 16 : 0) + metricWeight16(t16Of(k, spb));
+        if (w > ratchetW) { ratchetW = w; b.ratchetK = k; }
+    }
     return b;
 }
 
@@ -1249,11 +1252,19 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         int note = renderSlot(sl, ch, P, PP, T, x);
         if (var.cadence != 0 && head && k == lastHeadK) note = cadenceNote(x, var.cadence, sl, ch);
         const int octShift = var.lift && inLast && !x.bass ? 12 : 0;
-        if (var.lift && inLast && x.bass && k == lastPulseInLastBeat)
+        // Bass's Lift: the last pulse of the last beat plays an Octave of the
+        // note before it in place of what is there, an embellishment and no
+        // head (§3.7). A drawn slide neither goes into it nor leaves it (it
+        // is no head, and no Passing or Approach), the Chord layer does not
+        // hit it, and the view shows it as an Octave.
+        const bool octavePulse = var.lift && inLast && x.bass && k == lastPulseInLastBeat;
+        if (octavePulse)
         {
             const int p = P >= 0 ? P : note;
-            note = p > x.center ? p - 12 : p + 12;    // Bass: an Octave instead
+            note = p > x.center ? p - 12 : p + 12;
+            sl.fn = Fn::Octave;
         }
+        const bool playsHead = head && !octavePulse;
 
         // A step lasts its slot: a step longer than what is left of the bar
         // (one or two steps per bar in a short meter, the last slot of an odd
@@ -1268,7 +1279,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         o.onQ = onQ; o.gridQ = posQ; o.durQ = slotEnd(posQ, stepQ, x.barLenQ) - posQ;
         o.note = note + octShift; o.octShift = octShift;
         o.vel = sl.accent ? kVelAccent : kVelNormal;
-        o.step = s; o.barStep = k; o.fn = sl.fn; o.head = head; o.accent = sl.accent;
+        o.step = s; o.barStep = k; o.fn = sl.fn; o.head = playsHead; o.accent = sl.accent;
         o.forcedSlide = sl.slide;
         o.slideWanted = sl.slide
             || ((sl.fn == Fn::Passing || isApproach(sl.fn))
@@ -1300,7 +1311,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         {
             out.push(o);
         }
-        if (sv) { sv->note = note + octShift; sv->fn = sl.fn; sv->head = head; sv->accent = sl.accent; sv->slide = false; }
+        if (sv) { sv->note = note + octShift; sv->fn = sl.fn; sv->head = playsHead; sv->accent = sl.accent; sv->slide = false; }
 
         if (!inLast) pBeforeLastBeat = note;
         PP = P; P = note;

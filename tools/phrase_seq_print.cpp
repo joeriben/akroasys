@@ -3289,7 +3289,8 @@ int main(int argc, char** argv)
         // Oracle, as played, in the line under the octave Lift (§3.7: notes
         // are led in the line as it plays without Lift): bar views give notes,
         // functions and heads; a lifted last beat (not Bass) is read an octave
-        // down, and Bass's octave pulse is no head and leads into none. Every
+        // down, and Bass's octave pulse is no head and leads into none (the
+        // pulses passed are counted where the motif has a head). Every
         // approach note whose next sounding head lies within two bars lies
         // where its function puts it from that head; every Fill note (the
         // played events, by velocity) lies its distance from the next bar's
@@ -3297,7 +3298,7 @@ int main(int argc, char** argv)
         // phrases of 4, 8 and 16 bars; Variation 0, 2/5, 3/5 and 1.
         std::mt19937 rng(32);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
-        struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, octave = false; };
+        struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, motifHead = false, octave = false; };
         using Bar = std::array<Note, kMaxBarSteps>;
         using Line = std::vector<Bar>;
         constexpr int kBars = 40;
@@ -3329,6 +3330,9 @@ int main(int argc, char** argv)
                             double& turnedAt) {
             line.assign(kBars, Bar {});
             turnedAt = -1.0;
+            // Evolve leaves the rhythm, and so the heads, as they are.
+            std::array<bool, kMaxMotifSteps> heads {};
+            computeHeads(m, heads);
             bool loaded = false;
             return play(c, 0.0, kBars * 4.0, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
                 if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
@@ -3347,7 +3351,9 @@ int main(int argc, char** argv)
                 bar = Bar {};
                 for (int k = 0; k < n; ++k)
                     bar[static_cast<size_t>(k)] = { v[static_cast<size_t>(k)].note, v[static_cast<size_t>(k)].fn,
-                                                    v[static_cast<size_t>(k)].head, false };
+                                                    v[static_cast<size_t>(k)].head,
+                                                    heads[static_cast<size_t>(floorMod(b, m.len) * m.stepsPerBar + k)],
+                                                    false };
             });
         };
 
@@ -3411,8 +3417,8 @@ int main(int argc, char** argv)
                     for (int j = ahead == 0 ? k + 1 : 0; j < kMaxBarSteps; ++j)
                     {
                         const Note& n = L[static_cast<size_t>(b + ahead)][static_cast<size_t>(j)];
+                        if (n.octave) { h.octaves += n.motifHead; continue; }
                         if (!n.head) continue;
-                        if (n.octave) { ++h.octaves; continue; }
                         if (n.note < 0) { h.drops += n.fn != Fn::Rest; continue; }
                         h.note = n.note; h.bar = b + ahead; h.step = j;
                         return h;
@@ -3954,6 +3960,208 @@ int main(int argc, char** argv)
                   + " after a kept slide in the bar)");
         check(slOff == 0, "Slide turned to 0: a kept slide's note sounds into its glide, a dropped one's ends at the turn ("
                               + std::to_string(slOff) + " of " + std::to_string(slTrials) + " off)" + slWhy);
+    }
+
+    std::printf("\n== 36. The pulse Bass's Lift turns into an Octave is no head\n");
+    {
+        // Under Lift Bass plays an Octave of the note before it on the last
+        // pulse of the last beat, in place of what is there (§3.7): an
+        // embellishment, no head. The pulse kept the motif step's head and
+        // function: a drawn slide (a Passing or Approach step into a head)
+        // glided into the octave, a Passing or Approach pulse drew one out of
+        // it, the Chord layer hit it, the view showed a head, and Ratchet
+        // weighed it as the last beat's head. Oracle from the motif (heads
+        // from computeHeads, a forced slide on a random quarter of the steps,
+        // Slide 1 so every Passing or Approach step into a head draws one):
+        // the pulse glides only from a forced slide on the onset before it,
+        // in its bar or from the bar before; it is held only by a forced
+        // slide of its own; no Chord-layer voice starts on it; the view shows
+        // an Octave and no head; the ratchet goes on the last beat's
+        // strongest other head, else its strongest pulse. The last bar of a
+        // phrase or of an ABAB B unit, Variation 2/5 to 4/5 (Lift, Fill,
+        // Ratchet; 4/5 weighted), 1/16 and 1/8, bars of 1 to 4 beats; in a
+        // quarter of the trials the bar rests until its last beat, so the
+        // bar before leads into the pulse.
+        std::mt19937 rng(36);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        const float kTailVel = 85.0f / 127.0f * 0.9f, kFillVel = 72.0f / 127.0f;
+        auto isDrawable = [](Fn f) {
+            return f == Fn::Passing || f == Fn::ApproachUp || f == Fn::ApproachDown || f == Fn::ApproachChromatic;
+        };
+        int pulses = 0, pulseHeads = 0, viewOff = 0, intoOff = 0, fromOff = 0, chordOff = 0, ratchetOff = 0;
+        int drawnInto = 0, forcedInto = 0, drawnFrom = 0, chordOnHead = 0, ratchets = 0, ratchetMoved = 0;
+        int crossDrawn = 0, crossOff = 0;
+        std::string why;
+        auto fail = [&](int& count, int t, const std::string& what) {
+            if (count++ < 3) why += " | t " + std::to_string(t) + " " + what;
+        };
+        for (int t = 0; t < 8000; ++t)
+        {
+            Config c = base();
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            const bool restsIn = U(0, 3) == 0;
+            c.len = restsIn ? 2 : U(1, 2); c.pulses = U(2, 14); c.rotation = U(0, 7);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = U(0, 1) ? Form::ABAB : static_cast<Form>(U(0, 2));
+            c.variation = U(0, 1) ? 0.8f : 0.2f * static_cast<float>(U(2, 3));
+            c.slide = 1.0f; c.shuffle = 0.0f;
+            c.layer = U(0, 1) ? Layer::Chord : Layer::Off;
+            static const double kBarLen[] = { 1.0, 2.0, 3.0, 4.0, 4.0, 4.0 };
+            const double barLenQ = kBarLen[U(0, 5)];
+            Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(36000 + t), 0, c), c);
+            for (int s = 0; s < m.numSteps(); ++s)
+                m.slots[static_cast<size_t>(s)].slide = U(0, 3) == 0;
+            const int N = phraseBarsOf(c), unitBars = N / 4;
+            const int bar = c.form == Form::ABAB && U(0, 1) ? 2 * unitBars - 1 : N - 1;
+            if (bar < 1) continue;
+            if (restsIn)   // the lifted bar is the motif's second: it rests until its last beat
+                for (int k = 0; k * 4.0 / m.stepsPerBar < barLenQ - 1.0 - 1.0e-9; ++k)
+                    m.slots[static_cast<size_t>(m.stepsPerBar + k)] = Slot {};
+            auto render = [&](int b, BarRender& r) {
+                RenderInput in;
+                in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m;
+                in.bar = b; in.barLenQ = barLenQ;
+                in.prevNote = 33 + (t % 24); in.prevPrevNote = 33 + ((t * 7) % 24);
+                renderBar(in, r);
+            };
+            BarRender r, before, after;
+            render(bar, r);
+            render(bar - 1, before);
+            render(bar + 1, after);
+
+            std::array<bool, kMaxMotifSteps> heads {};
+            computeHeads(m, heads);
+            const int spb = m.stepsPerBar;
+            const double stepQ = 4.0 / spb, lastBeatQ = std::max(0.0, barLenQ - 1.0);
+            auto slotAt = [&](int b, int k) -> const Slot& {
+                return m.slots[static_cast<size_t>(floorMod(b, m.len) * spb + k)];
+            };
+            auto headAt = [&](int b, int k) { return heads[static_cast<size_t>(floorMod(b, m.len) * spb + k)]; };
+            auto inLast = [&](int k) { return k * stepQ >= lastBeatQ - 1.0e-9; };
+            int pulse = -1;
+            for (int k = 0; k < r.viewSteps; ++k)
+                if (slotAt(bar, k).fn != Fn::Rest && inLast(k)) pulse = k;
+            if (pulse < 0) continue;
+            ++pulses;
+            const bool wasHead = headAt(bar, pulse);
+            pulseHeads += wasHead;
+            const std::string at = "bar " + std::to_string(bar) + " step " + std::to_string(pulse);
+
+            const StepView& v = r.view[static_cast<size_t>(pulse)];
+            if (v.head || v.fn != Fn::Octave) fail(viewOff, t, "view: " + at);
+
+            // The main line's events in order, and the pulse's onset among them.
+            auto mainOf = [](const BarRender& b) {
+                std::vector<const Event*> l;
+                for (int e = 0; e < b.count; ++e)
+                    if (b.events[static_cast<size_t>(e)].strand == -1) l.push_back(&b.events[static_cast<size_t>(e)]);
+                std::stable_sort(l.begin(), l.end(), [](const Event* x, const Event* y) { return x->onQ < y->onQ; });
+                return l;
+            };
+            const std::vector<const Event*> main = mainOf(r);
+            int i0 = -1;
+            for (int i = 0; i < static_cast<int>(main.size()) && i0 < 0; ++i)
+                if (std::abs(main[static_cast<size_t>(i)]->onQ - pulse * stepQ) < 1.0e-9) i0 = i;
+            if (i0 < 0) { fail(intoOff, t, "no onset: " + at); continue; }
+            const Event& e0 = *main[static_cast<size_t>(i0)];
+            // The step an event is the onset of: on its grid, no Fill note,
+            // no ratchet repeat (−1 otherwise).
+            auto stepOf = [&](const Event& e) {
+                const int k = static_cast<int>(std::lround(e.onQ / stepQ));
+                const bool grid = std::abs(k * stepQ - e.onQ) < 1.0e-9 && std::abs(e.vel - kFillVel) > 1.0e-4
+                               && std::abs(e.vel - kTailVel) > 1.0e-4;
+                return grid ? k : -1;
+            };
+
+            if (i0 > 0)
+            {
+                const Event& ep = *main[static_cast<size_t>(i0 - 1)];
+                const int kp = stepOf(ep);
+                const bool forced = kp >= 0 && slotAt(bar, kp).fn != Fn::Rest && slotAt(bar, kp).slide;
+                if (e0.glide && !forced) fail(intoOff, t, "glides into the pulse: " + at);
+                forcedInto += e0.glide;
+                if (kp >= 0 && !forced && wasHead && isDrawable(r.view[static_cast<size_t>(kp)].fn)) ++drawnInto;
+            }
+            else
+            {
+                // The pulse is the bar's first onset: the bar before leads into it.
+                const std::vector<const Event*> prev = mainOf(before);
+                if (!prev.empty())
+                {
+                    const Event& last = *prev.back();
+                    const int kp = stepOf(last);
+                    const bool forced = kp >= 0 && slotAt(bar - 1, kp).fn != Fn::Rest && slotAt(bar - 1, kp).slide;
+                    if (last.held && !forced) fail(crossOff, t, "the bar before glides into the pulse: " + at);
+                    if (kp >= 0 && !forced && wasHead && isDrawable(before.view[static_cast<size_t>(kp)].fn)) ++crossDrawn;
+                }
+            }
+
+            // Out of the pulse: only a forced slide of its own holds it.
+            if (e0.held && !slotAt(bar, pulse).slide) fail(fromOff, t, "held out of the pulse: " + at);
+            if (isDrawable(slotAt(bar, pulse).fn) && !slotAt(bar, pulse).slide && i0 + 1 == static_cast<int>(main.size()))
+            {
+                // The pulse ends the bar: does the next bar start on a head?
+                for (int k = 0; k < after.viewSteps; ++k)
+                    if (after.view[static_cast<size_t>(k)].note >= 0)
+                    {
+                        drawnFrom += k == 0 && after.view[static_cast<size_t>(k)].head;
+                        break;
+                    }
+            }
+
+            if (c.layer == Layer::Chord)
+            {
+                chordOnHead += wasHead;
+                for (int e = 0; e < r.count; ++e)
+                {
+                    const Event& ev = r.events[static_cast<size_t>(e)];
+                    if (ev.strand >= 5 && std::abs(ev.onQ - pulse * stepQ) < 1.0e-9)
+                    {
+                        fail(chordOff, t, "Chord layer on the pulse: " + at);
+                        break;
+                    }
+                }
+            }
+
+            // Ratchet: the step whose slot holds the repeats.
+            int ratchetK = -1;
+            for (const Event* e : main)
+                if (std::abs(e->vel - kTailVel) < 1.0e-4) ratchetK = static_cast<int>(std::floor(e->onQ / stepQ + 1.0e-9));
+            if (ratchetK >= 0)
+            {
+                ++ratchets;
+                int want = -1, wantW = -1, old = -1, oldW = -1;
+                for (int k = 0; k < r.viewSteps; ++k)
+                {
+                    if (slotAt(bar, k).fn == Fn::Rest || !inLast(k)) continue;
+                    const int metric = metricWeight16(k * (16 / spb));
+                    const int w = (headAt(bar, k) && k != pulse ? 16 : 0) + metric;
+                    const int wOld = (headAt(bar, k) ? 16 : 0) + metric;
+                    if (w > wantW) { wantW = w; want = k; }
+                    if (wOld > oldW) { oldW = wOld; old = k; }
+                }
+                ratchetMoved += want != old;
+                if (ratchetK != want)
+                    fail(ratchetOff, t, "ratchet on step " + std::to_string(ratchetK) + ", want " + std::to_string(want)
+                                            + ": " + at);
+            }
+        }
+        check(pulses > 4000 && pulseHeads > 2000, "lifted Bass bars (" + std::to_string(pulses) + ", "
+                                                    + std::to_string(pulseHeads) + " with a head on the pulse)");
+        check(drawnInto > 40 && forcedInto > 200 && crossDrawn > 10 && drawnFrom > 80 && chordOnHead > 800
+                  && ratchetMoved > 20,
+              "cases: Passing / Approach into a head pulse (" + std::to_string(drawnInto) + ", "
+                  + std::to_string(crossDrawn) + " from the bar before), forced slides into the pulse ("
+                  + std::to_string(forcedInto) + "), Passing / Approach pulses before a head (" + std::to_string(drawnFrom)
+                  + "), Chord layer on a head pulse (" + std::to_string(chordOnHead) + "), ratchets ("
+                  + std::to_string(ratchets) + ", " + std::to_string(ratchetMoved) + " away from a head pulse)");
+        check(viewOff + intoOff + crossOff + fromOff + chordOff + ratchetOff == 0,
+              "the pulse is an Octave and no head: view (" + std::to_string(viewOff) + "), no drawn slide into it ("
+                  + std::to_string(intoOff) + ", " + std::to_string(crossOff) + " from the bar before) or out of it ("
+                  + std::to_string(fromOff) + "), no Chord-layer hit (" + std::to_string(chordOff)
+                  + "), ratchet on the strongest other head (" + std::to_string(ratchetOff) + ")" + why);
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
