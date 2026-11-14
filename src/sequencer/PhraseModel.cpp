@@ -1768,7 +1768,10 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         const double onQ = slotOnQ + (q - slotQ) * (slotEndQ - slotOnQ) / (slotEndQ - slotQ);
         Onset f;
         f.onQ = onQ; f.gridQ = q;
-        f.durQ = 0.25;
+        // Its slot is its 16th, as a step's is its step: in a bar off the 16th
+        // grid (n/32) the last one starts a 32nd before the bar end and lasts
+        // that 32nd. Uncut it rang on into the bar beyond.
+        f.durQ = slotEnd(q, 0.25, x.barLenQ) - q;
         // The run goes up with its beat, as the lifted steps around it
         // (§3.7): led into the head as played without Lift, it ends an
         // octave above an unlifted downbeat and lands on a lifted head.

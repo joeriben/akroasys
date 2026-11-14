@@ -5921,7 +5921,8 @@ int main(int argc, char** argv)
         // the last beat (the bar's entry note without one), shuffled as the
         // line (inside the slot of its step, it divides what follows the
         // step's onset). With no head ahead the run leads into the note
-        // before the last beat (§3.7 op 3).
+        // before the last beat (§3.7 op 3). Its slot is its 16th, cut at the
+        // bar end as a step's: it sounds Gate of it from its onset.
         std::mt19937 rng(43);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         static const int spbs[] = { 4, 8, 16 };
@@ -5933,6 +5934,8 @@ int main(int argc, char** argv)
         std::string whyC;
         int runPitches = 0, offD = 0, runPitchesNoHead = 0, runPitchesShuffled = 0;
         std::string whyD;
+        int runLens = 0, offL = 0, runLensCut = 0;
+        std::string whyL;
         int runShown = 0, offB = 0, runPasses = 0, runRises = 0, runFalls = 0, runAfterStep = 0, runNoHead = 0;
         std::string why, whyB;
         int oddMeterBars = 0, oddMeterChecked = 0, oddMeterRuns = 0, stabFillBars = 0;
@@ -6131,6 +6134,19 @@ int main(int argc, char** argv)
                         const double slotOnQ = (k2 & 1) == 0 ? slotQ : slotQ + c.shuffle * (slotEndQ - slotQ);
                         if (std::abs(slotOnQ + (q - slotQ) * (slotEndQ - slotOnQ) / (slotEndQ - slotQ) - e->onQ) < 1e-9) j = j2;
                     }
+                    if (j >= 0)
+                    {
+                        const double q = last16[static_cast<size_t>(j)];
+                        const double gate = std::clamp(static_cast<double>(c.gate), 0.1, 1.0);
+                        const double wantLen = std::max(1.0e-3, gate * std::min(0.25, in.barLenQ - q));
+                        ++runLens;
+                        runLensCut += in.barLenQ - q < 0.25 - 1e-9;
+                        if (std::abs(e->gateOffQ - e->onQ - wantLen) > 1e-9 && offL++ < 4)
+                            whyL += " | t" + std::to_string(t) + " bar " + std::to_string(in.bar) + " len "
+                                  + std::to_string(in.barLenQ).substr(0, 5) + " 16th at " + std::to_string(q).substr(0, 5)
+                                  + ": sounds " + std::to_string(e->gateOffQ - e->onQ).substr(0, 6) + ", want "
+                                  + std::to_string(wantLen).substr(0, 6);
+                    }
                     const int u = unlifted(r, in.bar, gridQOf(e), e->note);
                     oddMeterRuns += oddMeter;
                     n32Runs += n32;
@@ -6273,6 +6289,9 @@ int main(int argc, char** argv)
                   + std::to_string(n32Runs) + " run notes");
         check(offD == 0, "D. " + std::to_string(runPitches) + " run notes lie 4 - j scale steps from the head, counted back towards "
                          "the note before the last beat (" + std::to_string(offD) + " off)" + whyD);
+        check(offL == 0, "D. " + std::to_string(runLens) + " run notes sound Gate of their 16th, cut at the bar end ("
+                             + std::to_string(offL) + " off)" + whyL);
+        check(runLensCut > 300, "D. coverage: " + std::to_string(runLensCut) + " run notes on a 16th the bar end cuts");
         check(runPitchesNoHead > 200 && runPitchesShuffled > 10000,
               "D. coverage: " + std::to_string(runPitchesNoHead) + " into the note before the last beat (no head ahead), "
                   + std::to_string(runPitchesShuffled) + " shuffled");
