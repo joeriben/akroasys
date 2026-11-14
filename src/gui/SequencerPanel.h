@@ -3,6 +3,7 @@
 #include <array>
 #include "GuiHelpers.h"
 #include "GenSeqCRTMonitor.h"
+#include "PhraseView.h"
 
 class T5ynthProcessor;
 
@@ -195,6 +196,9 @@ private:
     // GEN-mode "core monitor" occupying the S1 slot — makes the engine's
     // per-cycle euclidean/Turing decisions legible. Visible only in GEN mode.
     std::unique_ptr<GenSeqCRTMonitor> genMonitor;
+    // PHRASE-mode read-only phrase view below the P3 row (docs/PHRASE_SEQ_CONCEPT.md §4).
+    // Visible only in Phrase mode.
+    std::unique_ptr<PhraseView> phraseView;
 
     // ── Phrase mode controls (docs/PHRASE_SEQ_CONCEPT.md §4) ──
     // Key and Oct are the shared scale combos (genScaleRootBox / genScaleTypeBox)

@@ -587,6 +587,7 @@ target_sources(T5ynth PRIVATE
     src/gui/SynthPanel.cpp
     src/gui/FxPanel.cpp
     src/gui/SequencerPanel.cpp
+    src/gui/PhraseView.cpp
     src/gui/AxesPanel.cpp
     src/gui/DimensionExplorer.cpp
     src/gui/WaveformDisplay.cpp

@@ -701,6 +701,9 @@ public:
     /** GUI reads only: the *ForGui atomics and readView(). The stored-motif
      *  actions go through phraseDice / phraseKeep / ... below. */
     const T5ynthPhraseSequencer& getPhraseSequencer() const { return phraseSequencer; }
+    /** The phrase parameters as the model reads them. Any thread: it reads
+     *  the parameters' atomics (the phrase view reads the chord strip's). */
+    PhraseModel::Config phraseConfigFromParams() const;
 
     // Phrase sequencer actions (message thread; docs/PHRASE_SEQ_CONCEPT.md §3.8).
     /** New seed, new motif for the current Part / grid / Pulses / Rotation. */
@@ -1483,7 +1486,6 @@ private:
     struct SeqTransferHold;
     int seqTransferHoldDepth_ = 0;
     bool seqTransferSkipNext_ = false;
-    PhraseModel::Config phraseConfigFromParams() const;
     int lastGenSteps = -1, lastGenPulses = -1, lastGenRotation = -1;
     float lastGenMutation = -1.0f;
 

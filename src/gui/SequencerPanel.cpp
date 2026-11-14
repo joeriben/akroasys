@@ -974,6 +974,9 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     addAndMakeVisible (*genMonitor);
     genMonitor->setVisible (false);   // shown by resized() in GEN mode
 
+    phraseView = std::make_unique<PhraseView>(processorRef);
+    addChildComponent(*phraseView);   // shown by resized() in Phrase mode
+
     juce::StringArray scaleRootItems;
     for (const auto& e : ScaleRoot::kEntries) scaleRootItems.add(e.label);
     genScaleRootBox.addItemList(scaleRootItems, 1);
@@ -1610,6 +1613,13 @@ void SequencerPanel::timerCallback()
     // and setEnabled() does nothing (no repaint) while the answer stands.
     phrUndoBtn.setEnabled(processorRef.canPhraseUndo());
 
+    // The phrase view, above the idle gate: stopped, the processor keeps the
+    // bar it shows current (a chord slot, Part or Dice changed while
+    // stopped re-renders it), and the strip follows the parameters. Nothing
+    // changed, a poll is a few dozen atomic loads and repaints nothing.
+    if (phraseView && phraseView->isShowing())
+        phraseView->poll();
+
     // The transport button follows seq_running, above the idle early-return:
     // a STOP that is not the button (automation, a controller, a state load)
     // can let the audio reach deep idle before this tick, and a button left
@@ -1994,6 +2004,7 @@ void SequencerPanel::resized()
     voicesDividerY = -1;
     v1ModuleBounds = {};
     if (genMonitor) genMonitor->setVisible (false);
+    if (phraseView) phraseView->setVisible(phraseModeActive);
     for (auto& r : voiceModuleBounds) r = {};
     for (int i = 0; i < kNumExtraStrands; ++i)
         strandOctSwitchBounds[i] = {};
@@ -2347,6 +2358,10 @@ void SequencerPanel::resized()
             row.removeFromLeft(juce::jmin(groupGap, row.getWidth()));
             placeBars(row, { { phrVariationRow.get(), pVar }, { phrEvolveRow.get(), pEvo } });
         }
+        area.removeFromTop(g);
+
+        // ── The phrase view: strip and the bar's grid ──
+        if (phraseView) phraseView->setBounds(area);
 
         gridArea = {};
     }
