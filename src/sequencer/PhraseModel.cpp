@@ -1374,7 +1374,12 @@ BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, 
     b.mb = floorMod(bar, m.len);
     b.steps = barStepsFor(spb, barLenQ);
     b.stepQ = 4.0 / spb;
-    b.lastBeatQ = std::max(0.0, barLenQ - 1.0);
+    // The last beat on the bar's own 16th grid, the one its steps lie on: in
+    // a bar off it (n/32) barLenQ − 1 falls a 32nd before a 16th, and the
+    // beat starts on that 16th. A step is in it either way; the Fill's 16ths
+    // count from it, and counted from barLenQ − 1 each would lie a 32nd from
+    // a step, none taken by one: a run of 32nds between the steps.
+    b.lastBeatQ = std::ceil((std::max(0.0, barLenQ - 1.0) - kEps) / 0.25) * 0.25;
     int headBefore = -1;   // the head before lastHeadK
     auto sounds = [&](int k) {
         return m.slots[static_cast<size_t>(b.mb * spb + k)].fn != Fn::Rest && !(var.drop && b.inLastBeat(k));

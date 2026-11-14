@@ -250,7 +250,8 @@ values for the listening phase, not derived from data.
   3. **Fill**: extra 16th pulses in the last beat, as a passing/approach run
      into the next downbeat. Needs at least 4 steps per bar. The free 16ths
      are found on the straight grid; the fill notes then swing with the
-     line. The view shows a run note on a step as p where it is the scale
+     line. They are the bar's own 16ths, the grid its steps lie on: in a
+     bar of n/32 the last beat starts on the 16th a 32nd after barLen − 1. The view shows a run note on a step as p where it is the scale
      step from the note before it towards that head, otherwise as the
      approach it makes (↗ from below, ↘ from above).
   4. **Ratchet**: the last beat's strongest head (by metric weight, the

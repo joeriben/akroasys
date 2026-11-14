@@ -5883,10 +5883,11 @@ int main(int argc, char** argv)
         // Variation bars with a Fill, read from what plays, shuffle on in half
         // of them (a step starts on its grid position, an odd one delayed by
         // shuffle of its slot; a run note on a step's position starts where
-        // that step would), half in 3/4 or 4/4 and half in a meter from 1/16
-        // to 9/2 (n/32, off the 16th grid, apart). The last beat is where a
-        // step's grid position lies, not its onset: shuffle moves an odd step
-        // across a beat the step grid does not meet. Stab plays the chord on
+        // that step would), half in 3/4 or 4/4 and half in a meter from 1/32
+        // to 9/2. The last beat is where a step's grid position lies, not its
+        // onset: shuffle moves an odd step across a beat the step grid does
+        // not meet. Its 16ths are the bar's own, the grid the steps lie on:
+        // in n/32, off the 16th grid, the first one after barLenQ − 1. Stab plays the chord on
         // every onset and threads no line: C alone holds for it. A, B and D
         // read the line's notes in the order they sound, the Fill run's notes (72/127) among them, a ratchet's
         // repeats (85/127 x 0.9) not, each unlifted (Lift puts the last beat
@@ -5935,7 +5936,8 @@ int main(int argc, char** argv)
         int runShown = 0, offB = 0, runPasses = 0, runRises = 0, runFalls = 0, runAfterStep = 0, runNoHead = 0;
         std::string why, whyB;
         int oddMeterBars = 0, oddMeterChecked = 0, oddMeterRuns = 0, stabFillBars = 0;
-        static const int dens[] = { 2, 4, 8, 16 };
+        static const int dens[] = { 2, 4, 8, 16, 32 };
+        int n32FillBars = 0, n32Runs = 0;
         for (int t = 0; t < 30000; ++t)
         {
             Config c = base();
@@ -5989,7 +5991,7 @@ int main(int argc, char** argv)
             else
             {
                 const int num = U(1, 9);
-                in.barLenQ = 4.0 * num / dens[U(0, 3)];
+                in.barLenQ = 4.0 * num / dens[U(0, 4)];
             }
             const bool oddMeter = in.barLenQ != 3.0 && in.barLenQ != 4.0;
             in.prevNote = U(36, 72); in.prevPrevNote = U(36, 72);
@@ -6002,6 +6004,11 @@ int main(int argc, char** argv)
             const double lastBeatQ = std::max(0.0, in.barLenQ - 1.0);
             const int mb = ((in.bar % m.len) + m.len) % m.len;
             oddMeterBars += oddMeter;
+            const bool n32 = std::abs(in.barLenQ * 4.0 - std::round(in.barLenQ * 4.0)) > 1e-9;
+            // The bar's 16ths in its last beat, in order.
+            std::vector<double> last16;
+            for (int i = 0; 0.25 * i < in.barLenQ - 1e-9; ++i)
+                if (0.25 * i >= lastBeatQ - 1e-9) last16.push_back(0.25 * i);
             const bool bass = c.part == Part::Bass;
             // The step a note starts on: its grid position, an odd step's
             // delayed by shuffle of its slot; -1 none.
@@ -6047,10 +6054,8 @@ int main(int argc, char** argv)
             {
                 auto isMain = [](const Event& e) { return e.strand == -1 && e.line == Line::Main; };
                 std::vector<double> want, got;
-                for (int j = 0; j < 4; ++j)
+                for (const double q : last16)
                 {
-                    const double q = lastBeatQ + 0.25 * j;
-                    if (q >= in.barLenQ - 1e-9) break;
                     bool taken = false;
                     for (int i = 0; i < r.count; ++i)
                     {
@@ -6072,6 +6077,7 @@ int main(int argc, char** argv)
                 if (c.part == Part::Stab)
                     got.erase(std::unique(got.begin(), got.end(), [](double a, double b) { return std::abs(a - b) < 1e-9; }), got.end());
                 stabFillBars += c.part == Part::Stab;
+                n32FillBars += n32;
                 ++fillChecked;
                 fillWanted += static_cast<int>(want.size());
                 fillRatchet += var.ratchet;
@@ -6117,9 +6123,9 @@ int main(int argc, char** argv)
                 {
                     if (std::abs(e->vel - kFillVel) > 1e-4) continue;
                     int j = -1;
-                    for (int j2 = 0; j2 < 4 && j < 0; ++j2)
+                    for (int j2 = 0; j2 < static_cast<int>(last16.size()) && j < 0; ++j2)
                     {
-                        const double q = lastBeatQ + 0.25 * j2;
+                        const double q = last16[static_cast<size_t>(j2)];
                         const int k2 = static_cast<int>(std::floor((q + 1e-9) / stepQ));
                         const double slotQ = k2 * stepQ, slotEndQ = slotEndOf(k2);
                         const double slotOnQ = (k2 & 1) == 0 ? slotQ : slotQ + c.shuffle * (slotEndQ - slotQ);
@@ -6127,6 +6133,7 @@ int main(int argc, char** argv)
                     }
                     const int u = unlifted(r, in.bar, gridQOf(e), e->note);
                     oddMeterRuns += oddMeter;
+                    n32Runs += n32;
                     const int want = j < 0 ? -1 : scaleSteps(runHead, dir * (4 - j), mask);
                     ++runPitches;
                     runPitchesNoHead += noHead;
@@ -6261,6 +6268,9 @@ int main(int argc, char** argv)
               "coverage: " + std::to_string(oddMeterBars) + " bars in a meter other than 3/4 and 4/4: "
                   + std::to_string(oddMeterChecked) + " embellishment steps, " + std::to_string(oddMeterRuns) + " run notes; "
                   + std::to_string(stabFillBars) + " Stab bars without shuffle");
+        check(n32FillBars > 500 && n32Runs > 1000,
+              "coverage: bars in n/32, off the 16th grid: " + std::to_string(n32FillBars) + " Fill bars without shuffle, "
+                  + std::to_string(n32Runs) + " run notes");
         check(offD == 0, "D. " + std::to_string(runPitches) + " run notes lie 4 - j scale steps from the head, counted back towards "
                          "the note before the last beat (" + std::to_string(offD) + " off)" + whyD);
         check(runPitchesNoHead > 200 && runPitchesShuffled > 10000,
