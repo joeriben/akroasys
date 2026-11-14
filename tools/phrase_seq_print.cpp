@@ -4021,7 +4021,10 @@ int main(int argc, char** argv)
         // in its bar or from the bar before; it is held only by a forced
         // slide of its own; no Chord-layer voice starts on it; the view shows
         // an Octave and no head; the ratchet goes on the last beat's
-        // strongest other head, else its strongest pulse. The last bar of a
+        // strongest other head, else its strongest pulse. A forced slide
+        // still glides: from the step onset before the pulse into it (in its
+        // bar or from the bar before), and from the pulse into the next step
+        // onset; and at Variation 4/5 every such bar ratchets. The last bar of a
         // phrase or of an ABAB B unit, Variation 2/5 to 4/5 (Lift, Fill,
         // Ratchet; 4/5 weighted), 1/16 and 1/8, bars of 1 to 4 beats; in a
         // quarter of the trials the bar rests until its last beat, so the
@@ -4034,7 +4037,8 @@ int main(int argc, char** argv)
         };
         int pulses = 0, pulseHeads = 0, viewOff = 0, intoOff = 0, fromOff = 0, chordOff = 0, ratchetOff = 0;
         int drawnInto = 0, forcedInto = 0, drawnFrom = 0, chordOnHead = 0, ratchets = 0, ratchetMoved = 0;
-        int crossDrawn = 0, crossOff = 0;
+        int crossDrawn = 0, crossOff = 0, forcedIn = 0, forcedCross = 0, forcedOut = 0, forcedOff = 0;
+        int ratchetWanted = 0, ratchetMissing = 0;
         std::string why;
         auto fail = [&](int& count, int t, const std::string& what) {
             if (count++ < 3) why += " | t " + std::to_string(t) + " " + what;
@@ -4125,6 +4129,8 @@ int main(int argc, char** argv)
                 const int kp = stepOf(ep);
                 const bool forced = kp >= 0 && slotAt(bar, kp).fn != Fn::Rest && slotAt(bar, kp).slide;
                 if (e0.glide && !forced) fail(intoOff, t, "glides into the pulse: " + at);
+                if (forced && !e0.glide) fail(forcedOff, t, "a forced slide does not glide into the pulse: " + at);
+                forcedIn += forced;
                 forcedInto += e0.glide;
                 if (kp >= 0 && !forced && wasHead && isDrawable(r.view[static_cast<size_t>(kp)].fn)) ++drawnInto;
             }
@@ -4138,12 +4144,32 @@ int main(int argc, char** argv)
                     const int kp = stepOf(last);
                     const bool forced = kp >= 0 && slotAt(bar - 1, kp).fn != Fn::Rest && slotAt(bar - 1, kp).slide;
                     if (last.held && !forced) fail(crossOff, t, "the bar before glides into the pulse: " + at);
+                    if (forced && !last.held) fail(forcedOff, t, "a forced slide from the bar before is not held: " + at);
+                    forcedCross += forced;
                     if (kp >= 0 && !forced && wasHead && isDrawable(before.view[static_cast<size_t>(kp)].fn)) ++crossDrawn;
                 }
             }
 
-            // Out of the pulse: only a forced slide of its own holds it.
+            // Out of the pulse: only a forced slide of its own holds it, and
+            // it does into the next step onset (the bar's next onset can only
+            // be a Fill note or a ratchet repeat, the next bar's first is a
+            // step's).
             if (e0.held && !slotAt(bar, pulse).slide) fail(fromOff, t, "held out of the pulse: " + at);
+            if (slotAt(bar, pulse).slide)
+            {
+                bool nextIsStep = false;
+                if (i0 + 1 < static_cast<int>(main.size()))
+                    nextIsStep = stepOf(*main[static_cast<size_t>(i0 + 1)]) >= 0;
+                else if (const std::vector<const Event*> nxt = mainOf(after); !nxt.empty())
+                    nextIsStep = stepOf(*nxt.front()) >= 0;
+                const bool ratcheted = i0 + 1 < static_cast<int>(main.size())
+                                    && std::abs(main[static_cast<size_t>(i0 + 1)]->vel - kTailVel) < 1.0e-4;
+                if (nextIsStep && !ratcheted)
+                {
+                    ++forcedOut;
+                    if (!e0.held) fail(forcedOff, t, "a forced slide does not hold the pulse: " + at);
+                }
+            }
             if (isDrawable(slotAt(bar, pulse).fn) && !slotAt(bar, pulse).slide && i0 + 1 == static_cast<int>(main.size()))
             {
                 // The pulse ends the bar: does the next bar start on a head?
@@ -4173,6 +4199,11 @@ int main(int argc, char** argv)
             int ratchetK = -1;
             for (const Event* e : main)
                 if (std::abs(e->vel - kTailVel) < 1.0e-4) ratchetK = static_cast<int>(std::floor(e->onQ / stepQ + 1.0e-9));
+            if (std::lround(c.variation * 5.0f) >= 4)
+            {
+                ++ratchetWanted;
+                if (ratchetK < 0) fail(ratchetMissing, t, "no ratchet: " + at);
+            }
             if (ratchetK >= 0)
             {
                 ++ratchets;
@@ -4201,6 +4232,11 @@ int main(int argc, char** argv)
                   + std::to_string(forcedInto) + "), Passing / Approach pulses before a head (" + std::to_string(drawnFrom)
                   + "), Chord layer on a head pulse (" + std::to_string(chordOnHead) + "), ratchets ("
                   + std::to_string(ratchets) + ", " + std::to_string(ratchetMoved) + " away from a head pulse)");
+        check(forcedIn > 100 && forcedCross > 20 && forcedOut > 200 && ratchetWanted > 3000 && forcedOff + ratchetMissing == 0,
+              "a forced slide still glides: into the pulse (" + std::to_string(forcedIn) + " in its bar, "
+                  + std::to_string(forcedCross) + " from the bar before), out of it (" + std::to_string(forcedOut) + "); "
+                  + std::to_string(forcedOff) + " off; Variation 4/5 ratchets (" + std::to_string(ratchetMissing) + " of "
+                  + std::to_string(ratchetWanted) + " bars without)" + why);
         check(viewOff + intoOff + crossOff + fromOff + chordOff + ratchetOff == 0,
               "the pulse is an Octave and no head: view (" + std::to_string(viewOff) + "), no drawn slide into it ("
                   + std::to_string(intoOff) + ", " + std::to_string(crossOff) + " from the bar before) or out of it ("
