@@ -10,9 +10,10 @@ class T5ynthProcessor;
  * SequencerPanel — sequencer + arpeggiator controls + step grid.
  *
  * Layout:
- *   Row 1 (SHARED): [>/■] [Step|Gen]  BPM[==]  [1/4|1/8|1/16]  Gate[==] Shuffle[==] · MIDI
+ *   Row 1 (SHARED): [>/■] [Step|Phrase|Gen]  BPM[==]  [1/4|1/8|1/16]  Gate[==] Shuffle[==] · MIDI
  *   STEP mode row 2: Steps[==●]16   Oct[-2 -1 0 +1 +2]   [Preset▾][S][L]
  *   STEP mode grid : dot | vertical note slider | glide dot | horiz velocity
+ *   PHRASE mode    : the Phrase controls and view (docs/PHRASE_SEQ_CONCEPT.md §4)
  *   GEN  mode      : 2-column Euclidean + harmony box + voices (no genVisArea)
  *   Row 4 (bottom): [Arp ✓] [Up▾] [1/16▾]  [Oct 1 2 3 4]
  */
@@ -50,9 +51,9 @@ private:
 
     // Row 1: Transport + step config
     juce::TextButton transportBtn { "PLAY" };
-    // Step | Gen mode switchbox — the visible control; drives engineHidden
-    // (the hidden APVTS bridge for PID::seqEngine).
-    juce::TextButton modeStepBtn { "Step" }, modeGenBtn { "Gen" };
+    // Step | Phrase | Gen mode switchbox — the visible control; drives
+    // engineHidden (the hidden APVTS bridge for PID::seqEngine).
+    juce::TextButton modeStepBtn { "Step" }, modePhraseBtn { "Phrase" }, modeGenBtn { "Gen" };
     juce::Rectangle<int> modeSwitchBounds;
     // Unified Steps slider (step mode, inline bar, no FIX). Manual write to
     // seqSteps (like the old dropdown) so the grid stays capped at MAX_COLS.
@@ -186,7 +187,9 @@ private:
     // per-cycle euclidean/Turing decisions legible. Visible only in GEN mode.
     std::unique_ptr<GenSeqCRTMonitor> genMonitor;
 
-    bool genModeActive = false;
+    // The SeqEngine resized() last laid the panel out for (-1 before the
+    // first layout); the timer re-lays out when the parameter moves away.
+    int layoutEngine = -1;
 
     // Row 4: Arp controls (left-labels + glyph/numeric switchboxes)
     juce::Label arpModeLabel;                    // "ARP" left-label

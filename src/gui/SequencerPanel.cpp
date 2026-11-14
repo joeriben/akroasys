@@ -637,24 +637,31 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     }
     engineHidden.onChange = [this] {
         const int engine = engineHidden.getSelectedId() - 1;
-        modeStepBtn.setToggleState(engine == SeqEngine::Step, juce::dontSendNotification);
-        modeGenBtn .setToggleState(engine == SeqEngine::Gen,  juce::dontSendNotification);
+        modeStepBtn  .setToggleState(engine == SeqEngine::Step,   juce::dontSendNotification);
+        modePhraseBtn.setToggleState(engine == SeqEngine::Phrase, juce::dontSendNotification);
+        modeGenBtn   .setToggleState(engine == SeqEngine::Gen,    juce::dontSendNotification);
         // Leaving Step mode cancels an in-progress step-record.
         if (engine != SeqEngine::Step && processorRef.isStepRecordArmed())
             processorRef.toggleStepRecord();
     };
     engineA = std::make_unique<CA>(apvts, PID::seqEngine, engineHidden);
 
-    // Step | Gen mode switchbox (visible) — segments drive the hidden bridge.
-    modeStepBtn.setConnectedEdges(juce::Button::ConnectedOnRight);
-    modeGenBtn .setConnectedEdges(juce::Button::ConnectedOnLeft);
-    // Step = general bright green; Gen = the gen-specific dark green, so the lit
-    // segment's colour itself signals which mode you are in.
-    styleSwitchButton(modeStepBtn, kSeqCol);
-    styleSwitchButton(modeGenBtn,  kSeqFill);
+    // Step | Phrase | Gen mode switchbox (visible) — segments drive the hidden
+    // bridge, left to right in SeqEngine's order.
+    modeStepBtn  .setConnectedEdges(juce::Button::ConnectedOnRight);
+    modePhraseBtn.setConnectedEdges(juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
+    modeGenBtn   .setConnectedEdges(juce::Button::ConnectedOnLeft);
+    // Step = general bright green; the two generative modes = the dark green
+    // their controls use, so the lit segment's colour tells hand-written from
+    // generated.
+    styleSwitchButton(modeStepBtn,   kSeqCol);
+    styleSwitchButton(modePhraseBtn, kSeqFill);
+    styleSwitchButton(modeGenBtn,    kSeqFill);
     modeStepBtn.setTooltip("Step mode: hand-edit the note grid. Double-click to arm step recording (capture incoming MIDI into steps).");
+    modePhraseBtn.setTooltip("Phrase mode: a bass line, riff, lead or stab in a key, over chords, "
+                             "repeating in 4/8/16-bar phrases that vary at the phrase end");
     modeGenBtn.setTooltip("Gen mode: generative Euclidean/Turing-machine sequencer");
-    for (auto* b : { &modeStepBtn, &modeGenBtn })
+    for (auto* b : { &modeStepBtn, &modePhraseBtn, &modeGenBtn })
     {
         b->setClickingTogglesState(true);
         b->setRadioGroupId(2010);
@@ -663,11 +670,13 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
     modeStepBtn.onClick = [this] { engineHidden.setSelectedId(SeqEngine::Step + 1, juce::sendNotificationSync); };
     // Double-click the Step segment to latch step-record (handled in mouseDoubleClick).
     modeStepBtn.addMouseListener(this, false);
-    modeGenBtn .onClick = [this] { engineHidden.setSelectedId(SeqEngine::Gen + 1,  juce::sendNotificationSync); };
+    modePhraseBtn.onClick = [this] { engineHidden.setSelectedId(SeqEngine::Phrase + 1, juce::sendNotificationSync); };
+    modeGenBtn   .onClick = [this] { engineHidden.setSelectedId(SeqEngine::Gen + 1,    juce::sendNotificationSync); };
     {
         const int engine = engineHidden.getSelectedId() - 1;   // initial sync from param
-        modeStepBtn.setToggleState(engine == SeqEngine::Step, juce::dontSendNotification);
-        modeGenBtn .setToggleState(engine == SeqEngine::Gen,  juce::dontSendNotification);
+        modeStepBtn  .setToggleState(engine == SeqEngine::Step,   juce::dontSendNotification);
+        modePhraseBtn.setToggleState(engine == SeqEngine::Phrase, juce::dontSendNotification);
+        modeGenBtn   .setToggleState(engine == SeqEngine::Gen,    juce::dontSendNotification);
     }
 
     auto intFmt = [](double v) { return juce::String(juce::roundToInt(v)); };
@@ -1146,14 +1155,17 @@ void SequencerPanel::mouseDoubleClick(const juce::MouseEvent& e)
 
 void SequencerPanel::timerCallback()
 {
-    bool genRunning = static_cast<int>(processorRef.getValueTreeState()
-        .getRawParameterValue(PID::seqEngine)->load()) == SeqEngine::Gen;
+    const int engine = static_cast<int>(processorRef.getValueTreeState()
+        .getRawParameterValue(PID::seqEngine)->load());
+    const bool genRunning = engine == SeqEngine::Gen;
+    const bool stepMode   = engine == SeqEngine::Step;
     bool seqRunning = processorRef.getValueTreeState()
         .getRawParameterValue(PID::seqRunning)->load() > 0.5f;
 
     // Mode changes must update the layout even while audio is idle. Otherwise
-    // GEN-off stays visually in gen mode until PLAY wakes the timer path.
-    if (genRunning != genModeActive)
+    // a switch away from GEN stays visually in gen mode until PLAY wakes the
+    // timer path.
+    if (engine != layoutEngine)
     {
         resized();
         repaint();
@@ -1167,7 +1179,7 @@ void SequencerPanel::timerCallback()
     if (presetGen != lastPresetGen)
     {
         lastPresetGen = presetGen;
-        if (!genRunning)
+        if (stepMode)
         {
             syncStepCount();   // step count + column visibility follow the preset
             repaint();         // redraw the new note pattern
@@ -1227,9 +1239,8 @@ void SequencerPanel::timerCallback()
 
     if (genRunning && genMonitor) genMonitor->poll();
 
-    // Step-grid highlight (step mode only). Gen mode has no per-step UI now that
-    // the broken visualization is gone, so nothing to track/repaint there.
-    if (!genRunning)
+    // Step-grid highlight (step mode only; the grid is hidden in Phrase and Gen).
+    if (stepMode)
     {
         int step = processorRef.getStepSequencer().currentStepForGui.load(std::memory_order_relaxed);
         if (step != currentStep)
@@ -1275,7 +1286,7 @@ void SequencerPanel::timerCallback()
     // value outside the window (1, or 33..64 from a preset/DAW automation) would
     // otherwise keep steps != numVisibleSteps permanently true, firing
     // syncStepCount() (and its resized()) every 100 ms — an idle-CPU regression.
-    if (!genRunning)
+    if (stepMode)
     {
         int steps = static_cast<int>(processorRef.getValueTreeState()
                         .getRawParameterValue(PID::seqSteps)->load());
@@ -1286,7 +1297,7 @@ void SequencerPanel::timerCallback()
 
     // Repaint only steps that changed (current + previous)
     static int prevStep = -1;
-    if (!genRunning && currentStep != prevStep)
+    if (stepMode && currentStep != prevStep)
     {
         if (prevStep >= 0 && prevStep < MAX_COLS)
             stepCols[static_cast<size_t>(prevStep)]->repaint();
@@ -1386,7 +1397,7 @@ void SequencerPanel::resized()
     const int panelW = getWidth();
     const bool compactTopRow = panelW < 760;
 
-    // ═══ Row 1: ALWAYS the same (shared) — Play/Stop, Step|Gen, BPM, Division,
+    // ═══ Row 1: ALWAYS the same (shared) — Play/Stop, Step|Phrase|Gen, BPM, Division,
     //            Gate, Shuffle, MIDI. Steps/Octave/Preset are mode-dependent and
     //            live in the STEP-mode row below. ═══
     auto r1 = area.removeFromTop(rH);
@@ -1433,8 +1444,23 @@ void SequencerPanel::resized()
     };
 
     const int transportW = 36;
-    const int modeSegW = compactTopRow ? 30 : 38;   // one Step/Gen segment
-    const int modeW = modeSegW * 2;
+    // Step | Phrase | Gen: each segment as wide as its label in the switch
+    // font plus the LookAndFeel's text indents (at most 0.6 x the font height
+    // per side), so no label is squeezed below the font size and "Phrase"
+    // keeps the 11 px minimum (INTERFACE_DESIGN_POLICY). The Step segment
+    // also fits "REC", its label while step recording is armed.
+    auto modeSegW = [&](juce::TextButton& b, std::initializer_list<const char*> labels)
+    {
+        const float fs = b.getLookAndFeel().getTextButtonFont(b, rH).getHeight();
+        int textW = 0;
+        for (const char* label : labels)
+            textW = juce::jmax(textW, measureTextWidth(label, fs));
+        return textW + 2 * juce::roundToInt(fs * 0.6f) + 2;
+    };
+    const int modeStepW   = modeSegW(modeStepBtn,   { "Step", "REC" });
+    const int modePhraseW = modeSegW(modePhraseBtn, { "Phrase" });
+    const int modeGenW    = modeSegW(modeGenBtn,    { "Gen" });
+    const int modeW = modeStepW + modePhraseW + modeGenW;
     const int divisionPrefW = kNumDivBtns * (compactTopRow ? 18 : 22);  // note-glyph switchbox
     const int divisionMinW  = kNumDivBtns * (compactTopRow ? 15 : 18);
     const int midiClusterW = midiTextW + midiLedW + midiGap;
@@ -1450,10 +1476,10 @@ void SequencerPanel::resized()
 
     // Overflow drop order (highest tier sheds first; the note divisions, tier 1,
     // survive longest). Shuffle is the most expendable; BPM/Gate/MIDI, transport
-    // and the Step|Gen switch never drop.
+    // and the Step|Phrase|Gen switch never drop.
     std::vector<ResponsiveStripItem> items {
         { transportW, transportW, 0, false, ResponsiveStripFallback::none },          // Play/Stop
-        { modeW, modeW, 0, false, ResponsiveStripFallback::none },                    // Step|Gen
+        { modeW, modeW, 0, false, ResponsiveStripFallback::none },                    // Step|Phrase|Gen
         { bpmRow->getPreferredWidth(), bpmRow->getMinimumWidth(), 0, true, ResponsiveStripFallback::none }, // BPM
         { divisionPrefW, divisionMinW, 1, false, ResponsiveStripFallback::overflow }, // Division (kept longest)
         { gatePrefW, gateMinW, 0, false, ResponsiveStripFallback::none },             // Gate
@@ -1466,11 +1492,12 @@ void SequencerPanel::resized()
 
     transportBtn.setBounds(headerLayout.bounds[slotTransport]);
 
-    // Step | Gen switchbox — two equal connected segments.
+    // Step | Phrase | Gen switchbox — three connected, label-sized segments.
     {
         auto modeArea = headerLayout.bounds[slotMode];
-        modeStepBtn.setBounds(modeArea.removeFromLeft(modeArea.getWidth() / 2));
-        modeGenBtn .setBounds(modeArea);
+        modeStepBtn  .setBounds(modeArea.removeFromLeft(modeStepW));
+        modePhraseBtn.setBounds(modeArea.removeFromLeft(modePhraseW));
+        modeGenBtn   .setBounds(modeArea);
         modeSwitchBounds = modeStepBtn.getBounds().getUnion(modeGenBtn.getBounds());
     }
 
@@ -1547,12 +1574,14 @@ void SequencerPanel::resized()
     area.removeFromBottom(g);
 
     // ═══ Determine mode ═══
-    genModeActive = static_cast<int>(processorRef.getValueTreeState()
-        .getRawParameterValue(PID::seqEngine)->load()) == SeqEngine::Gen;
+    layoutEngine = static_cast<int>(processorRef.getValueTreeState()
+        .getRawParameterValue(PID::seqEngine)->load());
+    const bool genModeActive  = layoutEngine == SeqEngine::Gen;
+    const bool stepModeActive = layoutEngine == SeqEngine::Step;
 
     // Visibility: step grid vs gen controls (Row 1 stays ALWAYS visible)
     for (int i = 0; i < MAX_COLS; ++i)
-        stepCols[static_cast<size_t>(i)]->setVisible(!genModeActive && i < numVisibleSteps);
+        stepCols[static_cast<size_t>(i)]->setVisible(stepModeActive && i < numVisibleSteps);
 
     genStepsRow->setVisible(genModeActive);
     genPulsesRow->setVisible(genModeActive);
@@ -1582,8 +1611,8 @@ void SequencerPanel::resized()
     }
 
     // Step-mode-only controls (step row 2): unified Steps slider, octave switch,
-    // preset management. Hidden in gen mode, which has its own Steps (with FIX).
-    const bool stepModeActive = !genModeActive;
+    // preset management. Hidden in gen mode, which has its own Steps (with FIX),
+    // and in Phrase mode.
     seqStepsRow->setVisible(stepModeActive);
     presetBox.setVisible(stepModeActive);
     seqSaveBtn.setVisible(stepModeActive);
@@ -1774,7 +1803,7 @@ void SequencerPanel::resized()
 
         gridArea = {};
     }
-    else
+    else if (stepModeActive)
     {
         // ═══ Step mode ═══
 
@@ -1832,5 +1861,10 @@ void SequencerPanel::resized()
                         stepW, gridArea.getHeight());
             }
         }
+    }
+    else
+    {
+        // ═══ Phrase mode ═══ (docs/PHRASE_SEQ_CONCEPT.md §4)
+        gridArea = {};
     }
 }
