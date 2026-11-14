@@ -133,7 +133,10 @@ Rendering happens at playback, per step, against the chord and scale valid
 at that moment. Embellishments are resolved against the previous sounding
 note P and the next head T. T is computed with the chord valid at T's
 position, so an approach note before a chord change targets the *new*
-chord — which is what an approach note is for.
+chord — which is what an approach note is for. T is the head as its bar
+plays it: an ABAB cadence's note, not a head Drop silences, not the pulse
+Bass's Lift turns into an Octave; under the octave Lift the line is led as
+it plays without Lift.
 
 | Kind | Resolution |
 |------|-----------|

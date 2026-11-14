@@ -1043,41 +1043,122 @@ int headNote(const Slot& sl, const Chord& ch, int tonic)
     return chordToneNote(ch, sl.member, sl.octave, tonic);
 }
 
-/** The next head after bar-step k of the bar (k = −1: from the bar start),
- *  rendered against the chord valid at its own position (§3.4). A bar of the
- *  next phrase is read from that phrase's motif. Bars the line does not play
- *  in have no head; −1 when none follows in the next two bars. */
-int lookaheadHead(const LineCtx& x, int k, bool fromNextBar)
+/** The note an ABAB cadence (§3.7) puts on its bar's last sounding head:
+ *  closed (2) on the root, open (1) on the fifth, or on scale degree 2 over a
+ *  tonic pedal. */
+int cadenceNote(const LineCtx& x, int cadence, const Slot& sl, const Chord& ch)
 {
-    const Motif& m = *x.motif;
+    if (cadence == 2)
+        return chordToneNote(ch, Root, sl.octave, x.tonic);
+    if (x.cfg->harm == Harm::Pedal && !x.keys)
+        return scaleStep(chordToneNote(ch, Root, sl.octave, x.tonic), 1, x.mask);   // degree 2
+    return chordToneNote(ch, Fifth, sl.octave, x.tonic);
+}
+
+/** A bar as its variation plays it (§3.7). The cadence lands on the bar's
+ *  last sounding head; Lift (Bass) on the last sounding pulse of the last
+ *  beat; Ratchet on the last beat's strongest head (or strongest pulse when
+ *  it has none). Drop silences the last beat. */
+struct BarShape
+{
+    BarVariation var;
+    int    mb = 0, steps = 0;
+    double stepQ = 0.25, lastBeatQ = 3.0;
+    int    lastHeadK = -1, lastPulseInLastBeat = -1, ratchetK = -1;
+
+    bool inLastBeat(int k) const { return static_cast<double>(k) * stepQ >= lastBeatQ - kEps; }
+};
+
+BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, int bar,
+                 double barLenQ, const BarVariation& var)
+{
+    BarShape b;
+    b.var = var;
     const int spb = m.stepsPerBar;
-    if (!fromNextBar)
+    b.mb = floorMod(bar, m.len);
+    b.steps = barStepsFor(spb, barLenQ);
+    b.stepQ = 4.0 / spb;
+    b.lastBeatQ = std::max(0.0, barLenQ - 1.0);
+    int ratchetW = -1;
+    for (int k = 0; k < b.steps; ++k)
     {
-        const int mb = floorMod(x.bar, m.len);
-        const int steps = barStepsFor(spb, x.barLenQ);
-        const Chord ch = chordAt(x, x.bar);
-        for (int j = k + 1; j < steps; ++j)
+        const int s = b.mb * spb + k;
+        if (m.slots[static_cast<size_t>(s)].fn == Fn::Rest) continue;
+        const bool inLast = b.inLastBeat(k);
+        if (var.drop && inLast) continue;
+        const bool head = heads[static_cast<size_t>(s)];
+        if (head) b.lastHeadK = k;
+        if (inLast)
         {
-            const int s = mb * spb + j;
-            if (m.slots[static_cast<size_t>(s)].fn != Fn::Rest && x.heads[static_cast<size_t>(s)])
-                return headNote(m.slots[static_cast<size_t>(s)], ch, x.tonic);
+            b.lastPulseInLastBeat = k;
+            const int w = (head ? 16 : 0) + metricWeight16(t16Of(k, spb));
+            if (w > ratchetW) { ratchetW = w; b.ratchetK = k; }
         }
     }
-    for (int ahead = 1; ahead <= 2; ++ahead)
+    return b;
+}
+
+/** The context's bar and the two after it, as the line plays them: each
+ *  bar's motif (a bar of the next phrase is read from that phrase's motif),
+ *  heads and shape. A line without variation (the Answer) has none in any
+ *  of them. */
+struct Ahead
+{
+    std::array<const Motif*, 3> motif {};
+    std::array<const std::array<bool, kMaxMotifSteps>*, 3> heads {};
+    std::array<BarShape, 3> shape {};
+};
+
+Ahead aheadOf(const LineCtx& x)
+{
+    Ahead a;
+    for (int i = 0; i < 3; ++i)
     {
-        const int nb = x.bar + ahead;
-        if (!playsIn(x, nb)) continue;
-        const bool next = inNextPhrase(x, nb);
-        const Motif& nm = next ? *x.nextPhraseMotif : m;
-        const auto& nh = next ? x.nextPhraseHeads : x.heads;
-        const int mb = floorMod(nb, nm.len);
-        const int steps = barStepsFor(nm.stepsPerBar, x.barLenQ);
-        const Chord ch = chordAt(x, nb);
-        for (int j = 0; j < steps; ++j)
+        const int b = x.bar + i;
+        const bool next = i > 0 && inNextPhrase(x, b);
+        a.motif[static_cast<size_t>(i)] = next ? x.nextPhraseMotif : x.motif;
+        a.heads[static_cast<size_t>(i)] = next ? &x.nextPhraseHeads : &x.heads;
+        BarVariation v;
+        if (x.var)
+            v = i == 0 ? *x.var : variationForBar(*a.motif[static_cast<size_t>(i)], *a.heads[static_cast<size_t>(i)], *x.cfg, b);
+        a.shape[static_cast<size_t>(i)] = shapeOf(*a.motif[static_cast<size_t>(i)], *a.heads[static_cast<size_t>(i)], b, x.barLenQ, v);
+    }
+    return a;
+}
+
+/** The note the head at bar-step k plays as its bar renders it (the cadence
+ *  included, the octave Lift puts on the last beat not: notes are led in the
+ *  line under it); −1 when the step plays no head: a rest, a step that is not
+ *  a head, a step Drop silences, and Bass's last pulse under Lift, which
+ *  plays an Octave of the note before it instead. */
+int headAsPlayed(const LineCtx& x, const Ahead& a, int i, const Chord& ch, int k)
+{
+    const Motif& m = *a.motif[static_cast<size_t>(i)];
+    const BarShape& b = a.shape[static_cast<size_t>(i)];
+    const int s = b.mb * m.stepsPerBar + k;
+    const Slot& sl = m.slots[static_cast<size_t>(s)];
+    if (sl.fn == Fn::Rest || !(*a.heads[static_cast<size_t>(i)])[static_cast<size_t>(s)]) return -1;
+    const bool inLast = b.inLastBeat(k);
+    if (b.var.drop && inLast) return -1;
+    if (b.var.lift && x.bass && inLast && k == b.lastPulseInLastBeat) return -1;
+    if (b.var.cadence != 0 && k == b.lastHeadK) return cadenceNote(x, b.var.cadence, sl, ch);
+    return headNote(sl, ch, x.tonic);
+}
+
+/** The next head after bar-step k of the bar (k = −1: from the bar start),
+ *  as its bar plays it, rendered against the chord valid at its own position
+ *  (§3.4). Bars the line does not play in have no head; −1 when none follows
+ *  in the next two bars. */
+int lookaheadHead(const LineCtx& x, const Ahead& a, int k, bool fromNextBar)
+{
+    for (int i = fromNextBar ? 1 : 0; i <= 2; ++i)
+    {
+        if (i > 0 && !playsIn(x, x.bar + i)) continue;
+        const Chord ch = chordAt(x, x.bar + i);
+        for (int j = i == 0 ? k + 1 : 0; j < a.shape[static_cast<size_t>(i)].steps; ++j)
         {
-            const int s = mb * nm.stepsPerBar + j;
-            if (nm.slots[static_cast<size_t>(s)].fn != Fn::Rest && nh[static_cast<size_t>(s)])
-                return headNote(nm.slots[static_cast<size_t>(s)], ch, x.tonic);
+            const int n = headAsPlayed(x, a, i, ch, j);
+            if (n >= 0) return n;
         }
     }
     return -1;
@@ -1123,42 +1204,22 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     const Motif& m = *x.motif;
     const Config& cfg = *x.cfg;
     const int spb = m.stepsPerBar;
-    const double stepQ = 4.0 / spb;
-    const int steps = barStepsFor(spb, x.barLenQ);
-    const int mb = floorMod(x.bar, m.len);
-    const double lastBeatQ = std::max(0.0, x.barLenQ - 1.0);
-    const BarVariation none;
-    const BarVariation& var = x.var ? *x.var : none;
+    const Ahead ahead = aheadOf(x);
+    const BarShape& sh = ahead.shape[0];
+    const BarVariation& var = sh.var;
+    const double stepQ = sh.stepQ;
+    const int steps = sh.steps;
+    const int mb = sh.mb;
+    const double lastBeatQ = sh.lastBeatQ;
     const Chord ch = chordAt(x, x.bar);
-    auto inLastBeat = [&](int k) { return static_cast<double>(k) * stepQ >= lastBeatQ - kEps; };
+    const int lastHeadK = sh.lastHeadK, lastPulseInLastBeat = sh.lastPulseInLastBeat, ratchetK = sh.ratchetK;
 
-    // The cadence lands on the bar's last sounding head; Lift (Bass) on the
-    // last sounding pulse of the last beat; Ratchet on the last beat's
-    // strongest head (or strongest pulse when it has none).
-    //
     // Lift (not Bass) transposes the last beat: the line is rendered as it
     // plays without Lift (P, PP, the Fill's start and the bar's last notes
     // are that line's), and the last beat sounds an octave above it. Lifted
     // in the line itself, every embellishment after a lifted note took the
     // octave again from P (two or three octaves up), and the Fill run stayed
     // below the notes around it.
-    int lastHeadK = -1, lastPulseInLastBeat = -1, ratchetK = -1, ratchetW = -1;
-    for (int k = 0; k < steps; ++k)
-    {
-        const int s = mb * spb + k;
-        if (m.slots[static_cast<size_t>(s)].fn == Fn::Rest) continue;
-        const bool inLast = inLastBeat(k);
-        if (var.drop && inLast) continue;
-        const bool head = x.heads[static_cast<size_t>(s)];
-        if (head) lastHeadK = k;
-        if (inLast)
-        {
-            lastPulseInLastBeat = k;
-            const int w = (head ? 16 : 0) + metricWeight16(t16Of(k, spb));
-            if (w > ratchetW) { ratchetW = w; ratchetK = k; }
-        }
-    }
-
     int pBeforeLastBeat = P;   // where a Fill run starts from
     for (int k = 0; k < steps; ++k)
     {
@@ -1167,7 +1228,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         const double onQ = shuffled(k, stepQ, cfg.shuffle, x.barLenQ);
         Slot sl = m.slots[static_cast<size_t>(s)];
         const bool head = x.heads[static_cast<size_t>(s)];
-        const bool inLast = inLastBeat(k);
+        const bool inLast = sh.inLastBeat(k);
         StepView* sv = view ? &view->view[static_cast<size_t>(k)] : nullptr;
         if (sl.fn == Fn::Rest) { if (sv) *sv = StepView {}; continue; }
         if (s == var.repitchStep) sl.fn = var.repitchFn;
@@ -1177,18 +1238,9 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             continue;
         }
 
-        const int T = lookaheadHead(x, k, false);
+        const int T = lookaheadHead(x, ahead, k, false);
         int note = renderSlot(sl, ch, P, PP, T, x);
-
-        if (var.cadence != 0 && head && k == lastHeadK)
-        {
-            if (var.cadence == 2)
-                note = chordToneNote(ch, Root, sl.octave, x.tonic);
-            else if (cfg.harm == Harm::Pedal && !x.keys)
-                note = scaleStep(chordToneNote(ch, Root, sl.octave, x.tonic), 1, x.mask);   // degree 2
-            else
-                note = chordToneNote(ch, Fifth, sl.octave, x.tonic);
-        }
+        if (var.cadence != 0 && head && k == lastHeadK) note = cadenceNote(x, var.cadence, sl, ch);
         const int octShift = var.lift && inLast && !x.bass ? 12 : 0;
         if (var.lift && inLast && x.bass && k == lastPulseInLastBeat)
         {
@@ -1251,7 +1303,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     {
         // A scale run on the 16ths of the last beat that carry no onset, into
         // the next bar's first head.
-        const int T = lookaheadHead(x, steps, true);
+        const int T = lookaheadHead(x, ahead, steps, true);
         const int target = T >= 0 ? T : (P >= 0 ? P : chordRootNote(ch, x.tonic));
         const int from = pBeforeLastBeat >= 0 ? pBeforeLastBeat : target;
         const int dir = target >= from ? -1 : 1;   // counted back from the target
