@@ -207,7 +207,13 @@ values for the listening phase, not derived from data.
   step can end up to 3/4 of a slot after its slot. When the bar is
   re-rendered while a note sounds (a knob change, a chord from Keys), the
   note ends at the earlier of its own end and its line's next onset in the
-  new render; bar entry bounds it the same way.
+  new render; bar entry bounds it the same way. A note that slides out
+  waits for its line's next onset and glides into it; into a chord (Stab)
+  it ends there instead. Re-rendered while it waits, it glides into the
+  next onset the new render has on its line from where playback has
+  reached; when there is none and the new render still ends the bar
+  sliding on that line, it waits on into the next bar; otherwise (the layer
+  turned off, a rhythm without that onset) it ends at the re-render.
 - Generation is seeded; the seed is stored in the motif, not as a param.
   Dice draws a new seed and generates a new motif. Undo is one level over
   Dice, Keep and From Step: it returns to the motif before the last of
@@ -239,7 +245,12 @@ values for the listening phase, not derived from data.
      into the next downbeat. Needs at least 4 steps per bar. The free 16ths
      are found on the straight grid; the fill notes then swing with the
      line.
-  4. **Ratchet**: one head in the last beat repeats as 2 or 3 sub-steps.
+  4. **Ratchet**: the last beat's strongest head (by metric weight, the
+     earlier on a tie) repeats as 2 or 3 sub-steps, which divide what is
+     left of its slot after its (shuffled) onset. A last beat without a head
+     ratchets its strongest pulse; Bass's Lift Octave counts as no head. A
+     last beat with nothing sounding has no ratchet.
+     Neither the ratcheted step nor its repeats slide out.
   5. **Drop**: the last beat is silent (the gap before the next phrase).
      Drop and Fill exclude each other; when both would apply, a seeded coin
      picks one.
