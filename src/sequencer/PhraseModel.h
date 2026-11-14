@@ -384,6 +384,31 @@ void entryNotes(const Config& cfg, const Motif& motif, const Motif& nextPhraseMo
  *  laps of the loop so it does not depend on where playback started. */
 int voicingForBar(const Config& cfg, int bar, int anchor, int* out);
 
+// ─── View text (§4) ─────────────────────────────────────────────────────────
+// UTF-8 texts the read-only phrase view shows.
+
+/** A pitch class as the synth names pitches elsewhere: C C# D … B. */
+std::string pitchClassName(int pc);
+
+/** A MIDI note as the synth names notes elsewhere: A3 for 57, C4 for 60. */
+std::string noteNameText(int note);
+
+/** The chord as a chord symbol: root, then m / ° / ø / +, the seventh (7,
+ *  maj7, or 6 for a sixth in its place, °7 over a diminished triad), sus2 /
+ *  sus4, 5 for root and fifth alone, (♭5) / (♯5) for a fifth the name does
+ *  not imply, add… for a member outside that vocabulary (only held keys
+ *  make one), no3 / no5 for a member the chord lacks. Am, F, G7, Bø7, C5,
+ *  Dm(maj7), Esus4no5. */
+std::string chordNameText(const Chord& c);
+
+/** What a step plays, as the phrase view writes it: · a rest or a silenced
+ *  step; R 3 5 7 the chord tone (2 the scale step a cadence puts there), ●
+ *  a Stab hit of the whole chord, each with ' per octave above the part's
+ *  register and , per octave below; = repeat, 8ve octave, p passing,
+ *  n↑ / n↓ neighbour, ↗ / ↘ the approach that rises / falls into the next
+ *  head, ½↗ the chromatic approach from a semitone below. */
+std::string stepGlyphText(const StepView& v);
+
 // ─── Step → Phrase (§4) ─────────────────────────────────────────────────────
 
 struct StepInput { int note; bool enabled; bool slide; float velocity; };

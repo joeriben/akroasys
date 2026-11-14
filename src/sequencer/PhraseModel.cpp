@@ -287,35 +287,162 @@ ChordLabel chordLabel(int degree0, int scaleType)
     return l;
 }
 
+namespace
+{
+// UTF-8 in a std::string: this file has no JUCE, and the readers of the
+// UI texts below decode them as UTF-8.
+constexpr const char* kFlat   = "\xe2\x99\xad";  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+constexpr const char* kSharp  = "\xe2\x99\xaf";  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+constexpr const char* kDegree = "\xc2\xb0";      // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+
+/** A chord's triad read from its third and fifth, the vocabulary the slot
+ *  labels and the chord names share. A third outside {2 3 4 5} or a fifth
+ *  outside {6 7 8} counts as absent. */
+struct Triad
+{
+    bool minor = false;       // minor third
+    bool dim   = false;       // minor third, diminished fifth
+    bool aug   = false;       // major third, augmented fifth
+    bool power = false;       // no third, perfect fifth
+    int  sus   = 0;           // 2 | 4: a second or fourth in the third's place
+    int  alteredFifth = 0;    // −1 ♭5, +1 ♯5: a fifth the triad's name does not imply
+    bool noThird = false;     // no third and not a power chord
+    bool noFifth = false;
+};
+
+bool inThirdVocabulary(int iv) { return iv == 2 || iv == 3 || iv == 4 || iv == 5; }
+bool inFifthVocabulary(int iv) { return iv == 6 || iv == 7 || iv == 8; }
+
+Triad triadOf(int third, int fifth)
+{
+    if (!inThirdVocabulary(third)) third = -1;
+    if (!inFifthVocabulary(fifth)) fifth = -1;
+    Triad t;
+    t.minor = third == 3;
+    t.dim   = third == 3 && fifth == 6;
+    t.aug   = third == 4 && fifth == 8;
+    t.power = third < 0 && fifth == 7;
+    t.sus   = third == 2 ? 2 : third == 5 ? 4 : 0;
+    if (!t.dim && !t.aug) t.alteredFifth = fifth == 6 ? -1 : fifth == 8 ? 1 : 0;
+    t.noThird = third < 0 && !t.power;
+    t.noFifth = fifth < 0;
+    return t;
+}
+} // namespace
+
 std::string chordLabelText(const ChordLabel& l)
 {
     static constexpr const char* kUpper[] = { "I", "II", "III", "IV", "V", "VI", "VII" };
     static constexpr const char* kLower[] = { "i", "ii", "iii", "iv", "v", "vi", "vii" };
-    // The label is UTF-8 in a std::string: this file has no JUCE, and the
-    // readers of chordLabelText decode it as UTF-8.
-    static constexpr const char* kFlat   = "\xe2\x99\xad";  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by chordLabelText's readers
-    static constexpr const char* kSharp  = "\xe2\x99\xaf";  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by chordLabelText's readers
-    static constexpr const char* kDegree = "\xc2\xb0";      // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by chordLabelText's readers
     const int idx = std::clamp(l.numeral, 1, 7) - 1;
+    const Triad tr = triadOf(l.third, l.fifth);
 
     std::string t = l.accidental < 0 ? kFlat : l.accidental > 0 ? kSharp : "";
-    t += l.third == 3 ? kLower[idx] : kUpper[idx];
+    t += tr.minor ? kLower[idx] : kUpper[idx];
 
-    const bool dim = l.third == 3 && l.fifth == 6;
-    const bool aug = l.third == 4 && l.fifth == 8;
-    if (dim)                         return t + kDegree;
-    if (aug)                         return t + "+";
-    if (l.third < 0 && l.fifth == 7) return t + "5";
-    if (l.third == 2)                t += "sus2";
-    else if (l.third == 5)           t += "sus4";
-    if (l.fifth == 6)                t += std::string(kFlat) + "5";
-    else if (l.fifth == 8)           t += std::string(kSharp) + "5";
-    if (l.third < 0)                 t += "no3";
+    if (tr.dim)                  return t + kDegree;
+    if (tr.aug)                  return t + "+";
+    if (tr.power)                return t + "5";
+    if (tr.sus)                  t += tr.sus == 2 ? "sus2" : "sus4";
+    if (tr.alteredFifth)         t += std::string(tr.alteredFifth < 0 ? kFlat : kSharp) + "5";
+    if (tr.noThird)              t += "no3";
     // A scale with no fifth above the degree (Hirajoshi ♭III, Iwato ♭II,
     // Ryukyu V, Pelog ♭III) plays root and third only; the bare numeral
     // would read as the full triad.
-    if (l.fifth < 0)                 t += "no5";
+    if (tr.noFifth)              t += "no5";
     return t;
+}
+
+// ─── View text (§4) ────────────────────────────────────────────────────────
+
+std::string pitchClassName(int pc)
+{
+    static constexpr const char* kNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    return kNames[floorMod(pc, 12)];
+}
+
+std::string noteNameText(int note)
+{
+    return pitchClassName(note) + std::to_string(floorDiv(note, 12) - 1);
+}
+
+std::string chordNameText(const Chord& c)
+{
+    static constexpr const char* kHalfDim = "\xc3\xb8";   // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    // A member outside the triad / seventh vocabulary, named by the extension
+    // its interval is.
+    static constexpr const char* kAdd[] = { "", "\xe2\x99\xad" "9", "9", "\xe2\x99\xaf" "9", "3", "11",  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+                                            "\xe2\x99\xaf" "11", "5", "\xe2\x99\xad" "13", "6", "7", "maj7" };  // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    const int third = c.iv[Third], fifth = c.iv[Fifth], seventh = c.iv[Seventh];
+    const Triad tr = triadOf(third, fifth);
+    const bool hasSeventh = seventh == 9 || seventh == 10 || seventh == 11;
+
+    std::string adds;
+    for (int m = Third; m < kMaxVoices; ++m)
+    {
+        const int iv = c.iv[static_cast<size_t>(m)];
+        const bool named = m == Third ? inThirdVocabulary(iv) : m == Fifth ? inFifthVocabulary(iv) : hasSeventh;
+        if (iv > 0 && iv < 12 && !named) adds += std::string("add") + kAdd[iv];
+    }
+
+    std::string t = pitchClassName(c.rootPc);
+    std::string quality = tr.dim ? (seventh == 10 ? kHalfDim : kDegree) : tr.aug ? "+" : tr.minor ? "m" : "";
+    t += quality;
+    if (seventh == 10)      t += "7";
+    else if (seventh == 11) t += quality.empty() ? "maj7" : "(maj7)";
+    else if (seventh == 9)  t += tr.dim ? "7" : "6";
+    const bool power = tr.power && !hasSeventh && adds.empty();
+    if (power)              return t + "5";
+    if (tr.sus)             t += tr.sus == 2 ? "sus2" : "sus4";
+    if (tr.alteredFifth)    t += std::string("(") + (tr.alteredFifth < 0 ? kFlat : kSharp) + "5)";
+    t += adds;
+    if (tr.noThird || tr.power) t += "no3";
+    if (tr.noFifth)         t += "no5";
+    return t;
+}
+
+std::string stepGlyphText(const StepView& v)
+{
+    static constexpr const char* kRest     = "\xc2\xb7";               // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    static constexpr const char* kHit      = "\xe2\x97\x8f";          // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    static constexpr const char* kUp       = "\xe2\x86\x91";          // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    static constexpr const char* kDown     = "\xe2\x86\x93";          // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    static constexpr const char* kRise     = "\xe2\x86\x97";          // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    static constexpr const char* kFall     = "\xe2\x86\x98";          // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    static constexpr const char* kSemitone = "\xc2\xbd";               // charset-ok: UTF-8 in a std::string, decoded as UTF-8 by the UI texts' readers
+    if (v.note < 0) return kRest;
+    std::string t;
+    switch (v.tone)
+    {
+        case Tone::Root:    t = "R"; break;
+        case Tone::Third:   t = "3"; break;
+        case Tone::Fifth:   t = "5"; break;
+        case Tone::Seventh: t = "7"; break;
+        case Tone::Second:  t = "2"; break;
+        case Tone::Chord:   t = kHit; break;
+        case Tone::None:
+        case Tone::Count:   break;
+    }
+    if (!t.empty())
+        return t + std::string(static_cast<size_t>(std::max(0, v.octave)), '\'')
+                 + std::string(static_cast<size_t>(std::max(0, -v.octave)), ',');
+    switch (v.fn)
+    {
+        case Fn::Repeat:            return "=";
+        case Fn::Octave:            return "8ve";
+        case Fn::Passing:           return "p";
+        case Fn::NeighbourUp:       return std::string("n") + kUp;
+        case Fn::NeighbourDown:     return std::string("n") + kDown;
+        case Fn::ApproachUp:        return kRise;
+        case Fn::ApproachDown:      return kFall;
+        case Fn::ApproachChromatic: return std::string(kSemitone) + kRise;
+        case Fn::Rest:
+        case Fn::ChordTone:
+        case Fn::Count:             break;
+    }
+    // A sounding step with neither a tone nor an embellishment does not
+    // occur (a chord tone always names its tone); ? shows one should it.
+    return "?";
 }
 
 // ─── Register ──────────────────────────────────────────────────────────────
