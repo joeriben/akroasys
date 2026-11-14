@@ -1057,8 +1057,9 @@ int cadenceNote(const LineCtx& x, int cadence, const Slot& sl, const Chord& ch)
 
 /** A bar as its variation plays it (§3.7). The cadence lands on the bar's
  *  last sounding head; Lift (Bass) on the last sounding pulse of the last
- *  beat; Ratchet on the last beat's strongest head (or strongest pulse when
- *  it has none). Drop silences the last beat. */
+ *  beat, which then plays an Octave and no head, so a cadence there lands on
+ *  the head before it; Ratchet on the last beat's strongest head (or
+ *  strongest pulse when it has none). Drop silences the last beat. */
 struct BarShape
 {
     BarVariation var;
@@ -1080,6 +1081,7 @@ BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, 
     b.stepQ = 4.0 / spb;
     b.lastBeatQ = std::max(0.0, barLenQ - 1.0);
     int ratchetW = -1;
+    int headBefore = -1;   // the head before lastHeadK
     for (int k = 0; k < b.steps; ++k)
     {
         const int s = b.mb * spb + k;
@@ -1087,7 +1089,7 @@ BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, 
         const bool inLast = b.inLastBeat(k);
         if (var.drop && inLast) continue;
         const bool head = heads[static_cast<size_t>(s)];
-        if (head) b.lastHeadK = k;
+        if (head) { headBefore = b.lastHeadK; b.lastHeadK = k; }
         if (inLast)
         {
             b.lastPulseInLastBeat = k;
@@ -1095,6 +1097,11 @@ BarShape shapeOf(const Motif& m, const std::array<bool, kMaxMotifSteps>& heads, 
             if (w > ratchetW) { ratchetW = w; b.ratchetK = k; }
         }
     }
+    // Bass's Lift plays an Octave on the last pulse of the last beat in place
+    // of what is there. When that pulse is the last head, the cadence lands on
+    // the head before it; a bar whose only head it is has none (as under Drop).
+    if (var.lift && m.part == Part::Bass && b.lastHeadK >= 0 && b.lastHeadK == b.lastPulseInLastBeat)
+        b.lastHeadK = headBefore;
     return b;
 }
 

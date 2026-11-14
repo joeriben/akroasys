@@ -3471,6 +3471,103 @@ int main(int argc, char** argv)
                                     + " of " + std::to_string(two.fillChecked) + " off)" + two.fillWhy);
     }
 
+    std::printf("\n== 34. An ABAB cadence under Bass's Lift lands on the last head that sounds\n");
+    {
+        // ABAB's B ends closed, on R (§3.7). Bass's Lift plays an Octave of
+        // the note before it on the last pulse of the last beat, in place of
+        // what is there; when that pulse was the bar's last head, the cadence
+        // went with it and the bar ended on what the head before played.
+        // Oracle from the motif: the last pulse of the last beat and the heads
+        // (computeHeads). The cadence is on the last head that is not that
+        // pulse (Bass), on the last head (Riff, Lead: their Lift transposes
+        // the last beat). Its note is the root at the slot's octave (+12 in a
+        // lifted last beat), in the view and as an onset; Bass's last pulse
+        // still plays an Octave of the motif note before it. The last bar of a
+        // B unit, Variation 2/5 to 4/5 (Lift, Fill, Ratchet), 4/4 and 3/4.
+        std::mt19937 rng(34);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        int bars = 0, bassBars = 0, moved = 0, noCadence = 0, off = 0, offOnset = 0, octaves = 0, offOctave = 0;
+        std::string why;
+        for (int t = 0; t < 3000; ++t)
+        {
+            Config c = base();
+            const int pick = U(0, 3);
+            c.part = pick < 2 ? Part::Bass : pick == 2 ? Part::Riff : Part::Lead;
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.len = U(1, 2); c.pulses = U(2, 12); c.rotation = U(0, 7);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = Form::ABAB;
+            c.shuffle = 0.0f;
+            c.layer = Layer::Off;
+            c.variation = 0.2f * static_cast<float>(U(2, 4));
+            const double barLenQ = U(0, 3) == 0 ? 3.0 : 4.0;
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(34000 + t), 0, c), c);
+            const int N = phraseBarsOf(c), unitBars = N / 4;
+            const int bar = U(0, 1) ? 2 * unitBars - 1 : N - 1;   // the last bar of a B unit
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m;
+            in.bar = bar; in.barLenQ = barLenQ;
+            in.prevNote = U(36, 60); in.prevPrevNote = U(36, 60);
+            BarRender r;
+            renderBar(in, r);
+
+            std::array<bool, kMaxMotifSteps> heads {};
+            computeHeads(m, heads);
+            const int spb = m.stepsPerBar, mb = floorMod(bar, m.len);
+            const double stepQ = 4.0 / spb;
+            const bool bass = c.part == Part::Bass;
+            auto slotOf = [&](int k) -> const Slot& { return m.slots[static_cast<size_t>(mb * spb + k)]; };
+            auto isHead = [&](int k) { return heads[static_cast<size_t>(mb * spb + k)]; };
+            auto inLast = [&](int k) { return k * stepQ >= barLenQ - 1.0 - 1.0e-9; };
+            int lastPulse = -1, lastHead = -1, cadenceK = -1;
+            for (int k = 0; k < r.viewSteps; ++k)
+            {
+                if (slotOf(k).fn == Fn::Rest) continue;
+                if (inLast(k)) lastPulse = k;
+                if (isHead(k)) lastHead = k;
+            }
+            for (int k = 0; k < r.viewSteps; ++k)
+                if (slotOf(k).fn != Fn::Rest && isHead(k) && !(bass && k == lastPulse)) cadenceK = k;
+            ++bars;
+            bassBars += bass;
+            if (bass && lastHead >= 0 && lastHead == lastPulse) ++moved;
+
+            if (bass && lastPulse >= 0)
+            {
+                int p = in.prevNote;
+                for (int k = 0; k < lastPulse; ++k)
+                    if (slotOf(k).fn != Fn::Rest && r.view[static_cast<size_t>(k)].note >= 0) p = r.view[static_cast<size_t>(k)].note;
+                ++octaves;
+                offOctave += std::abs(r.view[static_cast<size_t>(lastPulse)].note - p) != 12;
+            }
+            if (cadenceK < 0) { ++noCadence; continue; }
+            const int tonic = tonicNote(partAnchor(c.part), c.scaleRoot);
+            const int want = chordToneNote(r.chord, Root, slotOf(cadenceK).octave, tonic)
+                           + (!bass && inLast(cadenceK) ? 12 : 0);
+            const int got = r.view[static_cast<size_t>(cadenceK)].note;
+            if (got != want && off++ < 4)
+                why += " | t " + std::to_string(t) + " part " + std::to_string(static_cast<int>(c.part)) + " step "
+                     + std::to_string(cadenceK) + ": " + std::to_string(got) + " want " + std::to_string(want);
+            bool onset = false;
+            for (int e = 0; e < r.count; ++e)
+            {
+                const Event& ev = r.events[static_cast<size_t>(e)];
+                onset |= ev.line == Line::Main && std::abs(ev.onQ - cadenceK * stepQ) < 1.0e-9 && ev.note == want;
+            }
+            offOnset += !onset;
+        }
+        check(bassBars > 1000 && bars - bassBars > 500, "bars compared (" + std::to_string(bassBars) + " Bass, "
+                                                         + std::to_string(bars - bassBars) + " Riff/Lead)");
+        check(moved > 100, "Bass bars whose last head is the Octave pulse (" + std::to_string(moved) + ", "
+                               + std::to_string(noCadence) + " bars without another head)");
+        check(off == 0, "the cadence plays R on the last head that sounds (" + std::to_string(off) + " off)" + why);
+        check(offOnset == 0, "the cadence sounds as an onset at its step (" + std::to_string(offOnset) + " off)");
+        check(octaves > 1000 && offOctave == 0, "Bass's last pulse plays an Octave of the note before it ("
+                                                    + std::to_string(offOctave) + " of " + std::to_string(octaves) + " off)");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

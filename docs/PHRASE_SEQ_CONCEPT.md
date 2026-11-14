@@ -222,6 +222,8 @@ values for the listening phase, not derived from data.
   applied.
 - ABAB is antecedent/consequent (Caplin 1998): A ends open (last head on 5,
   or scale degree 2 over a tonic pedal), B ends closed (last head on R).
+  The last head is the last one that sounds: when Bass's Lift puts its
+  Octave on the bar's last head, the cadence lands on the head before it.
 - Variation operators, ordered from least to most intrusive. The Variation
   control (0–1) sets how many of them apply, in this order, to B units and
   to the last bar of every phrase:
