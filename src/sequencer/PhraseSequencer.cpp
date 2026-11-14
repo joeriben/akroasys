@@ -570,7 +570,10 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
         {
             if (cfg.harm == Harm::Keys)
             {
-                const double from = std::max(q0, barStartQ);
+                // The next beat from where playback has reached, not from
+                // where the host reports this block: a report a little off
+                // (under kJumpQ) must not move the change to another beat.
+                const double from = std::max(resumeQ, barStartQ);
                 const double k = std::ceil((from - barStartQ) / beatQ - 1.0e-6);
                 tBeat = barStartQ + k * beatQ;
             }
@@ -620,10 +623,8 @@ void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSy
             keysChanged = false;
             renderCurrent();
             // The chord takes effect at the beat. A beat that lies before
-            // resumeQ (this block starts a hair past it, inside the beat
-            // rounding above, or a host reports it a little before where
-            // playback has reached) brings back no onset the blocks before
-            // played.
+            // resumeQ (playback reached a hair past it, inside the beat
+            // rounding above) brings back no onset the blocks before played.
             nextEvent = firstEventNotPlayed(std::max(t, resumeQ));
             releaseUnusedHeld(nextEvent, out, offset);
             endPendingByNextOnset(nextEvent);

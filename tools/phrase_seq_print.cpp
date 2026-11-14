@@ -2189,6 +2189,113 @@ int main(int argc, char** argv)
         check(errs == 0, "own length: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
     }
 
+    std::printf("\n== 25. A Keys chord takes effect at the beat after where playback reached, wherever the host reports\n");
+    {
+        // A Keys chord latched between two blocks takes effect at the next
+        // beat after where playback has reached. A host may report the block
+        // after the latch a little off that point (under the locate
+        // threshold), ahead or behind; the beat must not move with it. Each
+        // jittered run is compared with the same run reported exactly where
+        // playback reached: the same notes in the same order, each onset
+        // shifted by no more than the jitter. And against the jittered run
+        // with no chord change: the first note the chord changes lies in the
+        // beat after where playback reached.
+        int differ = 0, early = 0, errs = 0, runs = 0;
+        std::string why;
+        struct Meter { int num, den; std::vector<double> beats; };   // a beat inside the bar, a bar start
+        for (const Meter& m : { Meter { 4, 4, { 7.0, 8.0 } }, Meter { 6, 8, { 5.5, 6.0 } } })
+            for (int block : { 32, 64, 128, 512 })
+                for (double beat : m.beats)
+                    for (double side : { -0.004, 0.004 })
+                        for (double jit : { -0.009, -0.005, 0.005, 0.009 })
+                        {
+                            const double reached = beat + side;
+                            const double beatQ = 4.0 / m.den;
+                            const double barLenQ = 4.0 * m.num / m.den;
+                            const double next = std::ceil(reached / beatQ - 1.0e-6) * beatQ;
+                            const double dq = block * kBpm / (60.0 * kSr);
+                            // The runs end apart by the jitter: compare up to a point between
+                            // two steps (0.25 q), a bar and more after where playback reached.
+                            const double until = std::floor(reached / 0.25) * 0.25 + barLenQ + 0.625;
+                            // Main-line onsets from the block the latch precedes: (quarters, note).
+                            auto run = [&](double j, bool change, std::vector<std::pair<double, int>>& ons) {
+                                Config c = base();
+                                c.harm = Harm::Keys;
+                                c.form = Form::Loop;
+                                c.pulses = 16;
+                                c.variation = 0.0f;
+                                c.slide = 0.0f;
+                                c.layer = Layer::Off;
+                                T5ynthPhraseSequencer seq;
+                                seq.prepare(kSr);
+                                seq.setTimeSignature(m.num, m.den);
+                                seq.setConfig(c);
+                                seq.start();
+                                auto latch = [&](std::initializer_list<int> notes) {
+                                    seq.clearKeys();
+                                    for (int n : notes) seq.keyOn(n);
+                                    for (int n : notes) seq.keyOff(n);
+                                };
+                                latch({ 45, 48, 52 });   // A minor
+                                std::vector<double> starts;
+                                for (int b = static_cast<int>(std::ceil(1.0 / dq)); b >= 1; --b)
+                                    starts.push_back(reached - b * dq);
+                                const size_t at = starts.size();
+                                for (int b = 0; b < static_cast<int>(std::ceil((barLenQ + 1.0) / dq)); ++b)
+                                    starts.push_back(reached + j + b * dq);
+                                std::vector<VoiceEvent> out;
+                                out.reserve(1024);
+                                VoiceSim sim;
+                                for (size_t b = 0; b < starts.size(); ++b)
+                                {
+                                    if (change && b == at) latch({ 50, 53, 57 });   // D minor
+                                    out.clear();
+                                    seq.processBlock(block, kBpm, true, starts[b], out);
+                                    std::stable_sort(out.begin(), out.end(), [](const VoiceEvent& x, const VoiceEvent& y) {
+                                        if (x.sampleOffset != y.sampleOffset) return x.sampleOffset < y.sampleOffset;
+                                        return x.type == VoiceEvent::Type::NoteOff && y.type == VoiceEvent::Type::NoteOn;
+                                    });
+                                    for (const auto& e : out)
+                                    {
+                                        if (e.type == VoiceEvent::Type::NoteOn) sim.on(e); else sim.off(e);
+                                        const double q = starts[b] + e.sampleOffset * kOneSampleQ;
+                                        if (e.type == VoiceEvent::Type::NoteOn && e.strandId == -1 && b >= at && q < until)
+                                            ons.push_back({ q, e.note });
+                                    }
+                                }
+                                out.clear();
+                                seq.allNotesOff(out, 0);
+                                for (const auto& e : out) sim.off(e);
+                                return static_cast<int>(sim.live.size()) + sim.orphanOffs + sim.badGlides;
+                            };
+                            std::vector<std::pair<double, int>> got, exact, still;
+                            errs += run(jit, true, got) + run(0.0, true, exact) + run(jit, false, still);
+                            ++runs;
+                            const double tol = std::abs(jit) + 2 * kOneSampleQ;
+                            bool same = got.size() == exact.size();
+                            for (size_t i = 0; same && i < got.size(); ++i)
+                                same = got[i].second == exact[i].second && std::abs(got[i].first - exact[i].first) <= tol;
+                            char tag[128];
+                            std::snprintf(tag, sizeof tag, "%d/%d, %d-sample blocks, reached %g, reported %+g q",
+                                          m.num, m.den, block, reached, jit);
+                            if (!same && differ++ < 3)
+                                why += std::string(differ > 1 ? "; " : "") + tag;
+                            // The first note the chord changes, against the run without the change.
+                            double first = -1.0;
+                            for (size_t i = 0; first < 0.0 && i < got.size() && i < still.size(); ++i)
+                                if (got[i].second != still[i].second) first = got[i].first;
+                            const bool inBeat = first >= next - tol && first < next + beatQ;
+                            if (!inBeat && early++ < 3 && differ == 0)
+                                why += std::string(why.empty() ? "" : "; ") + tag + ": first changed note at q "
+                                     + std::to_string(first).substr(0, 6) + ", beat " + std::to_string(next).substr(0, 4);
+                        }
+        check(differ == 0, "Keys beat under host jitter: the notes of the run reported exactly ("
+                               + std::to_string(differ) + " of " + std::to_string(runs) + " differ) " + why);
+        check(early == 0, "Keys beat under host jitter: the chord changes in the beat after where playback reached ("
+                              + std::to_string(early) + " of " + std::to_string(runs) + " elsewhere)");
+        check(errs == 0, "Keys beat under host jitter: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
