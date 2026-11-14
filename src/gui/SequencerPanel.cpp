@@ -475,7 +475,7 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
         if (!par) return;
         bool playing = par->getValue() > 0.5f;
         par->setValueNotifyingHost(playing ? 0.0f : 1.0f);
-        if (playing) currentStep = -1;
+        if (playing) showCurrentStep(-1);
     };
     addAndMakeVisible(transportBtn);
 
@@ -1146,6 +1146,21 @@ void SequencerPanel::syncStepCount()
     resized();
 }
 
+void SequencerPanel::showCurrentStep(int step)
+{
+    if (step == currentStep)
+        return;
+    for (int i : { currentStep, step })
+    {
+        if (i < 0 || i >= MAX_COLS)
+            continue;
+        auto& col = *stepCols[static_cast<size_t>(i)];
+        col.isCurrentStep = (i == step);
+        col.repaint();
+    }
+    currentStep = step;
+}
+
 void SequencerPanel::mouseDoubleClick(const juce::MouseEvent& e)
 {
     // Double-click on the Step mode segment toggles step-record (latched).
@@ -1164,15 +1179,22 @@ void SequencerPanel::timerCallback()
 
     // Mode changes must update the layout even while audio is idle. Otherwise
     // a switch away from GEN stays visually in gen mode until PLAY wakes the
-    // timer path. Entering Step also re-reads the step count: a load or
-    // automation may have changed it while another mode was shown, and the
-    // step-count sync further down sits below the idle early-return.
+    // timer path. Entering Step also re-reads the step count and the playhead:
+    // a load or automation may have changed the count while another mode was
+    // shown, Step playback may have stopped meanwhile, and both the step-count
+    // sync and the highlight further down sit below the idle early-return.
     if (engine != layoutEngine)
     {
         if (stepMode)
+        {
             syncStepCount();   // lays the panel out
+            showCurrentStep(processorRef.getStepSequencer()
+                                .currentStepForGui.load(std::memory_order_relaxed));
+        }
         else
+        {
             resized();
+        }
         repaint();
     }
 
@@ -1247,15 +1269,8 @@ void SequencerPanel::timerCallback()
 
     // Step-grid highlight (step mode only; the grid is hidden in Phrase and Gen).
     if (stepMode)
-    {
-        int step = processorRef.getStepSequencer().currentStepForGui.load(std::memory_order_relaxed);
-        if (step != currentStep)
-        {
-            currentStep = step;
-            for (int i = 0; i < MAX_COLS; ++i)
-                stepCols[static_cast<size_t>(i)]->isCurrentStep = (i == currentStep);
-        }
-    }
+        showCurrentStep(processorRef.getStepSequencer()
+                            .currentStepForGui.load(std::memory_order_relaxed));
 
     // Transport button state (step seq)
     transportBtn.setButtonText(seqRunning ? "STOP" : "PLAY");
@@ -1299,17 +1314,6 @@ void SequencerPanel::timerCallback()
         const int clamped = juce::jlimit(2, MAX_COLS, steps);
         if (clamped != numVisibleSteps)
             syncStepCount();
-    }
-
-    // Repaint only steps that changed (current + previous)
-    static int prevStep = -1;
-    if (stepMode && currentStep != prevStep)
-    {
-        if (prevStep >= 0 && prevStep < MAX_COLS)
-            stepCols[static_cast<size_t>(prevStep)]->repaint();
-        if (currentStep >= 0 && currentStep < MAX_COLS)
-            stepCols[static_cast<size_t>(currentStep)]->repaint();
-        prevStep = currentStep;
     }
 }
 

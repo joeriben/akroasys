@@ -42,6 +42,11 @@ private:
     void timerCallback() override;
     void mouseDoubleClick(const juce::MouseEvent& e) override;
     void syncStepCount();
+    /** Lights the step column being played (-1: none) and unlights the one
+     *  lit before. Every change of the playhead highlight goes through here,
+     *  so the lit column always matches currentStep; only the columns that
+     *  change repaint. */
+    void showCurrentStep(int step);
     void showHeaderOverflowMenu();
 
     T5ynthProcessor& processorRef;
@@ -222,7 +227,7 @@ private:
     std::unique_ptr<SA> strandOctaveA[kNumExtraStrands];
     std::unique_ptr<SA> strandDomA[kNumExtraStrands];
 
-    int currentStep = -1;
+    int currentStep = -1;     // the lit step column (showCurrentStep)
     int lastPatternGen = 0;   // mirrors StepSequencer::patternReplacedGen for grid refresh
 
     // Step-record display mirrors (updated only when the bit/cursor changes, so
