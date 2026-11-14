@@ -251,9 +251,12 @@ values for the listening phase, not derived from data.
      into the next downbeat. Needs at least 4 steps per bar. The free 16ths
      are found on the straight grid; the fill notes then swing with the
      line. They are the bar's own 16ths, the grid its steps lie on: in a
-     bar of n/32 the last beat starts on the 16th a 32nd after barLen − 1. The view shows a run note on a step as p where it is the scale
-     step from the note before it towards that head, otherwise as the
-     approach it makes (↗ from below, ↘ from above).
+     bar of n/32 the last beat starts on the 16th a 32nd after barLen − 1.
+     A fill note's slot is its 16th, cut at the bar end as a step's slot
+     is (in n/32 the last one lasts a 32nd); it sounds by the step-length
+     rule of §3.6. The view shows a run note on a step as p where it is
+     the scale step from the note before it towards that head, otherwise
+     as the approach it makes (↗ from below, ↘ from above).
   4. **Ratchet**: the last beat's strongest head (by metric weight, the
      earlier on a tie) repeats as 2 or 3 sub-steps, which divide what is
      left of its slot after its (shuffled) onset. A last beat without a head
