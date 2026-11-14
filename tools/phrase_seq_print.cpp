@@ -2840,9 +2840,9 @@ int main(int argc, char** argv)
         // notes, functions and heads from the bar views (Variation 0 and no
         // ABAB cadence, so a head plays as its slot renders), Fill notes from
         // the played events (their velocity; Variation 3/5: Lift and Fill, the
-        // head two bars on in an unvaried bar; Lift, but for Bass, lifts the
-        // run with the last beat, and the line under it, which a bar after it
-        // enters from, is the line without Lift). Answer: notes from the played
+        // head two bars on in an unvaried bar; the run stays in the line's
+        // register under Lift, and a bar after a lifted one enters from the
+        // line without Lift). Answer: notes from the played
         // events, functions and heads from the answer of the phrase's heard
         // motif (Shuffle 0: each onset is its step).
         std::mt19937 rng(30);
@@ -2987,7 +2987,9 @@ int main(int argc, char** argv)
                     if (p.ev.strandId != -1 || p.ev.type != VoiceEvent::Type::NoteOn) continue;
                     const double inBar = p.q - 4.0 * b;
                     if (inBar >= -4.0 - 1.0e-3 && inBar < -1.0e-3)
-                        entered = p.ev.note - c.transpose - (varied(b - 1) && inBar >= -1.0 - 1.0e-3 ? lift : 0);
+                        entered = p.ev.note - c.transpose
+                                - (varied(b - 1) && inBar >= -1.0 - 1.0e-3 && std::abs(p.ev.velocity - kFillVel) >= 1.0e-4
+                                       ? lift : 0);
                     if (inBar < -1.0e-3 || inBar > 4.0 - 1.0e-3) continue;
                     if (std::abs(p.ev.velocity - kFillVel) < 1.0e-4) fills.emplace_back(inBar, p.ev.note - c.transpose);
                     else if (inBar < 3.0 - 1.0e-3) from = p.ev.note - c.transpose;
@@ -2998,7 +3000,7 @@ int main(int argc, char** argv)
                 for (const auto& [inBar, note] : fills)
                 {
                     const int j = static_cast<int>(std::lround((inBar - 3.0) / 0.25));
-                    const int want = scaleSteps(T, dir * (4 - j), mask) + lift;
+                    const int want = scaleSteps(T, dir * (4 - j), mask);
                     ++fillT.checked;
                     fillT.crossing += at == b + 2 && floorDiv(b + 1, N) == floorDiv(b, N) && floorDiv(at, N) != floorDiv(b, N);
                     if (note != want && fillT.bad++ < 2)
@@ -3065,8 +3067,7 @@ int main(int argc, char** argv)
         // Register lift (§3.7): the last beat goes up an octave. The line was
         // lifted in itself: an embellishment after a lifted note took its P
         // from that note and was lifted again (Repeat, Neighbour, Passing two
-        // or three octaves up), and the Fill run, in the same last beat, was
-        // not lifted at all. Oracle: the same varied bar at Variation 2/5
+        // or three octaves up). Oracle: the same varied bar at Variation 2/5
         // (Re-pitch, Lift) and 1/5 (Re-pitch, the same draw): every event in
         // the last beat sounds 12 above, every event before it is the same,
         // and the line under it ends on the same notes, so a bar after it
@@ -3138,6 +3139,48 @@ int main(int argc, char** argv)
         check(offBefore == 0, "every event before the last beat is the bar without Lift (" + std::to_string(offBefore) + " off)");
         check(offEnd == 0, "the line ends on the notes it ends on without Lift (" + std::to_string(offEnd) + " bars off)");
         check(offView == 0, "the view shows the lifted notes (" + std::to_string(offView) + " off)");
+
+        // Stab's fill pulses repeat the chord and go up with their beat (a
+        // Riff or Lead Fill run stays in the line's register: scenario 32).
+        // Variation 3/5 (Re-pitch, Lift, Fill): every event of the last beat
+        // is a voice of the bar's chord an octave up.
+        int stabFills = 0, stabOff = 0;
+        std::string stabWhy;
+        for (int t = 0; t < 500; ++t)
+        {
+            Config c = base();
+            c.part = Part::Stab;
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.len = U(1, 2); c.pulses = U(2, 12); c.rotation = U(0, 7);
+            c.phraseBars = 8;
+            c.form = static_cast<Form>(U(0, 3));
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.layer = Layer::Off;
+            c.variation = 0.6f;
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(31500 + t), 0, c), c);
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m;
+            in.bar = 7; in.barLenQ = 4.0;
+            BarRender r;
+            renderBar(in, r);
+            std::vector<int> chord;
+            for (int e = 0; e < r.count; ++e)
+                if (r.events[static_cast<size_t>(e)].onQ < 3.0 - 1.0e-9) chord.push_back(r.events[static_cast<size_t>(e)].note);
+            if (chord.empty()) continue;
+            for (int e = 0; e < r.count; ++e)
+            {
+                const Event& ev = r.events[static_cast<size_t>(e)];
+                if (ev.onQ < 3.0 - 1.0e-9) continue;
+                stabFills += std::abs(ev.vel - 72.0f / 127.0f) < 1.0e-4f;
+                if (std::find(chord.begin(), chord.end(), ev.note - 12) == chord.end() && stabOff++ < 3)
+                    stabWhy += " | t " + std::to_string(t) + " at " + std::to_string(ev.onQ) + ": " + std::to_string(ev.note);
+            }
+        }
+        check(stabFills > 0 && stabOff == 0, "Stab: the fill pulses (" + std::to_string(stabFills)
+                                                 + ") and every event of the lifted last beat sound the chord an octave up ("
+                                                 + std::to_string(stabOff) + " off)" + stabWhy);
     }
 
     std::printf("\n== 32. The lookahead leads into the head as its bar plays it\n");
@@ -3323,7 +3366,7 @@ int main(int argc, char** argv)
             // Fill: from the bar's last note before its last beat, else from
             // the note the bar entered with (the last of the bar before, in
             // the line under the Lift), into the next bar's first sounding
-            // head; the run sounds with the Lift (not Bass).
+            // head; the run stays in the line's register under Lift.
             for (int b = 1; b + 2 < kBars; ++b)
             {
                 const Target h = nextHead(line, b + 1, -1);
@@ -3336,7 +3379,8 @@ int main(int argc, char** argv)
                     const double inBar = p.q - 4.0 * b;
                     const int note = p.ev.note - c.transpose;
                     if (inBar >= -4.0 - 1.0e-3 && inBar < -1.0e-3)
-                        entered = note - (lifted(b - 1) && !bass && inBar >= -1.0 - 1.0e-3 ? 12 : 0);
+                        entered = note - (lifted(b - 1) && !bass && inBar >= -1.0 - 1.0e-3
+                                                  && std::abs(p.ev.velocity - kFillVel) >= 1.0e-4 ? 12 : 0);
                     if (inBar < -1.0e-3 || inBar > 4.0 - 1.0e-3) continue;
                     if (std::abs(p.ev.velocity - kFillVel) < 1.0e-4)
                     {
@@ -3352,7 +3396,7 @@ int main(int argc, char** argv)
                 for (const auto& [inBar, note] : fills)
                 {
                     const int j = static_cast<int>(std::lround((inBar - 3.0) / 0.25));
-                    const int want = scaleSteps(h.note, dir * (4 - j), mask) + (bass ? 0 : 12);
+                    const int want = scaleSteps(h.note, dir * (4 - j), mask);
                     ++y.fillChecked;
                     y.fillCadence += isCadence(h);
                     y.fillCrossing += cross;

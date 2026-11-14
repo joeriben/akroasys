@@ -1214,12 +1214,12 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
     const Chord ch = chordAt(x, x.bar);
     const int lastHeadK = sh.lastHeadK, lastPulseInLastBeat = sh.lastPulseInLastBeat, ratchetK = sh.ratchetK;
 
-    // Lift (not Bass) transposes the last beat: the line is rendered as it
-    // plays without Lift (P, PP, the Fill's start and the bar's last notes
-    // are that line's), and the last beat sounds an octave above it. Lifted
-    // in the line itself, every embellishment after a lifted note took the
-    // octave again from P (two or three octaves up), and the Fill run stayed
-    // below the notes around it.
+    // Lift (not Bass) transposes the steps of the last beat: the line is
+    // rendered as it plays without Lift (P, PP, the Fill's start and the
+    // bar's last notes are that line's), and those steps sound an octave
+    // above it. Lifted in the line itself, every embellishment after a lifted
+    // note took the octave again from P (two or three octaves up). A Fill run
+    // stays in the line's register (below).
     int pBeforeLastBeat = P;   // where a Fill run starts from
     for (int k = 0; k < steps; ++k)
     {
@@ -1330,7 +1330,11 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             Onset f;
             f.onQ = onQ; f.gridQ = q;
             f.durQ = 0.25;
-            f.octShift = var.lift && !x.bass ? 12 : 0;
+            // The run leads into the next downbeat (§3.7), so it stays in the
+            // line's register under Lift too: lifted, it ended an octave above
+            // the head it runs into. Stab's fill pulses repeat the chord and
+            // go up with their beat.
+            f.octShift = var.lift && m.part == Part::Stab ? 12 : 0;
             f.note = scaleSteps(target, dir * (4 - j), x.mask) + f.octShift;
             f.vel = kVelFill;
             f.fn = Fn::Passing;
