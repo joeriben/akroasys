@@ -792,7 +792,8 @@ public:
     void resetParametersToDefaults();
     /** A legacy XML preset (an APVTS dump, the .t5p format of 2026-03/04)
      *  replaces the parameter state as a load (SeqTransferHold): the engine
-     *  switch it causes carries no pattern over. Not migrated (see
+     *  switch it causes carries no pattern over. It carries no phrase motif:
+     *  the stored one becomes the empty record. Not migrated (see
      *  PresetFormat::loadFromFile). Message thread. */
     void importLegacyXmlPreset(const juce::ValueTree& state);
 

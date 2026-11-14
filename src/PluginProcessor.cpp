@@ -12156,6 +12156,10 @@ void T5ynthProcessor::importLegacyXmlPreset(const juce::ValueTree& state)
     // engine goes to Step, and that switch is not the user's.
     SeqTransferHold seqTransferHold(*this);
     parameters.replaceState(state);
+    // It predates the phrase sequencer too: as a JSON preset without a phrase
+    // block, its load sets the phrase parameters to their defaults and the
+    // motif to the empty record, which the seed and the parameters fill.
+    phraseSequencer.setStoredMotif(PhraseModel::Motif {});
 }
 
 bool T5ynthProcessor::importJsonPreset(const juce::String& json)
