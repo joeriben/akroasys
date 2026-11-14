@@ -481,23 +481,35 @@ void layoutAtSize(int w, int h)
                             box.getItemText(i).toRawUTF8(), box.getWidth());
             }
     };
-    // The chord slots relabel with the scale and Ext: every scale's labels
-    // fit under both, the longest of them VII♭5no3no7 (Ryukyu, Ext 7),
-    // VIIsus2♭5 (Persian) and ♭IIIno5 (Hirajoshi, Pelog).
+    // The chord slots relabel with the scale and Ext: every degree's item
+    // in every slot reads the scale's label under that Ext, and every
+    // scale's labels fit under both, the longest of them VII♭5no3no7
+    // (Ryukyu, Ext 7), VII6sus2♭5 (DblHarm, Persian, Ext 7), VIIsus2♭5
+    // (Persian) and ♭IIIno5 (Hirajoshi, Pelog).
     int relabelled = 0;
     for (int st = 0; st < ScaleType::kCount; ++st)
         for (int ext = 0; ext < 2; ++ext)
         {
             setPlain(proc, PID::phrExt7, static_cast<float>(ext));
             setPlain(proc, PID::scaleType, static_cast<float>(st));
-            if (PhraseModel::chordsAvailable(st)
-                && ui.chordSlots[0]->getItemText(1) == juce::String::fromUTF8(
-                       PhraseModel::chordLabelText(PhraseModel::chordLabel(0, st, ext == 1)).c_str()))
-                ++relabelled;
+            if (PhraseModel::chordsAvailable(st))
+            {
+                bool all = true;
+                for (auto* box : ui.chordSlots)
+                    for (int d = 1; d <= PhraseModel::degreeCount(st); ++d)
+                        if (box->getItemText(d) != juce::String::fromUTF8(
+                                PhraseModel::chordLabelText(PhraseModel::chordLabel(d - 1, st, ext == 1)).c_str()))
+                        {
+                            all = false;
+                            std::printf("    scale %d, Ext %d: item %d reads \"%s\"\n", st, ext == 1 ? 7 : 3, d,
+                                        box->getItemText(d).toRawUTF8());
+                        }
+                relabelled += all;
+            }
             for (auto* box : ui.chordSlots) allItemsFit(*box, "chord slot");
         }
     setPlain(proc, PID::phrExt7, 0.0f);
-    check("the chord slots relabel with every scale but Chromatic, Ext 3 and 7",
+    check("every chord slot relabels every degree with every scale but Chromatic, Ext 3 and 7",
           relabelled == 2 * (ScaleType::kCount - 1));
     allItemsFit(*ui.layer, "Layer");
     allItemsFit(*ui.form, "Form");
