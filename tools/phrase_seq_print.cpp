@@ -5071,15 +5071,23 @@ int main(int argc, char** argv)
         check(offLabel == 0 && labelsMet, "A. each tone's glyph names its note as the bar's chord name does ("
                                               + std::to_string(offLabel) + " off; " + labelCounts + ")");
 
-        // B: what readView() and chordForGui hand the GUI.
+        // B: what readView() and chordForGui hand the GUI. Keys holds, after
+        // Am, F7 and G5, chords whose added member is named by an extension
+        // (Cadd♭9, Cadd9, Cadd11, Cadd♯11, Cadd♭13, C7addmaj7no5), so the
+        // labels the view word carries above 7 go through its packing too.
+        // ♯9 is no such label: held keys make it the minor third (Cmadd3).
         int bars = 0, named = 0, octaves = 0, seconds = 0, offB = 0, unnamed = 0;
+        std::array<int, static_cast<size_t>(ToneLabel::Count)> labelSeen {};
         std::string whyB;
         for (int t = 0; t < 120; ++t)
         {
             Config c = randomConfig();
             if (t % 3 == 0) { c.form = Form::ABAB; c.harm = Harm::Pedal; c.part = Part::Riff; }
             std::vector<std::pair<double, std::vector<int>>> keys;
-            if (c.harm == Harm::Keys) keys = { { 0.0, { 45, 48, 52 } }, { 8.0, { 41, 45, 48, 51 } }, { 16.0, { 43, 50 } } };
+            if (c.harm == Harm::Keys) keys = { { 0.0, { 45, 48, 52 } }, { 8.0, { 41, 45, 48, 51 } }, { 16.0, { 43, 50 } },
+                                               { 24.0, { 36, 40, 43, 49 } }, { 32.0, { 36, 40, 43, 50 } },
+                                               { 40.0, { 36, 40, 43, 53 } }, { 48.0, { 36, 40, 43, 54 } },
+                                               { 56.0, { 36, 40, 43, 56 } }, { 64.0, { 36, 40, 46, 47 } } };
             const int tonic = tonicNote(partAnchor(c.part), c.scaleRoot);
             const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
             int lastBar = -1;
@@ -5097,6 +5105,7 @@ int main(int argc, char** argv)
                     if (x.note >= 0 && x.fn == Fn::ChordTone && x.tone == Tone::None) ++unnamed;
                     if (x.tone == Tone::None) continue;
                     ++named;
+                    ++labelSeen[static_cast<size_t>(x.label)];
                     octaves += x.octave != 0;
                     seconds += x.tone == Tone::Second;
                     std::string w = toneMismatch(x, ch, tonic, mask);
@@ -5110,6 +5119,17 @@ int main(int argc, char** argv)
                   + std::to_string(octaves) + " off octave 0, " + std::to_string(seconds) + " cadence 2)");
         check(offB == 0 && unnamed == 0, "B. readView hands each sounding chord-tone step its tone, each the note it plays, named as the chord does ("
                                              + std::to_string(offB) + " off, " + std::to_string(unnamed) + " unnamed)" + whyB);
+        std::string extSeen;
+        bool extMet = true;
+        for (ToneLabel l : { ToneLabel::Flat9, ToneLabel::Ninth, ToneLabel::Eleventh, ToneLabel::Sharp11,
+                             ToneLabel::Flat13, ToneLabel::Major7 })
+        {
+            const int seen = labelSeen[static_cast<size_t>(l)];
+            extMet = extMet && seen >= 3;
+            StepView sv; sv.note = 60; sv.tone = Tone::Seventh; sv.label = l;
+            extSeen += (extSeen.empty() ? "" : ", ") + stepGlyphText(sv) + " " + std::to_string(seen);
+        }
+        check(extMet, "B. each extension label crosses readView (" + extSeen + ")");
     }
 
     std::printf("\n== 39. The view's texts: chord names, step glyphs, note names\n");
