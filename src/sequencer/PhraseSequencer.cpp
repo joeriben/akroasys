@@ -47,6 +47,16 @@ std::uint32_t packChord(const Chord& c)
     auto iv = [&](int m) { return static_cast<std::uint32_t>(c.iv[static_cast<size_t>(m)] + 1) & 31u; };
     return (static_cast<std::uint32_t>(c.rootPc) & 15u) | (iv(1) << 4) | (iv(2) << 9) | (iv(3) << 14);
 }
+
+/** The time signature the sequencer runs in: numerator 1..32, a denominator
+ *  that is a power of two up to 32, any other one 4. */
+void normaliseTimeSignature(int& numerator, int& denominator)
+{
+    numerator = std::clamp(numerator, 1, 32);
+    if (denominator != 1 && denominator != 2 && denominator != 4 && denominator != 8
+        && denominator != 16 && denominator != 32)
+        denominator = 4;
+}
 } // namespace
 
 T5ynthPhraseSequencer::T5ynthPhraseSequencer()
@@ -87,14 +97,14 @@ void T5ynthPhraseSequencer::setConfig(const Config& c)
 
 void T5ynthPhraseSequencer::setTimeSignature(int numerator, int denominator)
 {
-    const int num = std::clamp(numerator, 1, 32);
-    int den = denominator;
-    if (den != 1 && den != 2 && den != 4 && den != 8 && den != 16 && den != 32) den = 4;
+    int num = numerator, den = denominator;
+    normaliseTimeSignature(num, den);
     if (num == tsNum && den == tsDen) return;
     tsNum = num;
     tsDen = den;
     barLenQ = 4.0 * num / den;
     positioned = false;   // the bar grid moved: re-enter at the next block
+    renderDirty = true;   // stopped: the bar the view shows has another length
 }
 
 Config T5ynthPhraseSequencer::latchedConfig() const
@@ -161,6 +171,7 @@ void T5ynthPhraseSequencer::stop()
 {
     running = false;
     positioned = false;
+    renderDirty = true;   // the view goes to the first bar, where start() enters
     editOrigin.store(kOriginAtNextEntry, std::memory_order_relaxed);
     currentStepForGui.store(-1, std::memory_order_relaxed);
     currentPhraseForGui.store(0, std::memory_order_relaxed);
@@ -378,6 +389,10 @@ bool T5ynthPhraseSequencer::leadsInto(int phrase) const
 
 void T5ynthPhraseSequencer::publishHeard()
 {
+    // Only what plays is heard. Stopped, the channel keeps the phrase last
+    // played (Keep after a stop), and a motif stored since stays unheard (Keep
+    // does nothing, its origin stays open) although the view renders it.
+    if (!running) return;
     Motif h = evoCur;
     h.leadInKept = true;
     h.leadIn = evoPrev;
@@ -432,7 +447,9 @@ void T5ynthPhraseSequencer::renderCurrent()
     chordForGui.store(packChord(render.chord), std::memory_order_relaxed);
     currentBarForGui.store(bar, std::memory_order_relaxed);
     currentPhraseForGui.store(p, std::memory_order_relaxed);
-    editOrigin.store(p, std::memory_order_relaxed);
+    // Stopped, an edit anchors where playback next starts (stop()), not at
+    // the bar the view shows.
+    if (running) editOrigin.store(p, std::memory_order_relaxed);
 }
 
 void T5ynthPhraseSequencer::enterBar(int newBar, bool continuous)
@@ -486,22 +503,63 @@ void T5ynthPhraseSequencer::enterBar(int newBar, bool continuous)
 
 // ─── processBlock ──────────────────────────────────────────────────────────
 
+void T5ynthPhraseSequencer::takeStoredMotif()
+{
+    if (toAudio.sequence() == toAudioSeen) return;
+    Motif m;
+    std::uint32_t unusedA = 0, unusedB = 0, seqRead = 0;
+    if (toAudio.tryRead(m, unusedA, unusedB, seqRead))
+    {
+        liveMotif = m;
+        toAudioSeen = seqRead;
+        motifDirty = renderDirty = true;
+    }
+}
+
+bool T5ynthPhraseSequencer::stoppedViewStale() const
+{
+    // Evolve is latched at a bar entry, not marked by setConfig.
+    return motifDirty || renderDirty || keysChanged || cfg.evolve != latchedEvolve;
+}
+
+bool T5ynthPhraseSequencer::viewPendingWhileStopped(const Config& c, int numerator, int denominator) const
+{
+    if (running) return false;
+    if (!cfgValid || c != cfg) return true;
+    normaliseTimeSignature(numerator, denominator);
+    return numerator != tsNum || denominator != tsDen
+        || toAudio.sequence() != toAudioSeen || stoppedViewStale();
+}
+
+void T5ynthPhraseSequencer::renderStoppedView()
+{
+    // Stopped, the view shows the bar playback starts in on the sequencer's
+    // own transport, the first one (start() counts from 0), as start() enters
+    // it. A motif stored while stopped gets its origin where it is first
+    // heard; the view shows it heard at the first bar's phrase, and liveMotif
+    // keeps the open origin for the start to resolve. Nothing is heard here:
+    // publishHeard and the edit origin stay as playback left them.
+    if (!stoppedViewStale()) return;
+    Motif m = liveMotif;
+    if (m.origin == kOriginAtNextEntry) m.origin = floorDiv(0, phraseBarsOf(cfg));
+    fitted = fitMotif(m, cfg);
+    if (fitted.leadInKept) fittedLeadIn = fitMotif(leadInMotif(fitted), cfg);
+    enterBar(0, false);
+    motifDirty = renderDirty = false;
+}
+
 void T5ynthPhraseSequencer::processBlock(int numSamples, double bpm, bool hostSync, double hostPpq,
                                          std::vector<VoiceEvent>& out)
 {
-    if (!running || numSamples <= 0 || !cfgValid || !(bpm > 0.0)) return;
+    if (numSamples <= 0 || !cfgValid) return;
 
-    if (toAudio.sequence() != toAudioSeen)
+    takeStoredMotif();
+    if (!running)
     {
-        Motif m;
-        std::uint32_t unusedA = 0, unusedB = 0, seqRead = 0;
-        if (toAudio.tryRead(m, unusedA, unusedB, seqRead))
-        {
-            liveMotif = m;
-            toAudioSeen = seqRead;
-            motifDirty = renderDirty = true;
-        }
+        renderStoppedView();
+        return;
     }
+    if (!(bpm > 0.0)) return;
 
     const double dq = static_cast<double>(numSamples) * bpm / (60.0 * sampleRate);
     const double q0 = hostSync ? hostPpq : posQ;

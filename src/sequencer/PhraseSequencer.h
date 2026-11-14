@@ -62,9 +62,19 @@ public:
     void allNotesOff(std::vector<VoiceEvent>& out, int sampleOffset = 0);
 
     /** Appends this block's events to `out`. `hostSync`: `hostPpq` is the
-     *  block start position in quarters; otherwise the internal count runs. */
+     *  block start position in quarters; otherwise the internal count runs.
+     *  While stopped it emits nothing and brings the view up to date
+     *  (renderStoppedView). */
     void processBlock(int numSamples, double bpm, bool hostSync, double hostPpq,
                       std::vector<VoiceEvent>& out);
+
+    /** Stopped: whether the next processBlock, after setConfig(`c`) and
+     *  setTimeSignature(`numerator`, `denominator`), would change the view —
+     *  the stored motif, the configuration, the time signature or the keys
+     *  differ from what it shows. The processor keeps an idle block awake on
+     *  it, so a change made while silent reaches the view. False while
+     *  running. */
+    bool viewPendingWhileStopped(const PhraseModel::Config& c, int numerator, int denominator) const;
 
     /** Slide time: 25 % of a step, 10..200 ms (as the step sequencer). */
     float getGlideTime(double bpm) const;
@@ -105,9 +115,10 @@ public:
     /** Bumped whenever the published bar view changes. */
     std::atomic<std::uint32_t> viewGeneration { 0 };
 
-    /** The rendered bar's steps as the phrase view shows them. Returns the
-     *  number of steps. Tear-tolerant: a step read mid-update is redrawn on
-     *  the next generation. */
+    /** The rendered bar's steps as the phrase view shows them: the bar
+     *  playing, and while stopped the first bar, where playback starts on the
+     *  sequencer's own transport. Returns the number of steps. Tear-tolerant:
+     *  a step read mid-update is redrawn on the next generation. */
     int readView(std::array<PhraseModel::StepView, PhraseModel::kMaxBarSteps>& out) const;
 
 private:
@@ -141,6 +152,8 @@ private:
     MotifChannel toAudio;
     std::uint32_t toAudioSeen = 0;       // audio thread: toAudio sequence of liveMotif
     void publish(const PhraseModel::Motif& m);
+    /** Audio thread: adopts a newly stored motif as liveMotif. */
+    void takeStoredMotif();
 
     /** Audio → message: the motif heard in the current phrase (evoCur), with
      *  the motif its first bar enters from (evoPrev) as the lead-in. Tag A =
@@ -240,6 +253,11 @@ private:
 
     void enterBar(int newBar, bool continuous);
     void renderCurrent();
+    /** Stopped: something the first bar's render depends on changed since it
+     *  was rendered (the stored motif once taken, the configuration, the
+     *  time signature, the keys). */
+    bool stoppedViewStale() const;
+    void renderStoppedView();
     void releaseUnusedHeld(int fromIndex, std::vector<VoiceEvent>& out, int offset);
     /** Sets each pending off to its own off, ended no later than its line's
      *  first onset in render.events from `fromIndex` on. */

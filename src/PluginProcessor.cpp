@@ -4250,6 +4250,15 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     // it ends.
     const bool seqSwitchByLoad = seqTransferHoldDepth_ > 0 || seqTransferSkipNext_;
     seqTransferSkipNext_ = false;
+    // The phrase view while stopped: the first bar rendered from the stored
+    // motif and the parameters as they are now, brought up to date in the
+    // phrase section below. A change made while silent (Dice, a load, a phrase
+    // parameter) wakes the block the same way, or the view, and Phrase -> Step,
+    // which copies it, would keep the bar from before the change. Self-clearing:
+    // the phrase section takes the config and renders, after which nothing
+    // differs; ~20 relaxed loads per idle block while Phrase is stopped.
+    const bool phraseViewPending = activeSeqEngine == SeqEngine::Phrase && ! seqRunning
+        && phraseSequencer.viewPendingWhileStopped(phraseConfigFromParams(), hostTsNum_, hostTsDen_);
     // Read the arp's enable state HERE, above the idle gate, not down at the arp
     // stage: the deep-idle branch returns before the arp stage ever runs, and
     // arpWasEnabled has to be kept honest across that return (see below).
@@ -4289,6 +4298,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                        || seqRunning
                        || seqPresetPending
                        || seqEnginePending
+                       || phraseViewPending
                        || arpHoldingKeys
                        || csoundSwapOutstanding
                        || replayActive;   // the tape must never idle out mid-playback
@@ -5266,7 +5276,7 @@ void T5ynthProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         }
         else if (phraseSequencer.isRunning())
         {
-            // processBlock does nothing once stopped: end what sounds first.
+            // processBlock emits nothing once stopped: end what sounds first.
             phraseSequencer.allNotesOff(internalNoteEvents_);
             phraseSequencer.stop();
         }
