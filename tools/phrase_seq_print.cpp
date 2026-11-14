@@ -5862,6 +5862,12 @@ int main(int argc, char** argv)
         // within half a 16th), and on no other (§3.7 op 3). Without Ratchet
         // nothing but the steps takes one: a bar that left out the 16ths a
         // ratchet would have repeated on dropped run notes.
+        // D: the run note on the j-th 16th of the last beat lies 4 - j scale
+        // steps from the run's head, counted back towards the note before
+        // the last beat (the bar's entry note without one), shuffled as the
+        // line (inside the slot of its step, it divides what follows the
+        // step's onset). With no head ahead the run leads into the note
+        // before the last beat (§3.7 op 3).
         std::mt19937 rng(43);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         static const int spbs[] = { 4, 8, 16 };
@@ -5871,6 +5877,8 @@ int main(int argc, char** argv)
         int runInSlot = 0;
         int fillChecked = 0, offC = 0, fillWanted = 0, fillRatchet = 0, fillPlainStepInLast = 0;
         std::string whyC;
+        int runPitches = 0, offD = 0, runPitchesNoHead = 0, runPitchesShuffled = 0;
+        std::string whyD;
         int runShown = 0, offB = 0, runPasses = 0, runRises = 0, runFalls = 0, runAfterStep = 0, runNoHead = 0;
         std::string why, whyB;
         for (int t = 0; t < 30000; ++t)
@@ -6015,14 +6023,42 @@ int main(int argc, char** argv)
             std::stable_sort(line.begin(), line.end(), [](const Event* a, const Event* b) { return a->onQ < b->onQ; });
             // The run's head: the next bars' first, else the note before the
             // last beat.
+            int before = in.prevNote;
+            for (const Event* e : line)
+                if (e->onQ < lastBeatQ - 1e-9) before = unlifted(r, in.bar, e->onQ, e->note);
             int runHead = firstHead(next[0], in.bar + 1, 0);
             if (runHead < 0) runHead = firstHead(next[1], in.bar + 2, 0);
-            if (runHead < 0)
+            const bool noHead = runHead < 0;
+            if (noHead)
             {
                 ++runNoHead;
-                runHead = in.prevNote;
+                runHead = before;
+            }
+            {
+                const int dir = runHead >= before ? -1 : 1;
                 for (const Event* e : line)
-                    if (e->onQ < lastBeatQ - 1e-9) runHead = unlifted(r, in.bar, e->onQ, e->note);
+                {
+                    if (std::abs(e->vel - kFillVel) > 1e-4) continue;
+                    int j = -1;
+                    for (int j2 = 0; j2 < 4 && j < 0; ++j2)
+                    {
+                        const double q = lastBeatQ + 0.25 * j2;
+                        const int k2 = static_cast<int>(std::floor((q + 1e-9) / stepQ));
+                        const double slotQ = k2 * stepQ, slotEndQ = slotEndOf(k2);
+                        const double slotOnQ = (k2 & 1) == 0 ? slotQ : slotQ + c.shuffle * (slotEndQ - slotQ);
+                        if (std::abs(slotOnQ + (q - slotQ) * (slotEndQ - slotOnQ) / (slotEndQ - slotQ) - e->onQ) < 1e-9) j = j2;
+                    }
+                    const int u = unlifted(r, in.bar, e->onQ, e->note);
+                    const int want = j < 0 ? -1 : scaleSteps(runHead, dir * (4 - j), mask);
+                    ++runPitches;
+                    runPitchesNoHead += noHead;
+                    runPitchesShuffled += c.shuffle > 0.0f;
+                    if (u != want && offD++ < 4)
+                        whyD += " | t" + std::to_string(t) + " bar " + std::to_string(in.bar) + " at " + std::to_string(e->onQ).substr(0, 6)
+                              + (j < 0 ? std::string(": on no 16th of the last beat") : ": 16th " + std::to_string(j))
+                              + ", from " + std::to_string(before) + " into " + std::to_string(runHead) + (noHead ? " (no head ahead)" : "")
+                              + ": plays " + std::to_string(u) + ", want " + std::to_string(want);
+                }
             }
             int P = in.prevNote, PP = in.prevPrevNote;
             bool pIsRun = false;
@@ -6142,6 +6178,11 @@ int main(int argc, char** argv)
         check(fillWanted > 10000 && fillRatchet > 500 && fillPlainStepInLast > 2000,
               "C. coverage: " + std::to_string(fillWanted) + " free 16ths, " + std::to_string(fillRatchet) + " bars with Ratchet, "
                   + std::to_string(fillPlainStepInLast) + " without it and a step in the last beat");
+        check(offD == 0, "D. " + std::to_string(runPitches) + " run notes lie 4 - j scale steps from the head, counted back towards "
+                         "the note before the last beat (" + std::to_string(offD) + " off)" + whyD);
+        check(runPitchesNoHead > 200 && runPitchesShuffled > 10000,
+              "D. coverage: " + std::to_string(runPitchesNoHead) + " into the note before the last beat (no head ahead), "
+                  + std::to_string(runPitchesShuffled) + " shuffled");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
