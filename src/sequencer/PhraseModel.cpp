@@ -1549,6 +1549,23 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
             f.note = scaleSteps(target, dir * (4 - j), x.mask) + f.octShift;
             f.vel = kVelFill;
             f.fn = Fn::Passing;
+            // A run note on a step's own grid position is that step's: the
+            // motif leaves the step empty (an onset there would have taken
+            // the 16th), and the view showed a rest where the run plays (Stab:
+            // a hit of the whole chord). Between steps (a grid coarser than
+            // 16ths) or past the bar's last step it is no step's, as the
+            // ratchet repeats are not.
+            if (k < steps && std::abs(q - slotQ) < kEps)
+            {
+                f.barStep = k;
+                if (view)
+                {
+                    StepView& v = view->view[static_cast<size_t>(k)];
+                    v = StepView {};
+                    v.note = f.note;
+                    v.fn = Fn::Passing;
+                }
+            }
             out.push(f);
         }
     }

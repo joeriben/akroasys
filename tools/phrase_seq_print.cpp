@@ -5191,6 +5191,82 @@ int main(int argc, char** argv)
         expect(26, "Pelog",    "i " + fl + "II5 " + fl + "IIIno5 V" + fl + "5no3 " + fl + "VI");
     }
 
+    std::printf("\n== 40. The view shows a note on every step a note starts on\n");
+    {
+        // Read from what plays, not from the view: for each step of the bar,
+        // the main-line notes that start on its (shuffled) onset. The view
+        // shows a note there exactly when one starts, and the note it shows
+        // is the one that sounds (Stab: the chord's lowest voice) without Seq
+        // Octave, as the step grid takes it. A Fill run note on a step the
+        // motif leaves empty is such a note (the view showed a rest there).
+        std::mt19937 rng(40);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static const int spbs[] = { 1, 2, 4, 8, 16 };
+        int seen = 0, sounding = 0, onEmptyLine = 0, onEmptyStab = 0, off = 0;
+        std::string why;
+        for (int t = 0; t < 20000; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));
+            c.harm = static_cast<Harm>(U(0, 2));
+            c.scaleType = U(0, ScaleQuantizer::COUNT - 1);
+            c.scaleRoot = U(0, 11);
+            c.ext7 = U(0, 1) != 0;
+            c.chordDegrees = { U(1, 7), U(0, 7), U(0, 7), U(0, 7) };
+            c.stepsPerBar = spbs[U(0, 4)];
+            c.pulses = U(1, c.stepsPerBar);
+            c.rotation = U(0, c.stepsPerBar - 1);
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = 0.25f * static_cast<float>(U(0, 4));
+            c.slide = 0.25f * static_cast<float>(U(0, 4));
+            c.layer = static_cast<Layer>(U(0, 3));
+            c.shuffle = 0.25f * static_cast<float>(U(0, 3));
+            c.transpose = 12 * U(-2, 2);
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(40000 + t), 0, c), c);
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m; in.answer = &m;
+            in.bar = U(0, 15);
+            in.barLenQ = 0.5 * U(1, 14);
+            in.prevNote = U(36, 72); in.prevPrevNote = U(36, 72);
+            in.slideIn = U(0, 1) != 0;
+            if (c.harm == Harm::Keys) { in.keys = true; in.keysChord = chordFromKeys(U(36, 60), static_cast<std::uint16_t>(U(1, 4095))); }
+            BarRender r;
+            renderBar(in, r);
+            const double stepQ = 4.0 / c.stepsPerBar;
+            const int mb = ((in.bar % m.len) + m.len) % m.len;
+            for (int k = 0; k < r.viewSteps; ++k)
+            {
+                const double posQ = k * stepQ;
+                const double endQ = std::min(posQ + stepQ, in.barLenQ);
+                const double onQ = (k & 1) ? posQ + static_cast<double>(c.shuffle) * (endQ - posQ) : posQ;
+                int low = -1;
+                for (int i = 0; i < r.count; ++i)
+                {
+                    const Event& e = r.events[static_cast<size_t>(i)];
+                    if (e.strand != -1 || e.line != Line::Main || std::abs(e.onQ - onQ) > 1e-6) continue;
+                    if (low < 0 || e.note < low) low = e.note;
+                }
+                const StepView& v = r.view[static_cast<size_t>(k)];
+                ++seen;
+                if (low >= 0)
+                {
+                    ++sounding;
+                    if (m.slots[static_cast<size_t>(mb * c.stepsPerBar + k)].fn == Fn::Rest)
+                        ++(c.part == Part::Stab ? onEmptyStab : onEmptyLine);
+                }
+                const bool bad = (low >= 0) != (v.note >= 0)
+                              || (low >= 0 && low != std::clamp(v.note + c.transpose, 0, 127));
+                if (bad && off++ < 4)
+                    why += " | t" + std::to_string(t) + " k" + std::to_string(k) + ": plays " + std::to_string(low)
+                         + ", view " + std::to_string(v.note);
+            }
+        }
+        check(off == 0, std::to_string(seen) + " steps, " + std::to_string(sounding) + " sounding: the view shows a note exactly where one starts, and that note ("
+                        + std::to_string(off) + " off)" + why);
+        check(onEmptyLine >= 200 && onEmptyStab >= 50, "coverage: " + std::to_string(onEmptyLine) + " line and "
+                        + std::to_string(onEmptyStab) + " Stab notes on steps the motif leaves empty (Fill)");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
