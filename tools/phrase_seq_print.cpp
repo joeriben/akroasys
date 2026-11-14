@@ -5832,9 +5832,10 @@ int main(int argc, char** argv)
 
     std::printf("\n== 43. A step after a Fill note is resolved against it\n");
     {
-        // Variation bars with a Fill, read from what plays (shuffle off, so a
-        // note starts on its grid position): the line's notes in the order
-        // they sound, the Fill run's notes (72/127) among them, a ratchet's
+        // Variation bars with a Fill, read from what plays, shuffle on in half
+        // of them (a step starts on its grid position, an odd one delayed by
+        // shuffle of its slot; a run note on a step's position starts where
+        // that step would): the line's notes in the order they sound, the Fill run's notes (72/127) among them, a ratchet's
         // repeats (85/127 x 0.9) not, each unlifted (Lift puts the last beat
         // an octave up, the run with it; Bass's Lift is its Octave pulse). An
         // embellishment step plays against the note that sounds before it,
@@ -5846,7 +5847,10 @@ int main(int argc, char** argv)
         // back. The head is the next of the bar as it plays, else the first
         // of the next two bars, rendered here. Rendered after the steps,
         // the run left a step after a run note resolved against the step
-        // before it.
+        // before it. Under shuffle a run 16th inside an odd step's slot lies
+        // after the step's grid position but may lie before its delayed
+        // onset: it sounds after the step, and the step plays against the
+        // note before it, not against that run note.
         // B: a run note on a step's grid position is shown as what it is
         // there: p where it is the scale step from the note before it
         // towards the run's head (the next bars' first, else the note
@@ -5859,6 +5863,7 @@ int main(int argc, char** argv)
         const float kTailVel = 85.0f / 127.0f * 0.9f, kFillVel = 72.0f / 127.0f;
         int bars = 0, checked = 0, afterRun = 0, off = 0;
         int afterRunRepeat = 0, afterRunNeighbour = 0, afterRunPassing = 0, afterRunOctave = 0, afterRunReversal = 0;
+        int runInSlot = 0;
         int runShown = 0, offB = 0, runPasses = 0, runRises = 0, runFalls = 0, runAfterStep = 0, runNoHead = 0;
         std::string why, whyB;
         for (int t = 0; t < 30000; ++t)
@@ -5877,7 +5882,7 @@ int main(int argc, char** argv)
             c.form = static_cast<Form>(U(0, 3));
             c.variation = 0.2f * static_cast<float>(U(3, 5));
             c.layer = static_cast<Layer>(U(0, 3));
-            c.shuffle = 0.0f;
+            c.shuffle = U(0, 1) ? 0.0f : 0.25f * static_cast<float>(U(1, 3));
             c.transpose = 0;
             Motif drawn;
             if (U(0, 1))
@@ -5918,6 +5923,18 @@ int main(int argc, char** argv)
             const double lastBeatQ = in.barLenQ - 1.0;
             const int mb = ((in.bar % m.len) + m.len) % m.len;
             const bool bass = c.part == Part::Bass;
+            // The step a note starts on: its grid position, an odd step's
+            // delayed by shuffle of its slot; -1 none.
+            auto slotEndOf = [&](int k2) { return std::min((k2 + 1) * stepQ, in.barLenQ); };
+            auto stepAt = [&](double q) {
+                for (int k2 = 0; k2 < r.viewSteps; ++k2)
+                {
+                    const double pos = k2 * stepQ;
+                    const double on = (k2 & 1) == 0 ? pos : pos + c.shuffle * (slotEndOf(k2) - pos);
+                    if (std::abs(on - q) < 1e-9) return k2;
+                }
+                return -1;
+            };
             // A note as played without Lift.
             auto unlifted = [&](const BarRender& b, int bar, double q, int note) {
                 const bool lift = variationForBar(m, heads, c, bar).lift;
@@ -5965,8 +5982,8 @@ int main(int argc, char** argv)
                 const int u = unlifted(r, in.bar, e->onQ, e->note);
                 if (std::abs(e->vel - kFillVel) < 1e-4)
                 {
-                    const int k = static_cast<int>(std::lround(e->onQ / stepQ));
-                    if (std::abs(k * stepQ - e->onQ) < 1e-9 && k < r.viewSteps)
+                    const int k = stepAt(e->onQ);
+                    if (k >= 0)
                     {
                         const StepView& v = r.view[static_cast<size_t>(k)];
                         const int d = runHead > P ? 1 : -1;
@@ -5990,11 +6007,11 @@ int main(int argc, char** argv)
                     PP = P; P = u; pIsRun = true;
                     continue;
                 }
-                const int k = static_cast<int>(std::lround(e->onQ / stepQ));
-                const StepView& v = r.view[static_cast<size_t>(k)];
+                const int k = stepAt(e->onQ);
+                const StepView& v = r.view[static_cast<size_t>(std::max(k, 0))];
                 std::string bad;
-                if (std::abs(k * stepQ - e->onQ) > 1e-9 || k >= r.viewSteps)
-                    bad = "an onset off the grid at " + std::to_string(e->onQ);
+                if (k < 0)
+                    bad = "an onset on no step's onset at " + std::to_string(e->onQ);
                 else if (v.tone == Tone::None)
                 {
                     const int s = mb * c.stepsPerBar + k;
@@ -6042,6 +6059,10 @@ int main(int argc, char** argv)
                     {
                         ++checked;
                         afterRun += pIsRun;
+                        // A run note sounds after this step inside its slot.
+                        runInSlot += c.shuffle > 0.0f && std::any_of(line.begin(), line.end(), [&](const Event* f) {
+                            return std::abs(f->vel - kFillVel) < 1e-4 && f->onQ > e->onQ + 1e-9 && f->onQ < slotEndOf(k) - 1e-9;
+                        });
                         if (u != want || v.fn != wantFn)
                             bad = "stored " + stepGlyphText(storedView) + " after " + std::to_string(P)
                                 + (pIsRun ? " (a run note)" : "") + " into " + std::to_string(T) + ": plays "
@@ -6056,10 +6077,11 @@ int main(int argc, char** argv)
         check(off == 0, std::to_string(checked) + " embellishment steps in " + std::to_string(bars)
                         + " Fill bars play against the note before them (" + std::to_string(off) + " off)" + why);
         check(afterRun > 2000 && afterRunRepeat > 100 && afterRunNeighbour > 200 && afterRunPassing > 200
-                  && afterRunOctave > 50 && afterRunReversal > 100,
+                  && afterRunOctave > 50 && afterRunReversal > 100 && runInSlot > 1000,
               "coverage: " + std::to_string(afterRun) + " after a run note: " + std::to_string(afterRunRepeat) + " Repeat, "
                   + std::to_string(afterRunNeighbour) + " Neighbour, " + std::to_string(afterRunPassing) + " Passing, "
-                  + std::to_string(afterRunOctave) + " Octave, " + std::to_string(afterRunReversal) + " reversals");
+                  + std::to_string(afterRunOctave) + " Octave, " + std::to_string(afterRunReversal) + " reversals; "
+                  + std::to_string(runInSlot) + " shuffled steps with a run note after them in their slot");
         check(offB == 0, "B. " + std::to_string(runShown) + " run notes on a step are shown p where they pass into the head, "
                          "an approach otherwise (" + std::to_string(offB) + " off)" + whyB);
         check(runPasses > 0 && runRises > 0 && runFalls > 0 && runAfterStep > 0 && runNoHead > 0,
