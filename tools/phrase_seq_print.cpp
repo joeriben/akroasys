@@ -71,12 +71,22 @@ std::string noteName(int n)
     return std::string(names[n % 12]) + std::to_string(n / 12 - 1);
 }
 
-char fnChar(const StepView& v, int memberGuess)
+char fnChar(const StepView& v)
 {
+    switch (v.tone)
+    {
+        case Tone::Root:    return 'R';
+        case Tone::Third:   return '3';
+        case Tone::Fifth:   return '5';
+        case Tone::Seventh: return '7';
+        case Tone::Second:  return '2';
+        case Tone::Chord:   return '#';
+        default: break;
+    }
     switch (v.fn)
     {
         case Fn::Rest:              return '.';
-        case Fn::ChordTone:         return "R357"[std::clamp(memberGuess, 0, 3)];
+        case Fn::ChordTone:         return '?';
         case Fn::Repeat:            return '=';
         case Fn::Octave:            return 'o';
         case Fn::Passing:           return 'p';
@@ -89,13 +99,36 @@ char fnChar(const StepView& v, int memberGuess)
     }
 }
 
-/** A chord tone's member, recovered from its pitch against the bar's chord. */
-int memberOf(int note, const Chord& c)
+/** The bar's chord as chordForGui carries it. */
+Chord chordFromGui(std::uint32_t cw)
 {
-    const int iv = ((note - c.rootPc) % 12 + 12) % 12;
-    for (int m = 0; m < kMaxVoices; ++m)
-        if (c.iv[static_cast<size_t>(m)] >= 0 && c.iv[static_cast<size_t>(m)] % 12 == iv) return m;
-    return 0;
+    Chord c;
+    c.rootPc = static_cast<int>(cw & 15u);
+    c.iv[1] = static_cast<int>((cw >> 4) & 31u) - 1;
+    c.iv[2] = static_cast<int>((cw >> 9) & 31u) - 1;
+    c.iv[3] = static_cast<int>((cw >> 14) & 31u) - 1;
+    return c;
+}
+
+/** Whether a view step's tone is the note it plays (section 38): R 3 5 7
+ *  sound the chord's member at the step's octave, 2 the scale step above the
+ *  root at it. Empty when it is; a step naming no tone, or the whole chord,
+ *  has no note to check. */
+std::string toneMismatch(const StepView& v, const Chord& ch, int tonic, std::uint16_t mask)
+{
+    if (v.tone == Tone::None || v.tone == Tone::Chord) return {};
+    const int root = chordRootNote(ch, tonic) + 12 * v.octave;
+    int want = -1;
+    if (v.tone == Tone::Second)
+        want = scaleStep(root, 1, mask);
+    else
+    {
+        const int iv = ch.iv[static_cast<size_t>(static_cast<int>(v.tone) - static_cast<int>(Tone::Root))];
+        if (iv < 0) return "names a member the chord lacks";
+        want = root + iv;
+    }
+    if (v.note == want) return {};
+    return "plays " + std::to_string(v.note) + ", its tone at its octave is " + std::to_string(want);
 }
 
 struct Played
@@ -213,18 +246,13 @@ Run play(const Config& cfg, double startQ, double untilQ, int tsNum = 4, int tsD
             lastBar = b;
             std::array<StepView, kMaxBarSteps> view {};
             const int n = seq.readView(view);
-            const std::uint32_t cw = seq.chordForGui.load();
-            Chord c;
-            c.rootPc = static_cast<int>(cw & 15u);
-            c.iv[1] = static_cast<int>((cw >> 4) & 31u) - 1;
-            c.iv[2] = static_cast<int>((cw >> 9) & 31u) - 1;
-            c.iv[3] = static_cast<int>((cw >> 14) & 31u) - 1;
+            const Chord c = chordFromGui(seq.chordForGui.load());
             std::string line;
             for (int k = 0; k < n; ++k)
             {
                 const auto& v = view[static_cast<size_t>(k)];
                 line += v.head ? '[' : ' ';
-                line += fnChar(v, v.note >= 0 ? memberOf(v.note, c) : 0);
+                line += fnChar(v);
                 line += v.accent ? '>' : (v.slide ? '~' : (v.head ? ']' : ' '));
             }
             static const char* pcs[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -4761,6 +4789,189 @@ int main(int argc, char** argv)
                   + std::to_string(turnOff) + " of " + std::to_string(turns) + " off; " + std::to_string(turnMatters)
                   + " where entering from the Keys chord latched before plays other notes after the turn)" + turnWhy);
         check(turnErrs == 0, "Chords turned to Keys: no hanging or orphan note, no bad glide (" + std::to_string(turnErrs) + ")");
+    }
+
+    std::printf("\n== 38. The view names the chord tone each step sounds\n");
+    {
+        // Each view step names the chord tone it sounds (StepView::tone and
+        // octave): a chord-tone step the member the chord gives its slot (a 7
+        // the chord lacks sounds as R an octave up, a missing 3 as the 5 or
+        // R, a missing 5 as the 3 or R); the ABAB cadence on the bar's last
+        // sounding head R (closed), 5 (open), or scale degree 2 (open over a
+        // tonic pedal); a Stab hit the chord; a rest, a silenced step and an
+        // embellishment nothing. A step a non-Bass Lift raises names its tone
+        // an octave up. Oracle: the slot, the bar's variation and the fallback
+        // table written out here; and every tone is the note its step plays.
+        // Scales whose degrees lack members, Ext 3 and 7, Pedal, Chords and
+        // Keys (one to four held keys: chords with no 3, no 5, neither).
+        // B: the same through readView() and chordForGui while playing.
+        std::mt19937 rng(38);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static constexpr int kScales[] = { ScaleQuantizer::Minor, ScaleQuantizer::Major, ScaleQuantizer::HarmonicMinor,
+                                           ScaleQuantizer::Pentatonic, ScaleQuantizer::MinorPentatonic,
+                                           ScaleQuantizer::WholeTone, ScaleQuantizer::Iwato, ScaleQuantizer::Hirajoshi,
+                                           ScaleQuantizer::Ryukyu, ScaleQuantizer::Pelog, ScaleQuantizer::Off };
+        auto memberWant = [](const Chord& ch, int member, int& oct) {
+            if (ch.iv[static_cast<size_t>(member)] >= 0) return static_cast<Tone>(static_cast<int>(Tone::Root) + member);
+            if (member == Seventh) { ++oct; return Tone::Root; }
+            const int other = member == Third ? Fifth : Third;
+            return ch.iv[static_cast<size_t>(other)] >= 0 ? static_cast<Tone>(static_cast<int>(Tone::Root) + other)
+                                                          : Tone::Root;
+        };
+        auto randomConfig = [&]() {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));
+            c.harm = static_cast<Harm>(U(0, 2));
+            c.scaleType = kScales[U(0, static_cast<int>(std::size(kScales)) - 1)];
+            c.scaleRoot = U(0, 11);
+            c.ext7 = U(0, 1) != 0;
+            c.chordDegrees = { U(1, 7), U(0, 7), U(0, 7), U(0, 7) };
+            c.stepsPerBar = 4 << U(0, 2);
+            c.len = U(1, 2); c.pulses = U(1, c.stepsPerBar); c.rotation = U(0, c.stepsPerBar - 1);
+            c.phraseBars = 4 << U(0, 2);
+            c.form = U(0, 1) ? Form::ABAB : static_cast<Form>(U(0, 3));
+            c.variation = 0.25f * static_cast<float>(U(0, 4));
+            c.evolve = 0.25f * static_cast<float>(U(0, 2));
+            c.shuffle = U(0, 1) ? 0.0f : 0.4f;
+            return c;
+        };
+        auto keysChord = [&]() {
+            std::uint16_t mask = 0;
+            const int low = U(36, 72);
+            mask |= static_cast<std::uint16_t>(1u << (low % 12));
+            for (int i = U(0, 3); i > 0; --i) mask |= static_cast<std::uint16_t>(1u << U(0, 11));
+            return chordFromKeys(low, mask);
+        };
+
+        enum { kSeventhAsRoot, kThirdAsFifth, kThirdAsRoot, kFifthAsThird, kFifthAsRoot,
+               kCadRoot, kCadFifth, kCadSecond, kLifted, kStab, kKeys, kSeen };
+        static const char* kSeenName[] = { "7 as R'", "3 as 5", "3 as R", "5 as 3", "5 as R",
+                                           "cadence R", "cadence 5", "cadence 2", "lifted", "Stab hits", "Keys bars" };
+        std::array<int, kSeen> seen {};
+        int steps = 0, off = 0, offNote = 0;
+        std::string why;
+        auto fail = [&](int& n, int t, int k, const std::string& w) {
+            if (n++ < 4) why += " | t " + std::to_string(t) + " step " + std::to_string(k) + ": " + w;
+        };
+        for (int t = 0; t < 4000; ++t)
+        {
+            const Config c = randomConfig();
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(38000 + t), 0, c), c);
+            const double barLenQ = U(0, 3) == 0 ? 3.0 : 4.0;
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m;
+            in.bar = U(0, 31); in.barLenQ = barLenQ;
+            in.prevNote = U(36, 72); in.prevPrevNote = U(36, 72);
+            if (c.harm == Harm::Keys) { in.keys = true; in.keysChord = keysChord(); }
+            BarRender r;
+            renderBar(in, r);
+
+            std::array<bool, kMaxMotifSteps> heads {};
+            computeHeads(m, heads);
+            const BarVariation var = variationForBar(m, heads, c, in.bar);
+            const int spb = m.stepsPerBar, mb = floorMod(in.bar, m.len);
+            const double stepQ = 4.0 / spb, lastBeatQ = std::max(0.0, barLenQ - 1.0);
+            const Chord& ch = r.chord;
+            const int tonic = tonicNote(partAnchor(c.part), c.scaleRoot);
+            const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
+            int cadenceK = -1;
+            for (int k = 0; k < r.viewSteps; ++k)
+                if (r.view[static_cast<size_t>(k)].head && r.view[static_cast<size_t>(k)].note >= 0) cadenceK = k;
+            if (var.cadence == 0) cadenceK = -1;
+            seen[kKeys] += in.keys;
+            for (int k = 0; k < r.viewSteps; ++k)
+            {
+                const StepView& v = r.view[static_cast<size_t>(k)];
+                const Slot& sl = m.slots[static_cast<size_t>(mb * spb + k)];
+                const int up = var.lift && c.part != Part::Bass && k * stepQ >= lastBeatQ - 1.0e-9 ? 1 : 0;
+                Tone want = Tone::None;
+                int oct = 0;
+                if (v.note < 0)
+                    want = Tone::None;
+                else if (c.part == Part::Stab)
+                {
+                    want = Tone::Chord; oct = up; ++seen[kStab];
+                }
+                else if (k == cadenceK)
+                {
+                    oct = sl.octave;
+                    want = var.cadence == 2 ? Tone::Root
+                         : c.harm == Harm::Pedal ? Tone::Second
+                         : memberWant(ch, Fifth, oct);
+                    oct += up;
+                    ++seen[var.cadence == 2 ? kCadRoot : c.harm == Harm::Pedal ? kCadSecond : kCadFifth];
+                }
+                else if (v.fn == Fn::ChordTone)
+                {
+                    oct = sl.octave;
+                    want = memberWant(ch, sl.member, oct);
+                    if (ch.iv[static_cast<size_t>(sl.member)] < 0)
+                        ++seen[sl.member == Seventh ? kSeventhAsRoot
+                               : sl.member == Third ? (want == Tone::Fifth ? kThirdAsFifth : kThirdAsRoot)
+                                                    : (want == Tone::Third ? kFifthAsThird : kFifthAsRoot)];
+                    oct += up;
+                }
+                if (want != Tone::None && up) ++seen[kLifted];
+                if (want == Tone::None) oct = 0;
+                ++steps;
+                if (v.tone != want || v.octave != oct)
+                    fail(off, t, k, "names tone " + std::to_string(static_cast<int>(v.tone)) + " octave "
+                                        + std::to_string(v.octave) + ", want " + std::to_string(static_cast<int>(want))
+                                        + " octave " + std::to_string(oct));
+                const std::string w = toneMismatch(v, ch, tonic, mask);
+                if (!w.empty()) fail(offNote, t, k, w);
+            }
+        }
+        std::string counts;
+        bool covered = true;
+        for (int i = 0; i < kSeen; ++i)
+        {
+            counts += std::string(i ? ", " : "") + kSeenName[i] + " " + std::to_string(seen[static_cast<size_t>(i)]);
+            covered = covered && seen[static_cast<size_t>(i)] >= 20;
+        }
+        check(covered, "the cases met (" + counts + ")");
+        check(off == 0, "A. each step names the tone its slot, the cadence or the Stab gives it ("
+                            + std::to_string(off) + " of " + std::to_string(steps) + " off)" + why);
+        check(offNote == 0, "A. each named tone is the note its step plays (" + std::to_string(offNote) + " off)");
+
+        // B: what readView() and chordForGui hand the GUI.
+        int bars = 0, named = 0, octaves = 0, seconds = 0, offB = 0, unnamed = 0;
+        std::string whyB;
+        for (int t = 0; t < 120; ++t)
+        {
+            Config c = randomConfig();
+            if (t % 3 == 0) { c.form = Form::ABAB; c.harm = Harm::Pedal; c.part = Part::Riff; }
+            std::vector<std::pair<double, std::vector<int>>> keys;
+            if (c.harm == Harm::Keys) keys = { { 0.0, { 45, 48, 52 } }, { 8.0, { 41, 45, 48, 51 } }, { 16.0, { 43, 50 } } };
+            const int tonic = tonicNote(partAnchor(c.part), c.scaleRoot);
+            const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
+            int lastBar = -1;
+            play(c, 0.0, 24 * 4.0, 4, 4, keys, static_cast<std::uint32_t>(38500 + t), [&](T5ynthPhraseSequencer& s, double) {
+                const int b = s.currentBarForGui.load();
+                if (b == lastBar) return;
+                lastBar = b;
+                ++bars;
+                std::array<StepView, kMaxBarSteps> v {};
+                const int n = s.readView(v);
+                const Chord ch = chordFromGui(s.chordForGui.load());
+                for (int k = 0; k < n; ++k)
+                {
+                    const StepView& x = v[static_cast<size_t>(k)];
+                    if (x.note >= 0 && x.fn == Fn::ChordTone && x.tone == Tone::None) ++unnamed;
+                    if (x.tone == Tone::None) continue;
+                    ++named;
+                    octaves += x.octave != 0;
+                    seconds += x.tone == Tone::Second;
+                    const std::string w = toneMismatch(x, ch, tonic, mask);
+                    if (!w.empty() && offB++ < 4) whyB += " | t " + std::to_string(t) + " bar " + std::to_string(b) + ": " + w;
+                }
+            });
+        }
+        check(bars > 1000 && named > 5000 && octaves > 300 && seconds > 20,
+              "B. bars read (" + std::to_string(bars) + "; " + std::to_string(named) + " tones, "
+                  + std::to_string(octaves) + " off octave 0, " + std::to_string(seconds) + " cadence 2)");
+        check(offB == 0 && unnamed == 0, "B. readView hands each sounding chord-tone step its tone, and each the note it plays ("
+                                             + std::to_string(offB) + " off, " + std::to_string(unnamed) + " unnamed)" + whyB);
     }
 
     // ── Chord labels: the Roman numerals the chord slots show (§3.3) ──

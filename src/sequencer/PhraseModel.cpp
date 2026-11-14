@@ -344,17 +344,19 @@ int chordRootNote(const Chord& c, int tonic)
     return n;
 }
 
-int chordToneNote(const Chord& c, int member, int octave, int tonic)
+int soundingMember(const Chord& c, int member, int& octave)
 {
     member = std::clamp(member, 0, kMaxVoices - 1);
-    int iv = c.iv[static_cast<size_t>(member)];
-    if (iv < 0)
-    {
-        if (member == Seventh)    iv = 12;
-        else if (member == Third) iv = c.iv[2] >= 0 ? c.iv[2] : 0;
-        else                      iv = c.iv[1] >= 0 ? c.iv[1] : 0;
-    }
-    return clampNote(chordRootNote(c, tonic) + iv + 12 * octave);
+    if (c.iv[static_cast<size_t>(member)] >= 0) return member;
+    if (member == Seventh) { ++octave; return Root; }
+    const int other = member == Third ? Fifth : Third;
+    return c.iv[static_cast<size_t>(other)] >= 0 ? other : Root;
+}
+
+int chordToneNote(const Chord& c, int member, int octave, int tonic)
+{
+    const int m = soundingMember(c, member, octave);
+    return clampNote(chordRootNote(c, tonic) + c.iv[static_cast<size_t>(m)] + 12 * octave);
 }
 
 int voiceChord(const Chord& c, int anchor, const int* prev, int prevCount, int* out)
@@ -1072,16 +1074,31 @@ int headNote(const Slot& sl, const Chord& ch, int tonic)
     return chordToneNote(ch, sl.member, sl.octave, tonic);
 }
 
-/** The note an ABAB cadence (§3.7) puts on its bar's last sounding head:
- *  closed (2) on the root, open (1) on the fifth, or on scale degree 2 over a
- *  tonic pedal. */
+/** The tone an ABAB cadence (§3.7) puts on its bar's last sounding head:
+ *  closed (2) the root, open (1) the fifth, or scale degree 2 over a tonic
+ *  pedal. */
+Tone cadenceTone(const LineCtx& x, int cadence)
+{
+    if (cadence == 2) return Tone::Root;
+    if (x.cfg->harm == Harm::Pedal && !x.keys) return Tone::Second;
+    return Tone::Fifth;
+}
+
+/** The note of cadenceTone() at the slot's octave. */
 int cadenceNote(const LineCtx& x, int cadence, const Slot& sl, const Chord& ch)
 {
-    if (cadence == 2)
-        return chordToneNote(ch, Root, sl.octave, x.tonic);
-    if (x.cfg->harm == Harm::Pedal && !x.keys)
-        return scaleStep(chordToneNote(ch, Root, sl.octave, x.tonic), 1, x.mask);   // degree 2
-    return chordToneNote(ch, Fifth, sl.octave, x.tonic);
+    switch (cadenceTone(x, cadence))
+    {
+        case Tone::Root:   return chordToneNote(ch, Root, sl.octave, x.tonic);
+        case Tone::Second: return scaleStep(chordToneNote(ch, Root, sl.octave, x.tonic), 1, x.mask);
+        default:           return chordToneNote(ch, Fifth, sl.octave, x.tonic);
+    }
+}
+
+/** The view's name for chord member `member`. */
+Tone toneOfMember(int member)
+{
+    return static_cast<Tone>(static_cast<int>(Tone::Root) + member);
 }
 
 /** A bar as its variation plays it (§3.7). The cadence lands on the bar's
@@ -1279,7 +1296,8 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
 
         const int T = lookaheadHead(x, ahead, k, false);
         int note = renderSlot(sl, ch, P, PP, T, x);
-        if (var.cadence != 0 && head && k == lastHeadK) note = cadenceNote(x, var.cadence, sl, ch);
+        const bool cadence = var.cadence != 0 && head && k == lastHeadK;
+        if (cadence) note = cadenceNote(x, var.cadence, sl, ch);
         const int octShift = var.lift && inLast && !x.bass ? 12 : 0;
         // Bass's Lift: the last pulse of the last beat plays an Octave of the
         // note before it in place of what is there, an embellishment and no
@@ -1340,7 +1358,26 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         {
             out.push(o);
         }
-        if (sv) { sv->note = note + octShift; sv->fn = sl.fn; sv->head = playsHead; sv->accent = sl.accent; sv->slide = false; }
+        if (sv)
+        {
+            sv->note = note + octShift; sv->fn = sl.fn; sv->head = playsHead; sv->accent = sl.accent; sv->slide = false;
+            // The chord tone it sounds: the cadence's (scale degree 2 lies
+            // above the root at the slot's octave), or the member the chord
+            // gives a chord-tone step. Bass's Octave pulse is neither.
+            int oct = sl.octave;
+            Tone tone = Tone::None;
+            if (cadence)
+            {
+                tone = cadenceTone(x, var.cadence);
+                if (tone == Tone::Fifth) tone = toneOfMember(soundingMember(ch, Fifth, oct));
+            }
+            else if (sl.fn == Fn::ChordTone)
+            {
+                tone = toneOfMember(soundingMember(ch, sl.member, oct));
+            }
+            sv->tone = tone;
+            sv->octave = tone == Tone::None ? 0 : oct + octShift / 12;
+        }
 
         if (!inLast) pBeforeLastBeat = note;
         PP = P; P = note;
@@ -1592,12 +1629,18 @@ void renderBar(const RenderInput& in, BarRender& out)
         emitChords(out, line, voicing, nv, -1, true, 0, cfg.transpose, 1.0f);
         if (cfg.layer == Layer::Octave)
             emitChords(out, line, voicing, nv, 5, false, octaveShift, cfg.transpose, kLayerVel);
-        // The view shows the chord's lowest voice, lifted with its step.
+        // The view shows the chord's lowest voice, lifted with its step, and
+        // names the step a hit of the whole chord.
         for (int i = 0; i < line.n; ++i)
         {
             const Onset& o = line.a[static_cast<size_t>(i)];
             if (o.barStep >= 0 && !o.ratchetTail)
-                out.view[static_cast<size_t>(o.barStep)].note = voicing[0] + o.octShift;
+            {
+                StepView& v = out.view[static_cast<size_t>(o.barStep)];
+                v.note = voicing[0] + o.octShift;
+                v.tone = Tone::Chord;
+                v.octave = o.octShift / 12;
+            }
         }
     }
     else

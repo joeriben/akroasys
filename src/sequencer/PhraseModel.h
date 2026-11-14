@@ -219,8 +219,11 @@ int partAnchor(Part part);
 int tonicNote(int anchor, int scaleRoot);
 /** Root note of a chord, placed nearest to the tonic: [tonic − 5, tonic + 6]. */
 int chordRootNote(const Chord& c, int tonic);
-/** A chord member at an octave; missing members fall back (7 → R+12,
- *  3 → 5 → R, 5 → 3 → R). */
+/** The member `c` sounds for `member`: itself, or for a member the chord
+ *  lacks its fallback (7 → R an octave up, 3 → 5 → R, 5 → 3 → R), adding
+ *  the octave the fallback adds to `octave`. */
+int soundingMember(const Chord& c, int member, int& octave);
+/** A chord member at an octave, as soundingMember() sounds it. */
 int chordToneNote(const Chord& c, int member, int octave, int tonic);
 
 /** Close-position voicing of `c` whose lowest note lies in
@@ -305,11 +308,26 @@ struct Event
     bool   held  = false;  // slide source: no note-off, the next onset glides it
 };
 
+/** The chord tone a step sounds, as the phrase view names it. */
+enum class Tone : std::uint8_t
+{
+    None = 0,   // no chord tone: a rest, a silenced step, an embellishment
+    Root, Third, Fifth, Seventh,
+    Second,     // scale degree 2: the open cadence over a tonic pedal (§3.7)
+    Chord,      // Stab: the whole chord
+    Count
+};
+
 /** What the phrase view shows per step of the rendered bar. */
 struct StepView
 {
     int  note   = -1;      // −1 = rest
     Fn   fn     = Fn::Rest;
+    /** The chord tone the step sounds and its octave against the part's
+     *  register: the member the chord gives (soundingMember), the tone a
+     *  cadence puts on its head, the octave a Lift adds. */
+    Tone tone   = Tone::None;
+    int  octave = 0;
     bool head   = false;
     bool accent = false;
     bool slide  = false;

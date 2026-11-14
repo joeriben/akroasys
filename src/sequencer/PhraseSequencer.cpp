@@ -39,7 +39,9 @@ std::uint32_t packView(const StepView& v)
          | (static_cast<std::uint32_t>(v.fn) << 8)
          | (v.head   ? 1u << 12 : 0u)
          | (v.accent ? 1u << 13 : 0u)
-         | (v.slide  ? 1u << 14 : 0u);
+         | (v.slide  ? 1u << 14 : 0u)
+         | (static_cast<std::uint32_t>(v.tone) << 15)
+         | (static_cast<std::uint32_t>(std::clamp(v.octave, -4, 3) + 4) << 18);
 }
 
 std::uint32_t packChord(const Chord& c)
@@ -806,6 +808,9 @@ int T5ynthPhraseSequencer::readView(std::array<StepView, kMaxBarSteps>& outView)
         v.head   = ((w >> 12) & 1u) != 0;
         v.accent = ((w >> 13) & 1u) != 0;
         v.slide  = ((w >> 14) & 1u) != 0;
+        const std::uint32_t tone = (w >> 15) & 7u;
+        v.tone   = tone < static_cast<std::uint32_t>(Tone::Count) ? static_cast<Tone>(tone) : Tone::None;
+        v.octave = static_cast<int>((w >> 18) & 7u) - 4;
         outView[static_cast<size_t>(k)] = v;
     }
     return n;
