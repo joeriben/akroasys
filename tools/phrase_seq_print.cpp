@@ -5137,7 +5137,8 @@ int main(int argc, char** argv)
             { 0, -1, -1, -1, "Cno3no5" },    { 0, 4, 7, 2, "Cadd9" },         { 0, 4, 9, -1, "Cadd6no5" },
             { 0, 9, 7, -1, "Cadd6no3" },     { 0, 1, 7, -1, "Cadd" + fl + "9no3" }, { 0, 3, 7, 4, "Cmadd3" },
             { 0, 4, 7, 6, "Cadd" + sh + "11" }, { 0, 4, 7, 8, "Cadd" + fl + "13" }, { 0, 4, 7, 5, "Cadd11" },
-            { 0, 4, 11, 10, "C7addmaj7no5" }, { 0, 4, 7, 3, "Cadd" + sh + "9" }, { 0, 5, -1, 10, "C7sus4no5" },
+            { 0, 4, 11, 10, "C7addmaj7no5" }, { 0, 5, -1, 10, "C7sus4no5" }, { 0, 2, 6, -1, "Csus2(" + fl + "5)" },
+            { 0, 3, 8, -1, "Cm(" + sh + "5)" }, { 0, 4, 6, -1, "C(" + fl + "5)" },
         };
         int offA = 0;
         std::string whyA;
@@ -5229,7 +5230,8 @@ int main(int argc, char** argv)
         check(offC == 0, "C. step glyphs, " + std::to_string(glyphs.size()) + " written out (" + std::to_string(offC) + " off)" + whyC);
 
         // D: every step the model renders has a glyph that says what it is
-        // (none falls through to ?), and a sounding step never reads as a rest.
+        // (none falls through to ?, as a chord tone without a label would),
+        // and the rest dot stands exactly where nothing sounds.
         std::mt19937 rng(39);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         int seenSteps = 0, offD = 0;
