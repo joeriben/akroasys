@@ -5308,14 +5308,14 @@ int main(int argc, char** argv)
 
     // ── Chord labels: the Roman numerals the chord slots show (§3.3) ──
     {
-        auto row = [](int scaleType) {
+        auto row = [](int scaleType, bool ext7) {
             std::string out;
             for (int d = 0; d < degreeCount(scaleType); ++d)
-                out += (d ? " " : "") + chordLabelText(chordLabel(d, scaleType));
+                out += (d ? " " : "") + chordLabelText(chordLabel(d, scaleType, ext7));
             return out;
         };
-        auto expect = [&](int scaleType, const char* name, const std::string& want) {
-            const std::string got = row(scaleType);
+        auto expect = [&](int scaleType, const char* name, const std::string& want, bool ext7 = false) {
+            const std::string got = row(scaleType, ext7);
             check(got == want, std::string("chord labels, ") + name + ": " + got + (got == want ? "" : " (want " + want + ")"));
         };
         const std::string fl = "\xe2\x99\xad", sh = "\xe2\x99\xaf", dg = "\xc2\xb0";
@@ -5330,6 +5330,47 @@ int main(int argc, char** argv)
         expect(14, "Hirajoshi", "i II" + fl + "5no3 " + fl + "IIIno5 V5 " + fl + "VI");
         expect(18, "Ryukyu",   "I iii IV5 Vno5 VII" + fl + "5no3");
         expect(26, "Pelog",    "i " + fl + "II5 " + fl + "IIIno5 V" + fl + "5no3 " + fl + "VI");
+
+        // Ext = 7: the bare numeral reads as the seventh chord, so a degree
+        // the scale has no seventh above (neither 10 nor 11) is marked no7.
+        // A heptatonic scale has one on every degree.
+        expect(2,  "Minor, Ext 7", "i ii" + dg + " " + fl + "III iv v " + fl + "VI " + fl + "VII", true);
+        expect(3,  "Penta, Ext 7", "Ino7 II5 iii" + sh + "5 V5no7 vi", true);
+        expect(12, "Blues, Ext 7", "i " + fl + "iiino7 IV5 " + sh + "IV" + fl + "5 v" + sh + "5 " + fl + "VII5no7", true);
+        expect(15, "In-sen, Ext 7", "I5 " + fl + "II" + fl + "5 IV5no7 v" + dg + " " + fl + "viino7", true);
+        expect(18, "Ryukyu, Ext 7", "I iiino7 IV5 Vno5 VII" + fl + "5no3no7", true);
+
+        // no7 after every triad name, the ones that end the name included:
+        // no scale has a diminished or augmented degree without a seventh.
+        ChordLabel dimL; dimL.numeral = 7; dimL.third = 3; dimL.fifth = 6; dimL.noSeventh = true;
+        ChordLabel augL; augL.numeral = 3; augL.third = 4; augL.fifth = 8; augL.noSeventh = true;
+        check(chordLabelText(dimL) == "vii" + dg + "no7" && chordLabelText(augL) == "III+no7",
+              "chord labels, no7 after a closed name: " + chordLabelText(dimL) + " " + chordLabelText(augL));
+
+        // The label says what plays: under Ext 7, no7 on exactly the degrees
+        // whose chord has no seventh, and there the motif's 7 sounds as the
+        // root's octave. Every scale, every degree, every key.
+        int seen7 = 0, marked7 = 0, off7 = 0;
+        for (int st = 0; st < ScaleQuantizer::COUNT; ++st)
+        {
+            if (!chordsAvailable(st)) continue;
+            for (int d = 0; d < degreeCount(st); ++d)
+                for (int root = 0; root < 12; ++root)
+                {
+                    const Chord ch = chordForDegree(d, st, root, true);
+                    const std::string t = chordLabelText(chordLabel(d, st, true));
+                    const bool none = ch.iv[Seventh] < 0;
+                    const bool says = t.size() >= 3 && t.compare(t.size() - 3, 3, "no7") == 0;
+                    ++seen7;
+                    marked7 += says;
+                    if (says != none
+                        || (none && chordToneNote(ch, Seventh, 0, 60) != chordToneNote(ch, Root, 1, 60)))
+                        ++off7;
+                }
+        }
+        check(off7 == 0 && marked7 > 0,
+              "chord labels, Ext 7: " + std::to_string(seen7) + " degrees in every key, " + std::to_string(marked7)
+              + " with no seventh read no7 and play R' for the 7 (" + std::to_string(off7) + " off)");
     }
 
     std::printf("\n== 40. The view shows a note on every step a note starts on\n");

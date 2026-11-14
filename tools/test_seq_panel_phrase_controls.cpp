@@ -9,13 +9,14 @@
 //      switch segment and action button is as wide as its label needs, every
 //      tag's text fits inside its Label's border, every inline bar is as wide
 //      as its label and widest value need, every Phrase combo as wide as its
-//      longest item needs (the chord slots in every scale).
+//      longest item needs (the chord slots in every scale, Ext 3 and 7).
 //   C. The bindings: a segment click writes its parameter and lights its
 //      segment only; a parameter changed elsewhere moves the segments; each
 //      combo and bar writes its own parameter.
-//   D. The chord slots follow the scale and Harm. They show the key's Roman
-//      numerals and are relabelled at once when the scale changes on the
-//      message thread. There the attachment updates its combo, and the combo
+//   D. The chord slots follow the scale, Ext and Harm. They show the key's
+//      Roman numerals (no7 under Ext 7 where the scale has no seventh above
+//      the degree) and are relabelled at once when the scale or Ext changes
+//      on the message thread. There the attachment updates its combo, and the combo
 //      calls onChange, before the APVTS stores the new value (JUCE calls a
 //      parameter's listeners in reverse order of registration), so a relabel
 //      that read the parameter would show the previous scale. The slots and
@@ -480,20 +481,24 @@ void layoutAtSize(int w, int h)
                             box.getItemText(i).toRawUTF8(), box.getWidth());
             }
     };
-    // The chord slots relabel with the scale: every scale's labels fit, the
-    // longest of them VIIsus2♭5 (Persian) and ♭IIIno5 (Hirajoshi, Pelog).
+    // The chord slots relabel with the scale and Ext: every scale's labels
+    // fit under both, the longest of them VII♭5no3no7 (Ryukyu, Ext 7),
+    // VIIsus2♭5 (Persian) and ♭IIIno5 (Hirajoshi, Pelog).
     int relabelled = 0;
     for (int st = 0; st < ScaleType::kCount; ++st)
-    {
-        setPlain(proc, PID::scaleType, static_cast<float>(st));
-        if (PhraseModel::chordsAvailable(st)
-            && ui.chordSlots[0]->getItemText(1) == juce::String::fromUTF8(
-                   PhraseModel::chordLabelText(PhraseModel::chordLabel(0, st)).c_str()))
-            ++relabelled;
-        for (auto* box : ui.chordSlots) allItemsFit(*box, "chord slot");
-    }
-    check("the chord slots relabel with every scale but Chromatic",
-          relabelled == ScaleType::kCount - 1);
+        for (int ext = 0; ext < 2; ++ext)
+        {
+            setPlain(proc, PID::phrExt7, static_cast<float>(ext));
+            setPlain(proc, PID::scaleType, static_cast<float>(st));
+            if (PhraseModel::chordsAvailable(st)
+                && ui.chordSlots[0]->getItemText(1) == juce::String::fromUTF8(
+                       PhraseModel::chordLabelText(PhraseModel::chordLabel(0, st, ext == 1)).c_str()))
+                ++relabelled;
+            for (auto* box : ui.chordSlots) allItemsFit(*box, "chord slot");
+        }
+    setPlain(proc, PID::phrExt7, 0.0f);
+    check("the chord slots relabel with every scale but Chromatic, Ext 3 and 7",
+          relabelled == 2 * (ScaleType::kCount - 1));
     allItemsFit(*ui.layer, "Layer");
     allItemsFit(*ui.form, "Form");
     if (auto* root = scaleRootBox(panel)) allItemsFit(*root, "Key root");
@@ -568,7 +573,7 @@ void bindings()
 
 void chordSlots()
 {
-    std::printf("D. The chord slots follow the scale and Harm\n");
+    std::printf("D. The chord slots follow the scale, Ext and Harm\n");
     T5ynthProcessor proc;
     proc.prepareToPlay(kRate, kBlock);
     setDistinctBarValues(proc);
@@ -624,6 +629,20 @@ void chordSlots()
     check("Penta: degrees 6 and 7 read (6) (7) and are disabled, 1..5 enabled", pentItems);
     check("Penta: slot 1 (degree 6) reads (6), the slots stay enabled",
           slot1->getText() == "(6)" && slotsEnabled(true));
+
+    // Ext 7 on the message thread relabels at once: Penta has no seventh
+    // above I (C D E G A) or V, which read no7; Ext 3 takes it off again.
+    setPlain(proc, PID::phrExt7, 1.0f);
+    std::printf("    Penta, Ext 7: slot 2 \"%s\", item V \"%s\"\n",
+                slot2->getText().toRawUTF8(), slot2->getItemText(4).toRawUTF8());
+    check("Penta, Ext 7: slot 2 reads Ino7 at once, item V reads V5no7, iii\xe2\x99\xaf" "5 and vi unmarked",
+          slot2->getText() == "Ino7" && slot2->getItemText(4) == "V5no7" && slot2->getItemText(5) == "vi"
+          && slot2->getItemText(3) == utf8("iii\xe2\x99\xaf" "5") && slot1->getItemText(1) == "Ino7");
+    check("the Ext relabel leaves the slot parameters as they were",
+          plain(proc, PID::phrChord1) == 6 && plain(proc, PID::phrChord2) == 1 && slot2->getSelectedId() == 2);
+    setPlain(proc, PID::phrExt7, 0.0f);
+    check("Penta, Ext 3: slot 2 reads I, item V reads V5",
+          slot2->getText() == "I" && slot2->getItemText(4) == "V5");
 
     setPlain(proc, PID::scaleType, static_cast<float>(ScaleType::Off));
     check("Chromatic: no chords, the slots and Rate are disabled",

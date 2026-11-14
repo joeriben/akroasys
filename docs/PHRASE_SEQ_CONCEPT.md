@@ -111,6 +111,10 @@ musician sets the degrees or plays the chords.
   seventh prefer the lower. If none qualifies, the member is omitted
   (open voicing). Example: A minor pentatonic on A gives A–C–E (Ext 7:
   A–C–E–G); on D there is no third, so it becomes D–A (Ext 7: D–A–C).
+  The slot's label names what is left out (D: IV5; a missing fifth: no5),
+  since the bare numeral reads as the full chord; under Ext 7 that is a
+  seventh too (major pentatonic I: Ino7), whose 7 then plays the root an
+  octave up.
   To be checked by listening (§6).
 - Chromatic (`Off`): Chords source is disabled (degrees are meaningless);
   Pedal gives root + fifth; full chords come only from Keys.

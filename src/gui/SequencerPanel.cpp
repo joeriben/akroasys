@@ -1051,6 +1051,7 @@ SequencerPanel::SequencerPanel(T5ynthProcessor& p)
         // Ext is a Bool: the hidden combo's two items are false and true.
         setupPhraseSwitch(phrExtSwitch, "Ext", { "3", "7" }, 2023,
             "Chords as triads (3) or with their seventh (7)");
+        phrExtSwitch.onSelect = [this] { refreshPhraseChordSlots(); };
         phrExtA = std::make_unique<CA>(apvts, PID::phrExt7, phrExtSwitch.hidden);
 
         setupPhraseSwitch(phrLenSwitch, "Len", choiceLabels(PhrLen::kEntries), 2024,
@@ -1435,13 +1436,14 @@ std::vector<juce::Component*> SequencerPanel::phraseControls()
 // thread (a preset load, From Step writing Len/Pulses/Rot) the attachment
 // sets its combo, and the combo calls onChange, before the APVTS adapter
 // has stored the new value. The attachments' combos already hold it.
-// Called on events only (Harm, scale type, Part, Layer, construction), never
+// Called on events only (Harm, Ext, scale type, Part, Layer, construction), never
 // per tick; none of the calls below repaints when nothing changes.
 void SequencerPanel::refreshPhraseChordSlots()
 {
     const int scaleType = juce::jmax(0, genScaleTypeBox.getSelectedItemIndex());
     const bool hasChords = PhraseModel::chordsAvailable(scaleType);
     const int degrees    = PhraseModel::degreeCount(scaleType);
+    const bool ext7      = phrExtSwitch.hidden.getSelectedItemIndex() == 1;
     const bool slotsInPlay = phrHarmSwitch.hidden.getSelectedItemIndex() == PhrHarm::Chords
                              && hasChords;
 
@@ -1458,7 +1460,7 @@ void SequencerPanel::refreshPhraseChordSlots()
                 text = juce::String(d);   // chromatic: no degrees, no chords
             else if (inScale)
                 text = juce::String::fromUTF8(PhraseModel::chordLabelText(
-                           PhraseModel::chordLabel(d - 1, scaleType)).c_str());
+                           PhraseModel::chordLabel(d - 1, scaleType, ext7)).c_str());
             else
                 text = "(" + juce::String(d) + ")";   // beyond a pentatonic's five
             box.changeItemText(d + 1, text);

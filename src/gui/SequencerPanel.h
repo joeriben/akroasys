@@ -234,8 +234,9 @@ private:
     void layoutPhraseSwitch(PhraseSwitch& sw, juce::Rectangle<int>& row, int rowH);
     int phraseSwitchWidth(PhraseSwitch& sw, int rowH);
     std::vector<juce::Component*> phraseControls();
-    /** Chord slot labels follow the scale (Roman numerals; degrees the scale
-     *  does not have are disabled), and the slots and Rate are enabled only
+    /** Chord slot labels follow the scale and Ext (Roman numerals, no7 where
+     *  Ext asks for a seventh the scale lacks; degrees the scale does not
+     *  have are disabled), and the slots and Rate are enabled only
      *  where they act: Harm = Chords on a scale with degrees. */
     void refreshPhraseChordSlots();
     /** Layer's Chord does not apply to Stab (a stab already is the chord). */
