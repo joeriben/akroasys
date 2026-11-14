@@ -5281,6 +5281,119 @@ int main(int argc, char** argv)
                         + std::to_string(onEmptyStab) + " Stab notes on steps the motif leaves empty (Fill)");
     }
 
+    std::printf("\n== 41. The view names an embellishment for the note it plays\n");
+    {
+        // Read from what plays: for each step, the main-line note that starts
+        // on its onset, and the one the line played before it in the bar.
+        // Without Variation (no Lift, Fill, Drop, Re-pitch, Ratchet) a step
+        // the view shows as a Repeat plays the note before it, a Neighbour
+        // the scale step above or below it. And a Lead embellishment after a
+        // leap of more than 4 semitones steps back against the leap (Huron's
+        // post-skip reversal), whatever the motif stored there: the view
+        // showed the stored = or n-arrow over the step back. Half the motifs
+        // come from Step: a drawn Lead motif stores no Repeat, an analysed
+        // one does wherever a step repeats its note.
+        std::mt19937 rng(41);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        static const int spbs[] = { 2, 4, 8, 16 };
+        int named = 0, reversals = 0, reversalsRelabelled = 0, repeatReversals = 0, off = 0;
+        std::string why;
+        for (int t = 0; t < 20000; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 2));
+            c.harm = static_cast<Harm>(U(0, 2));
+            c.scaleType = U(0, ScaleQuantizer::COUNT - 1);
+            c.scaleRoot = U(0, 11);
+            c.ext7 = U(0, 1) != 0;
+            c.chordDegrees = { U(1, 7), U(0, 7), U(0, 7), U(0, 7) };
+            c.stepsPerBar = spbs[U(0, 3)];
+            c.pulses = U(1, c.stepsPerBar);
+            c.rotation = U(0, c.stepsPerBar - 1);
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = 0.0f;
+            c.layer = static_cast<Layer>(U(0, 3));
+            c.shuffle = 0.25f * static_cast<float>(U(0, 3));
+            c.transpose = 0;
+            Motif drawn;
+            if (U(0, 1))
+            {
+                std::array<StepInput, kMaxBarSteps> steps {};
+                int last = U(55, 79);
+                for (int i = 0; i < c.stepsPerBar; ++i)
+                {
+                    if (U(0, 2) != 0) last = U(55, 79);
+                    steps[static_cast<size_t>(i)] = { last, U(0, 1) == 0 || i == 0, false, 0.8f };
+                }
+                drawn = motifFromSteps(steps.data(), c.stepsPerBar, c, static_cast<std::uint32_t>(41000 + t), 0);
+                c.len = drawn.len; c.pulses = drawn.pulses; c.rotation = 0;
+            }
+            else
+            {
+                drawn = generateMotif(static_cast<std::uint32_t>(41000 + t), 0, c);
+            }
+            const Motif m = fitMotif(drawn, c);
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m; in.answer = &m;
+            in.bar = U(0, 15);
+            in.barLenQ = 4.0;
+            in.prevNote = U(36, 72); in.prevPrevNote = U(36, 72);
+            if (c.harm == Harm::Keys) { in.keys = true; in.keysChord = chordFromKeys(U(36, 60), static_cast<std::uint16_t>(U(1, 4095))); }
+            BarRender r;
+            renderBar(in, r);
+            const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
+            const double stepQ = 4.0 / c.stepsPerBar;
+            const int mb = ((in.bar % m.len) + m.len) % m.len;
+            int prev = -1, prevPrev = -1;
+            for (int k = 0; k < r.viewSteps; ++k)
+            {
+                const double posQ = k * stepQ;
+                const double onQ = (k & 1) ? posQ + static_cast<double>(c.shuffle) * stepQ : posQ;
+                int note = -1;
+                for (int i = 0; i < r.count; ++i)
+                {
+                    const Event& e = r.events[static_cast<size_t>(i)];
+                    if (e.strand == -1 && e.line == Line::Main && std::abs(e.onQ - onQ) < 1e-6) note = e.note;
+                }
+                if (note < 0) continue;
+                const StepView& v = r.view[static_cast<size_t>(k)];
+                const Fn stored = m.slots[static_cast<size_t>(mb * c.stepsPerBar + k)].fn;
+                std::string bad;
+                if (prev >= 0 && v.tone == Tone::None)
+                {
+                    const int want = v.fn == Fn::Repeat ? prev
+                                   : v.fn == Fn::NeighbourUp ? scaleStep(prev, 1, mask)
+                                   : v.fn == Fn::NeighbourDown ? scaleStep(prev, -1, mask) : -1;
+                    if (want >= 0)
+                    {
+                        ++named;
+                        if (note != want) bad = "shown " + stepGlyphText(v) + " after " + std::to_string(prev);
+                    }
+                }
+                if (c.part == Part::Lead && prev >= 0 && prevPrev >= 0 && std::abs(prev - prevPrev) > 4
+                    && (stored == Fn::Repeat || stored == Fn::Passing
+                        || stored == Fn::NeighbourUp || stored == Fn::NeighbourDown))
+                {
+                    ++reversals;
+                    if (v.fn != stored) ++reversalsRelabelled;
+                    if (stored == Fn::Repeat) ++repeatReversals;
+                    if ((prev > prevPrev ? note >= prev : note <= prev) && bad.empty())
+                        bad = "no step back after " + std::to_string(prevPrev) + "-" + std::to_string(prev);
+                }
+                if (!bad.empty() && off++ < 4)
+                    why += " | t" + std::to_string(t) + " k" + std::to_string(k) + ": plays " + std::to_string(note) + ", " + bad;
+                prevPrev = prev; prev = note;
+            }
+        }
+        check(off == 0, std::to_string(named) + " Repeat/Neighbour steps, " + std::to_string(reversals)
+                        + " Lead steps after a leap: each is named for the note it plays and steps back ("
+                        + std::to_string(off) + " off)" + why);
+        check(named >= 5000 && reversals >= 500 && reversalsRelabelled >= 200 && repeatReversals >= 50,
+              "coverage: " + std::to_string(named) + " named, " + std::to_string(reversals) + " reversals, "
+              + std::to_string(reversalsRelabelled) + " shown other than stored, "
+              + std::to_string(repeatReversals) + " of a stored Repeat");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

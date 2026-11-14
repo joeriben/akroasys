@@ -1361,21 +1361,27 @@ int lookaheadHead(const LineCtx& x, const Ahead& a, int k, bool fromNextBar)
     return -1;
 }
 
-int renderSlot(const Slot& sl, const Chord& ch, int P, int PP, int T, const LineCtx& x)
+/** The note slot `sl` plays; `played` gets the function that note has, for
+ *  the view. */
+int renderSlot(const Slot& sl, const Chord& ch, int P, int PP, int T, const LineCtx& x, Fn& played)
 {
+    played = sl.fn;
     if (sl.fn == Fn::ChordTone || sl.fn == Fn::Rest)
         return headNote(sl, ch, x.tonic);
     if (T < 0) T = P >= 0 ? P : chordRootNote(ch, x.tonic);
     if (P < 0) P = T;
 
     // Post-skip reversal for Lead lines (Huron 2006): after a leap larger than
-    // 4 semitones the next embellishment steps back the other way.
+    // 4 semitones the next embellishment steps back the other way, a scale
+    // step from the note before, which is what a neighbour plays. The view
+    // names it so; shown as the stored Repeat or Neighbour, it claimed a
+    // repeat or the other direction.
     if (x.lead && PP >= 0 && std::abs(P - PP) > 4
         && (sl.fn == Fn::Repeat || sl.fn == Fn::Passing
             || sl.fn == Fn::NeighbourUp || sl.fn == Fn::NeighbourDown))
-        return scaleStep(P, P > PP ? -1 : 1, x.mask);
+        played = P > PP ? Fn::NeighbourDown : Fn::NeighbourUp;
 
-    switch (sl.fn)
+    switch (played)
     {
         case Fn::Repeat:        return P;
         case Fn::Octave:        return P > x.center ? P - 12 : P + 12;
@@ -1436,7 +1442,10 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         }
 
         const int T = lookaheadHead(x, ahead, k, false);
-        int note = renderSlot(sl, ch, P, PP, T, x);
+        // The step keeps its stored function for what it does (Passing and
+        // Approach may slide); the view shows the one its note has.
+        Fn playedFn = sl.fn;
+        int note = renderSlot(sl, ch, P, PP, T, x, playedFn);
         const bool cadence = var.cadence != 0 && head && k == lastHeadK;
         if (cadence) note = cadenceNote(x, var.cadence, sl, ch);
         const int octShift = var.lift && inLast && !x.bass ? 12 : 0;
@@ -1450,7 +1459,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         {
             const int p = P >= 0 ? P : note;
             note = p > x.center ? p - 12 : p + 12;
-            sl.fn = Fn::Octave;
+            sl.fn = playedFn = Fn::Octave;
         }
         const bool playsHead = head && !octavePulse;
 
@@ -1501,7 +1510,7 @@ void collectLine(const LineCtx& x, int& P, int& PP, OnsetList& out, BarRender* v
         }
         if (sv)
         {
-            sv->note = note + octShift; sv->fn = sl.fn; sv->head = playsHead; sv->accent = sl.accent; sv->slide = false;
+            sv->note = note + octShift; sv->fn = playedFn; sv->head = playsHead; sv->accent = sl.accent; sv->slide = false;
             // The chord tone it sounds: the cadence's (scale degree 2 lies
             // above the root at the slot's octave, named the member it is
             // when it is one), or the member the chord gives a chord-tone
