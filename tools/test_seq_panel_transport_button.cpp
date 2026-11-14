@@ -12,6 +12,10 @@
 //   A. STOP by parameter, deep idle before the next tick, in Step and in
 //      Phrase: the next tick reads PLAY, the idle ticks after it invalidate
 //      nothing, and a click then starts the transport.
+//
+// "Reads PLAY / STOP" checks the label and both colours (shows()): the
+// timer sets all three together. "And repaints" discriminates in Phrase
+// only; in Step the column the STOP puts out repaints on the same tick.
 //   B. A panel built while the transport runs (an editor opened during
 //      playback) reads STOP after its first tick, and a click stops it.
 //
@@ -81,6 +85,18 @@ struct RepaintProbe final : juce::CachedComponentImage
     void releaseResources() override {}
 };
 
+/** The button shows `running` in all three of its state cues: the label
+ *  and both colours the panel sets with it. */
+bool shows(const juce::TextButton& b, bool running)
+{
+    const auto fill = b.findColour(juce::TextButton::buttonColourId);
+    const auto text = b.findColour(juce::TextButton::textColourOffId);
+    return running ? b.getButtonText() == "STOP" && fill == kSeqCol.darker(0.3f)
+                         && text == juce::Colours::white
+                   : b.getButtonText() == "PLAY" && fill == kSurface
+                         && text == juce::Colour(0xff4caf50);
+}
+
 juce::TextButton* transportButton(const SequencerPanel& panel)
 {
     for (auto* c : panel.getChildren())
@@ -107,22 +123,22 @@ void paramStopThenIdle(int engine, const char* name)
     check("the transport button is found", button != nullptr);
     if (! button) return;
     tick();
-    check("stopped: it reads PLAY", button->getButtonText() == "PLAY");
+    check("stopped: it reads PLAY", shows(*button, false));
 
     button->onClick();
     blocks(proc, 8);
     tick();
     check("a click starts the transport, and the button reads STOP",
-          running(proc) && button->getButtonText() == "STOP");
+          running(proc) && shows(*button, true));
 
     setPlain(proc, PID::seqRunning, 0.0f);   // automation, not the button
     blocks(proc, kIdleBlocks);
     check("deep idle before any tick", proc.audioIdle.load() && ! running(proc));
-    check("the button still reads STOP before the tick", button->getButtonText() == "STOP");
+    check("the button still reads STOP before the tick", shows(*button, true));
 
     probe->any = false;
     tick();
-    check("the next tick reads PLAY", button->getButtonText() == "PLAY");
+    check("the next tick reads PLAY", shows(*button, false));
     check("and repaints", probe->any);
 
     probe->any = false;
@@ -149,11 +165,11 @@ void builtWhileRunning()
     check("the transport button is found", button != nullptr);
     if (! button) return;
     tick();
-    check("its first tick reads STOP", button->getButtonText() == "STOP");
+    check("its first tick reads STOP", shows(*button, true));
     button->onClick();
     check("a click on STOP stops the transport", ! running(proc));
     tick();
-    check("and the next tick reads PLAY", button->getButtonText() == "PLAY");
+    check("and the next tick reads PLAY", shows(*button, false));
 }
 } // namespace
 
