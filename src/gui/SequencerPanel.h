@@ -287,5 +287,9 @@ private:
     bool recordArmedDisplayed = false;
     int  recordCursorDisplayed = -1;
 
+    // Whether transportBtn shows the running state (STOP); set only when
+    // seq_running flips, so the timer leaves the button alone in between.
+    bool transportShowsRunning = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SequencerPanel)
 };

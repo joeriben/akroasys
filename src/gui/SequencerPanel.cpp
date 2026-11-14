@@ -1605,6 +1605,21 @@ void SequencerPanel::timerCallback()
     // and setEnabled() does nothing (no repaint) while the answer stands.
     phrUndoBtn.setEnabled(processorRef.canPhraseUndo());
 
+    // The transport button follows seq_running, above the idle early-return:
+    // a STOP that is not the button (automation, a controller, a state load)
+    // can let the audio reach deep idle before this tick, and a button left
+    // reading STOP would start the transport when clicked to stop it. Only a
+    // flip touches the button.
+    if (seqRunning != transportShowsRunning)
+    {
+        transportShowsRunning = seqRunning;
+        transportBtn.setButtonText(seqRunning ? "STOP" : "PLAY");
+        transportBtn.setColour(juce::TextButton::buttonColourId,
+                               seqRunning ? kSeqCol.darker(0.3f) : kSurface);
+        transportBtn.setColour(juce::TextButton::textColourOffId,
+                               seqRunning ? juce::Colours::white : juce::Colour(0xff4caf50));
+    }
+
     // Skip expensive updates when audio is idle and neither sequencer runs
     bool seqIdle = processorRef.audioIdle.load(std::memory_order_relaxed)
                    && !seqRunning && !genRunning;
@@ -1612,13 +1627,6 @@ void SequencerPanel::timerCallback()
         return;
 
     if (genRunning && genMonitor) genMonitor->poll();
-
-    // Transport button state (step seq)
-    transportBtn.setButtonText(seqRunning ? "STOP" : "PLAY");
-    transportBtn.setColour(juce::TextButton::buttonColourId,
-                           seqRunning ? kSeqCol.darker(0.3f) : kSurface);
-    transportBtn.setColour(juce::TextButton::textColourOffId,
-                           seqRunning ? juce::Colours::white : juce::Colour(0xff4caf50));
 
     // MIDI monitor
     int note = processorRef.lastMidiNote.load(std::memory_order_relaxed);
