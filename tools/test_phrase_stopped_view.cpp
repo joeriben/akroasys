@@ -199,6 +199,10 @@ void changeWhileIdle(const char* name, Rig& r, const std::function<void()>& chan
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
+    // A Dice draws its seed from the system random and can draw the bar it
+    // replaces (10 runs in 300 failed a "changes the bar" check on that):
+    // seeded, every run draws the same bars.
+    juce::Random::getSystemRandom().setSeed(20261114);
 
     {
         Rig r;
@@ -334,37 +338,30 @@ int main()
         auto switchInBlockOfChange = [](const char* name, bool fromIdle,
                                         const std::function<void(Rig&)>& change) {
             std::printf("%s\n", name);
-            // A Dice can draw the bar it replaces; a few attempts find one
-            // that changes it.
-            bool idleBefore = true, changed = false, gridIsView = false;
-            for (int attempt = 0; attempt < 8 && ! changed; ++attempt)
+            Rig r;
+            const bool idleBefore = ! fromIdle || r.waitIdle();
+            const Shown before = shown(r.proc);
+            change(r);
+            r.set(PID::seqEngine, SeqEngine::Step);
+            r.blocks(2);
+            auto& st = r.proc.getStepSequencer();
+            Shown grid;
+            grid.n = st.getNumSteps();
+            for (int i = 0; i < grid.n && i < PhraseModel::kMaxBarSteps; ++i)
             {
-                Rig r;
-                if (fromIdle) idleBefore = r.waitIdle();
-                const Shown before = shown(r.proc);
-                change(r);
-                r.set(PID::seqEngine, SeqEngine::Step);
-                r.blocks(2);
-                auto& st = r.proc.getStepSequencer();
-                Shown grid;
-                grid.n = st.getNumSteps();
-                for (int i = 0; i < grid.n && i < PhraseModel::kMaxBarSteps; ++i)
-                {
-                    const auto& s = st.getStep(i);
-                    grid.v[static_cast<size_t>(i)].note = s.enabled ? s.note : -1;
-                }
-                r.set(PID::seqEngine, SeqEngine::Phrase);
-                r.blocks(3);
-                const Shown back = shown(r.proc);
-                changed = ! same(back, before);
-                gridIsView = grid.n == back.n;
-                for (int i = 0; gridIsView && i < back.n; ++i)
-                    gridIsView = grid.v[static_cast<size_t>(i)].note == back.v[static_cast<size_t>(i)].note;
-                std::printf("    before %s\n    grid   %s\n    view   %s\n",
-                            str(before).c_str(), str(grid).c_str(), str(back).c_str());
+                const auto& s = st.getStep(i);
+                grid.v[static_cast<size_t>(i)].note = s.enabled ? s.note : -1;
             }
+            r.set(PID::seqEngine, SeqEngine::Phrase);
+            r.blocks(3);
+            const Shown back = shown(r.proc);
+            bool gridIsView = grid.n == back.n;
+            for (int i = 0; gridIsView && i < back.n; ++i)
+                gridIsView = grid.v[static_cast<size_t>(i)].note == back.v[static_cast<size_t>(i)].note;
+            std::printf("    before %s\n    grid   %s\n    view   %s\n",
+                        str(before).c_str(), str(grid).c_str(), str(back).c_str());
             if (fromIdle) check("  the change was made in deep idle", idleBefore);
-            check("  the change changes the bar", changed);
+            check("  the change changes the bar", ! same(back, before));
             check("  the step grid is the bar the view shows after the change", gridIsView);
         };
         switchInBlockOfChange("Dice and Phrase -> Step in one block, idle", true,
