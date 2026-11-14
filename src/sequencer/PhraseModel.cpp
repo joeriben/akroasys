@@ -255,7 +255,7 @@ Chord chordForBar(const Config& cfg, int bar)
     return chordForDegree(chordDegreeForBar(cfg, bar), cfg.scaleType, cfg.scaleRoot, cfg.ext7);
 }
 
-ChordLabel chordLabel(int degree0, int scaleType, bool ext7)
+ChordLabel chordLabel(int degree0, int scaleType)
 {
     ChordLabel l;
     const auto s = scaleOf(scaleType);
@@ -281,12 +281,32 @@ ChordLabel chordLabel(int degree0, int scaleType, bool ext7)
         l.accidental = kAcc[rootSemi];
     }
 
-    const Chord c = chordForDegree(d, scaleType, 0, ext7);
-    l.noThird    = c.iv[1] < 0;
-    l.minor      = c.iv[1] == 3;
-    l.diminished = c.iv[1] == 3 && c.iv[2] == 6;
-    l.augmented  = c.iv[1] == 4 && c.iv[2] == 8;
+    const Chord c = chordForDegree(d, scaleType, 0, false);
+    l.third = c.iv[1];
+    l.fifth = c.iv[2];
     return l;
+}
+
+std::string chordLabelText(const ChordLabel& l)
+{
+    static constexpr const char* kUpper[] = { "I", "II", "III", "IV", "V", "VI", "VII" };
+    static constexpr const char* kLower[] = { "i", "ii", "iii", "iv", "v", "vi", "vii" };
+    const int idx = std::clamp(l.numeral, 1, 7) - 1;
+
+    std::string t = l.accidental < 0 ? "\xe2\x99\xad" : l.accidental > 0 ? "\xe2\x99\xaf" : "";
+    t += l.third == 3 ? kLower[idx] : kUpper[idx];
+
+    const bool dim = l.third == 3 && l.fifth == 6;
+    const bool aug = l.third == 4 && l.fifth == 8;
+    if (dim)                         return t + "\xc2\xb0";
+    if (aug)                         return t + "+";
+    if (l.third < 0 && l.fifth == 7) return t + "5";
+    if (l.third == 2)                t += "sus2";
+    else if (l.third == 5)           t += "sus4";
+    if (l.fifth == 6)                t += "\xe2\x99\xad" "5";
+    else if (l.fifth == 8)           t += "\xe2\x99\xaf" "5";
+    if (l.third < 0)                 t += "no3";
+    return t;
 }
 
 // ─── Register ──────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <string>
 
 /**
  * Phrase sequencer — the pure model (docs/PHRASE_SEQ_CONCEPT.md §3).
@@ -193,17 +194,22 @@ int chordDegreeForBar(const Config& cfg, int bar);
 /** Chord sounding in `bar` for the Pedal and Chords sources. */
 Chord chordForBar(const Config& cfg, int bar);
 
-/** Roman-numeral description of a degree's chord for the UI. */
+/** Roman-numeral description of a degree's triad for the UI. The seventh is
+ *  left out: Ext shows it, for every slot at once. */
 struct ChordLabel
 {
-    int  numeral    = 1;   // 1..7
-    int  accidental = 0;   // −1 flat, +1 sharp
-    bool minor      = false;
-    bool diminished = false;
-    bool augmented  = false;
-    bool noThird    = false;
+    int numeral    = 1;    // 1..7
+    int accidental = 0;    // −1 flat, +1 sharp
+    int third      = -1;   // semitones above the root, −1 none
+    int fifth      = -1;
 };
-ChordLabel chordLabel(int degree0, int scaleType, bool ext7);
+/** Default label (numeral 1, no members) for chromatic, which has no degrees. */
+ChordLabel chordLabel(int degree0, int scaleType);
+/** The label as UTF-8 text: ♭/♯, the numeral (lower case on a minor third),
+ *  then ° (diminished), + (augmented), sus2 / sus4, 5 (open fifth, no
+ *  third), or no3, and ♭5 / ♯5 for a fifth the triad's name does not imply.
+ *  Aeolian: i ii° ♭III iv v ♭VI ♭VII. */
+std::string chordLabelText(const ChordLabel& l);
 
 // ─── Register ───────────────────────────────────────────────────────────────
 

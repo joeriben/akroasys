@@ -4763,6 +4763,27 @@ int main(int argc, char** argv)
         check(turnErrs == 0, "Chords turned to Keys: no hanging or orphan note, no bad glide (" + std::to_string(turnErrs) + ")");
     }
 
+    // ── Chord labels: the Roman numerals the chord slots show (§3.3) ──
+    {
+        auto row = [](int scaleType) {
+            std::string out;
+            for (int d = 0; d < degreeCount(scaleType); ++d)
+                out += (d ? " " : "") + chordLabelText(chordLabel(d, scaleType));
+            return out;
+        };
+        auto expect = [&](int scaleType, const char* name, const std::string& want) {
+            const std::string got = row(scaleType);
+            check(got == want, std::string("chord labels, ") + name + ": " + got + (got == want ? "" : " (want " + want + ")"));
+        };
+        const std::string fl = "\xe2\x99\xad", sh = "\xe2\x99\xaf", dg = "\xc2\xb0";
+        expect(2,  "Minor",    "i ii" + dg + " " + fl + "III iv v " + fl + "VI " + fl + "VII");
+        expect(1,  "Major",    "I ii iii IV V vi vii" + dg);
+        expect(5,  "Harm.Min", "i ii" + dg + " " + fl + "III+ iv V " + fl + "VI vii" + dg);
+        expect(11, "MinPent",  "i " + fl + "III IV5 v" + sh + "5 " + fl + "VII5");
+        expect(23, "Persian",  "I" + fl + "5 " + fl + "II IIIsus2 iv " + fl + "Vsus4 " + fl + "VI+ VIIsus2" + fl + "5");
+        expect(16, "Iwato",    "I" + fl + "5no3 " + fl + "II IV5 " + sh + "IV " + fl + "vii");
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
