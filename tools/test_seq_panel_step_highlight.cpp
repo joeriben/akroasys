@@ -20,6 +20,12 @@
 //      window resize (or a step-count sync) runs resized(), which took the
 //      engine edge, so the timer's entering-Step re-read of the playhead never
 //      ran and the column stayed lit. resized() now re-reads it itself.
+//   D. STOP arrives as a parameter change in Step (automation, a controller,
+//      a state load), not the button, and the audio reaches deep idle before
+//      the panel's next tick. Every tick then returned at the audioIdle gate,
+//      which the highlight sat below, and the column stayed lit until audio
+//      activity. The highlight now runs above the gate; the idle ticks after
+//      it go out invalidate nothing.
 //
 // A column is lit when its snapshot differs from the others: every step
 // carries the same data, so unlit columns of one kind (with or without the
@@ -340,6 +346,44 @@ void stepThroughResizeInIdle()
     printLit(ticked);
     check("nor after the timer ran", ticked.empty());
 }
+/** D: a STOP that is not the button, deep idle before the next tick. */
+void paramStopThenIdle()
+{
+    std::printf("D. STOP by parameter in Step, deep idle before the next tick\n");
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    uniformGrid(proc);
+    SequencerPanel panel(proc);
+    auto* probe = new RepaintProbe();
+    panel.setCachedComponentImage(probe);
+    panel.setVisible(true);
+    panel.setSize(864, 208);
+    tick();
+
+    const int step = playStepAndShow(proc);
+    const auto playing = litColumns(panel);
+    printLit(playing);
+    check("the played column is lit", playing.size() == 1 && playing[0] == step);
+    if (playing.size() != 1) return;
+    const auto litBounds = stepColumns(panel)[static_cast<size_t>(playing[0])]->getBounds();
+
+    setPlain(proc, PID::seqRunning, 0.0f);   // automation, not the button
+    blocks(proc, kIdleBlocks);
+    check("deep idle with the playhead cleared before any tick",
+          proc.audioIdle.load() && proc.getStepSequencer().currentStepForGui.load() == -1);
+
+    probe->reset();
+    tick();
+    const auto ticked = litColumns(panel);
+    printLit(ticked);
+    check("the next tick puts the column out", ticked.empty());
+    check("and repaints it", probe->covers(litBounds));
+
+    probe->reset();
+    for (int i = 0; i < 4; ++i) tick();
+    check("the idle ticks after it invalidate nothing", !probe->all && probe->area.isEmpty());
+}
 } // namespace
 
 int main()
@@ -351,6 +395,7 @@ int main()
     stopButtonInStep();
     stepAfterPhraseInIdle();
     stepThroughResizeInIdle();
+    paramStopThenIdle();
 
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::printf(failures == 0 ? "ALL PASS\n" : "%d FAIL\n", failures);

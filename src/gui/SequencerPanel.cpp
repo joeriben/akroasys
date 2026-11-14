@@ -1279,6 +1279,15 @@ void SequencerPanel::timerCallback()
     // Dim the BPM slider when an external MIDI clock overrides it
     bpmRow->setAlpha(processorRef.isMidiClockActive() ? 0.45f : 1.0f);
 
+    // Step-grid highlight (step mode only; the grid is hidden in Phrase and
+    // Gen). Above the idle early-return: a STOP that does not come from the
+    // button (automation, a controller, a state load) can let the audio reach
+    // deep idle before this tick, and the column it leaves lit has to go out
+    // all the same. Stopped, this is two atomic reads, and showCurrentStep()
+    // does nothing once the column is out.
+    if (stepMode)
+        showCurrentStep(playedStep());
+
     // Skip expensive updates when audio is idle and neither sequencer runs
     bool seqIdle = processorRef.audioIdle.load(std::memory_order_relaxed)
                    && !seqRunning && !genRunning;
@@ -1286,10 +1295,6 @@ void SequencerPanel::timerCallback()
         return;
 
     if (genRunning && genMonitor) genMonitor->poll();
-
-    // Step-grid highlight (step mode only; the grid is hidden in Phrase and Gen).
-    if (stepMode)
-        showCurrentStep(playedStep());
 
     // Transport button state (step seq)
     transportBtn.setButtonText(seqRunning ? "STOP" : "PLAY");
@@ -1598,8 +1603,8 @@ void SequencerPanel::resized()
         stepCols[static_cast<size_t>(i)]->setVisible(stepModeActive && i < numVisibleSteps);
 
     // Laying out Step re-reads the playhead highlight. The timer keeps it
-    // current only in Step and only with the audio awake, so a column lit
-    // before another mode was shown would come back lit after Step playback
+    // current only while Step is shown, so a column lit before another mode
+    // was shown would come back lit, until the next tick, after Step playback
     // stopped meanwhile. Here and not in the timer: whichever layout first
     // sees the switch (the timer's, a window resize, a step-count sync) takes
     // the edge the timer would act on.
