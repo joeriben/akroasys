@@ -5334,44 +5334,91 @@ int main(int argc, char** argv)
 
         // Ext = 7: the bare numeral reads as the seventh chord, so a degree
         // the scale has no seventh above (neither 10 nor 11) is marked no7.
-        // A heptatonic scale has one on every degree.
+        // A heptatonic degree stacks its scale's 7th step above, a major
+        // sixth on some degrees of the exotic ones: 6, as the strip names
+        // it (Em6, B6sus2). Over a diminished triad the 9 is the °7.
         expect(2,  "Minor, Ext 7", "i ii" + dg + " " + fl + "III iv v " + fl + "VI " + fl + "VII", true);
         expect(3,  "Penta, Ext 7", "Ino7 II5 iii" + sh + "5 V5no7 vi", true);
         expect(12, "Blues, Ext 7", "i " + fl + "iiino7 IV5 " + sh + "IV" + fl + "5 v" + sh + "5 " + fl + "VII5no7", true);
         expect(15, "In-sen, Ext 7", "I5 " + fl + "II" + fl + "5 IV5no7 v" + dg + " " + fl + "viino7", true);
         expect(18, "Ryukyu, Ext 7", "I iiino7 IV5 Vno5 VII" + fl + "5no3no7", true);
+        expect(5,  "Harm.Min, Ext 7", "i ii" + dg + " " + fl + "III+ iv V " + fl + "VI vii" + dg, true);
+        expect(20, "DblHarm, Ext 7", "I " + fl + "II iii6 iv V" + fl + "5 " + fl + "VI+ VII6sus2" + fl + "5", true);
+        expect(23, "Persian, Ext 7", "I" + fl + "5 " + fl + "II III6sus2 iv " + fl + "Vsus4 " + fl + "VI+ VII6sus2" + fl + "5", true);
+        expect(24, "HungMin, Ext 7", "i II" + fl + "5 " + fl + "III+ " + sh + "IV6sus2" + fl + "5 V " + fl + "VI vii6", true);
 
         // no7 after every triad name, the ones that end the name included:
         // no scale has a diminished or augmented degree without a seventh.
-        ChordLabel dimL; dimL.numeral = 7; dimL.third = 3; dimL.fifth = 6; dimL.noSeventh = true;
-        ChordLabel augL; augL.numeral = 3; augL.third = 4; augL.fifth = 8; augL.noSeventh = true;
+        ChordLabel dimL; dimL.numeral = 7; dimL.third = 3; dimL.fifth = 6; dimL.ext7 = true;
+        ChordLabel augL; augL.numeral = 3; augL.third = 4; augL.fifth = 8; augL.ext7 = true;
         check(chordLabelText(dimL) == "vii" + dg + "no7" && chordLabelText(augL) == "III+no7",
               "chord labels, no7 after a closed name: " + chordLabelText(dimL) + " " + chordLabelText(augL));
+        // A sixth in the 7's place in chordNameText's order, also over the
+        // triads no scale stacks one on: III+6 (C+6), V6no3 (C6no3; 5 names
+        // an open fifth with nothing above it); over ° it is the °7.
+        ChordLabel aug6 = augL; aug6.seventh = 9;
+        ChordLabel pow6; pow6.numeral = 5; pow6.fifth = 7; pow6.seventh = 9; pow6.ext7 = true;
+        ChordLabel dim7 = dimL; dim7.seventh = 9;
+        ChordLabel ext3; ext3.numeral = 3; ext3.third = 3; ext3.fifth = 7;
+        check(chordLabelText(aug6) == "III+6" && chordLabelText(pow6) == "V6no3" && chordLabelText(dim7) == "vii" + dg
+                  && chordLabelText(ext3) == "iii",
+              "chord labels, 6 after the quality, none over " + dg + ", no mark under Ext 3: " + chordLabelText(aug6) + " "
+                  + chordLabelText(pow6) + " " + chordLabelText(dim7) + " " + chordLabelText(ext3));
 
-        // The label says what plays: under Ext 7, no7 on exactly the degrees
-        // whose chord has no seventh, and there the motif's 7 sounds as the
-        // root's octave. Every scale, every degree, every key.
-        int seen7 = 0, marked7 = 0, off7 = 0;
+        // The label says what plays, read from what Stab sounds on the
+        // degree under Ext 7 (every scale, degree and key): no7 where the
+        // chord sounds nothing 9, 10 or 11 above its root, and there the
+        // motif's 7 is the root's octave; 6 where it sounds a 9 over a triad
+        // that is not diminished (a 3 and a 6 together), as the strip names
+        // it; neither where it sounds a seventh.
+        int seen7 = 0, marked7 = 0, marked6 = 0, off7 = 0, silent7 = 0;
+        std::string why7;
         for (int st = 0; st < ScaleQuantizer::COUNT; ++st)
         {
             if (!chordsAvailable(st)) continue;
             for (int d = 0; d < degreeCount(st); ++d)
                 for (int root = 0; root < 12; ++root)
                 {
-                    const Chord ch = chordForDegree(d, st, root, true);
+                    Config c = base();
+                    c.part = Part::Stab;
+                    c.harm = Harm::Chords;
+                    c.ext7 = true;
+                    c.scaleType = st;
+                    c.scaleRoot = root;
+                    c.chordDegrees = { d + 1, 0, 0, 0 };
+                    c.variation = 0.0f;
+                    const Motif m = generateMotif(7, 0, c);
+                    RenderInput in;
+                    in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m;
+                    in.bar = 0; in.barLenQ = 4.0;
+                    BarRender r;
+                    renderBar(in, r);
+                    const int rootPc = floorMod(root + ScaleQuantizer::kScaleDegrees[st][d], 12);
+                    std::uint16_t rel = 0;
+                    for (int i = 0; i < r.count; ++i)
+                        rel |= static_cast<std::uint16_t>(1u << floorMod(r.events[static_cast<size_t>(i)].note - rootPc, 12));
+                    auto plays = [&](int iv) { return ((rel >> iv) & 1u) != 0; };
+                    if (r.count == 0) { ++silent7; continue; }
+                    const bool seventh = plays(10) || plays(11), sixth = plays(9) && !(plays(3) && plays(6));
+                    const bool none = !seventh && !plays(9);
                     const std::string t = chordLabelText(chordLabel(d, st, true));
-                    const bool none = ch.iv[Seventh] < 0;
-                    const bool says = t.size() >= 3 && t.compare(t.size() - 3, 3, "no7") == 0;
+                    const bool saysNo7 = t.size() >= 3 && t.compare(t.size() - 3, 3, "no7") == 0;
+                    const bool says6 = t.find('6') != std::string::npos;
+                    const Chord ch = chordForDegree(d, st, root, true);
                     ++seen7;
-                    marked7 += says;
-                    if (says != none
+                    marked7 += saysNo7;
+                    marked6 += says6;
+                    if (saysNo7 != none || says6 != sixth
                         || (none && chordToneNote(ch, Seventh, 0, 60) != chordToneNote(ch, Root, 1, 60)))
-                        ++off7;
+                    {
+                        if (++off7 <= 3) why7 += " | scale " + std::to_string(st) + " degree " + std::to_string(d + 1) + ": " + t;
+                    }
                 }
         }
-        check(off7 == 0 && marked7 > 0,
-              "chord labels, Ext 7: " + std::to_string(seen7) + " degrees in every key, " + std::to_string(marked7)
-              + " with no seventh read no7 and play R' for the 7 (" + std::to_string(off7) + " off)");
+        check(off7 == 0 && silent7 == 0 && marked7 > 0 && marked6 > 0,
+              "chord labels, Ext 7: " + std::to_string(seen7) + " degrees in every key, read from what Stab plays: "
+              + std::to_string(marked7) + " with no seventh read no7 and play R' for the 7, " + std::to_string(marked6)
+              + " with a sixth in its place read 6 (" + std::to_string(off7) + " off, " + std::to_string(silent7) + " silent)" + why7);
     }
 
     std::printf("\n== 40. The view shows a note on every step a note starts on\n");

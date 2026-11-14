@@ -104,7 +104,9 @@ musician sets the degrees or plays the chords.
 - Heptatonic scales: stack alternate scale steps (diatonic triads; with
   Ext = 7 also the seventh). Slots are displayed as roman numerals whose
   case and accidentals follow from the scale (aeolian: i, ii°, ♭III, iv,
-  v, ♭VI, ♭VII).
+  v, ♭VI, ♭VII). On some degrees of the exotic heptatonics the 7th step
+  above is a major sixth (double harmonic iii: E–G–B–D♭); under Ext 7 the
+  slot names it, iii6, as the chord strip does (Em6).
 - Other scales (pentatonic, hexatonic, …): for each member take the scale
   tone inside its tertian band above the root (third 3–4 semitones, fifth
   6–8, seventh 10–11). If two qualify, the fifth prefers 7, third and

@@ -284,7 +284,8 @@ ChordLabel chordLabel(int degree0, int scaleType, bool ext7)
     const Chord c = chordForDegree(d, scaleType, 0, ext7);
     l.third = c.iv[1];
     l.fifth = c.iv[2];
-    l.noSeventh = ext7 && c.iv[3] < 0;
+    l.seventh = c.iv[3];
+    l.ext7 = ext7;
     return l;
 }
 
@@ -399,23 +400,30 @@ std::string chordLabelText(const ChordLabel& l)
     std::string t = l.accidental < 0 ? kFlat : l.accidental > 0 ? kSharp : "";
     t += tr.minor ? kLower[idx] : kUpper[idx];
 
+    // Under Ext = 7 the bare numeral reads as the seventh chord. A heptatonic
+    // degree stacks the scale's 7th step above it, a major sixth on some
+    // (double harmonic iii, Todi VII): named 6 as the strip names it, Em6.
+    // Over a diminished triad that 9 is the °7.
+    const bool sixth = l.seventh == 9 && !tr.dim;
+    // As in chordNameText, 5 names an open fifth with nothing above it.
+    const bool power = tr.power && !sixth;
     if (tr.dim)                  t += kDegree;
     else if (tr.aug)             t += "+";
-    else if (tr.power)           t += "5";
-    else
+    else if (power)              t += "5";
+    if (sixth)                   t += "6";
+    if (!tr.dim && !tr.aug && !power)
     {
         if (tr.sus)              t += tr.sus == 2 ? "sus2" : "sus4";
         if (tr.alteredFifth)     t += std::string(tr.alteredFifth < 0 ? kFlat : kSharp) + "5";
-        if (tr.noThird)          t += "no3";
+        if (tr.noThird || tr.power) t += "no3";
         // A scale with no fifth above the degree (Hirajoshi ♭III, Iwato ♭II,
         // Ryukyu V, Pelog ♭III) plays root and third only; the bare numeral
         // would read as the full triad.
         if (tr.noFifth)          t += "no5";
     }
-    // Under Ext = 7 the bare numeral reads as the seventh chord; a degree the
-    // scale has no seventh above (Pent I, Hirajoshi i) plays the root's
-    // octave for the motif's 7 (chordToneNote's 7 → R' fallback).
-    if (l.noSeventh)             t += "no7";
+    // A degree the scale has no seventh above (Pent I, Hirajoshi i) plays
+    // the root's octave for the motif's 7 (chordToneNote's 7 → R' fallback).
+    if (l.ext7 && l.seventh < 0) t += "no7";
     return t;
 }
 

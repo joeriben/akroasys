@@ -197,22 +197,25 @@ Chord chordForBar(const Config& cfg, int bar);
 
 /** Roman-numeral description of a degree's triad for the UI. The seventh is
  *  left out: Ext shows it, for every slot at once, except where the scale
- *  has none above the degree. */
+ *  has none above the degree or the 7 it stacks there is a sixth. */
 struct ChordLabel
 {
     int  numeral    = 1;      // 1..7
     int  accidental = 0;      // −1 flat, +1 sharp
     int  third      = -1;     // semitones above the root, −1 none
     int  fifth      = -1;
-    bool noSeventh  = false;  // Ext = 7, and the scale has no seventh above the degree
+    int  seventh    = -1;     // the 7 under Ext = 7 (9, 10, 11), −1 none or Ext = 3
+    bool ext7       = false;  // Ext = 7: a missing 7 is marked
 };
 /** Default label (numeral 1, no members) for chromatic, which has no degrees. */
 ChordLabel chordLabel(int degree0, int scaleType, bool ext7);
 /** The label as UTF-8 text: ♭/♯, the numeral (lower case on a minor third),
- *  then ° (diminished), + (augmented), sus2 / sus4, 5 (open fifth, no
- *  third), or no3, and ♭5 / ♯5 for a fifth the triad's name does not imply,
- *  or no5 when the scale has no fifth above the degree, and no7 when Ext
- *  asks for a seventh the scale does not have there.
+ *  then ° (diminished), + (augmented), 5 (open fifth, no third), 6 when
+ *  Ext's 7 is a major sixth over a triad that is not diminished (over one
+ *  it is the °7), sus2 / sus4, or no3, and ♭5 / ♯5 for a fifth the triad's
+ *  name does not imply, or no5 when the scale has no fifth above the
+ *  degree, and no7 when Ext asks for a seventh the scale does not have
+ *  there. The order is chordNameText's: double harmonic iii6 is Em6.
  *  Aeolian: i ii° ♭III iv v ♭VI ♭VII. */
 std::string chordLabelText(const ChordLabel& l);
 
