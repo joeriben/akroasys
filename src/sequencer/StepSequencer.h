@@ -126,10 +126,11 @@ public:
     std::atomic<int> currentStepForGui { -1 };
 
     /** Bumped whenever the pattern is replaced from outside the grid: a step
-     *  preset (loadPreset) or an engine switch that copies Gen's or Phrase's
-     *  pattern into the grid. The GUI polls it, also while the audio path is
-     *  idle, and refreshes the step grid. Read it with acquire: the step
-     *  count parameter the replacement wrote is visible after it. */
+     *  preset (loadPreset), an engine switch that copies Gen's or Phrase's
+     *  pattern into the grid, or a preset import (importJsonPreset). The GUI
+     *  polls it, also while the audio path is idle, and refreshes the step
+     *  grid. Read it with acquire: the step count parameter the replacement
+     *  wrote is visible after it. */
     std::atomic<int> patternReplacedGen { 0 };
 
     /** Publishes a pattern replacement to the GUI (patternReplacedGen).

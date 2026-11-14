@@ -27,6 +27,12 @@
 //   E. Init in Step with a hand-set step count (the step preset unchanged):
 //      only seqSteps moves. The first tick shows the default count.
 //   F. The host sets seqSteps with Step shown. The first tick shows it.
+//   G. A step count outside the grid's window (seqSteps 1, or 33..64 from a
+//      preset or the host): the grid shows the clamped count, and the idle
+//      ticks after that lay nothing out. The step-count sync above the idle
+//      gate compares the clamped value; comparing the raw one would resync
+//      and lay the panel out on every tick, an idle-CPU regression that
+//      repaints nothing, so the case counts resized() calls.
 //
 // All start in deep idle.
 //
@@ -404,6 +410,38 @@ void hostSetsSteps()
         check("the first tick shows the 12 steps", visibleStepColumns(panel) == 12);
     }
 }
+/** G: a step count the grid clamps, in deep idle; counts the layouts. */
+struct CountingPanel final : SequencerPanel
+{
+    using SequencerPanel::SequencerPanel;
+    int layouts = 0;
+    void resized() override { ++layouts; SequencerPanel::resized(); }
+};
+
+void clampedStepsInIdle(float rawSteps, int shown)
+{
+    std::printf("G. seqSteps %d, which the grid shows as %d\n", static_cast<int>(rawSteps), shown);
+    T5ynthProcessor proc;
+    proc.prepareToPlay(kRate, kBlock);
+    blocks(proc, 4);
+    {
+        CountingPanel panel(proc);
+        panel.setSize(864, 208);
+        tick();
+        if (! reachIdle(proc)) { check("deep idle before the change", false); return; }
+        tick();
+        setPlain(proc, PID::seqSteps, rawSteps);
+        check("the raw step count is outside the grid's window",
+              plain(proc, PID::seqSteps) == static_cast<int>(rawSteps));
+        tick();
+        check("the first tick shows the clamped count", visibleStepColumns(panel) == shown);
+        panel.layouts = 0;
+        for (int i = 0; i < 4; ++i) tick();
+        std::printf("    4 idle ticks: %d layouts, audioIdle %d\n", panel.layouts,
+                    proc.audioIdle.load() ? 1 : 0);
+        check("the idle ticks after it lay nothing out", panel.layouts == 0);
+    }
+}
 } // namespace
 
 int main()
@@ -420,6 +458,8 @@ int main()
     importInStep(false);
     initInStep();
     hostSetsSteps();
+    clampedStepsInIdle(1.0f, 2);
+    clampedStepsInIdle(40.0f, 32);
 
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     std::printf(failures == 0 ? "ALL PASS\n" : "%d FAIL\n", failures);
