@@ -5857,6 +5857,11 @@ int main(int argc, char** argv)
         // before the last beat), strictly between the two; otherwise the
         // approach into that head, from below or above. Shown p throughout,
         // the run's first note claimed a step from a note it leapt from.
+        // C: with shuffle off, the run plays on each 16th of the last beat
+        // that no onset of the line takes (a step's or a ratchet repeat's
+        // within half a 16th), and on no other (§3.7 op 3). Without Ratchet
+        // nothing but the steps takes one: a bar that left out the 16ths a
+        // ratchet would have repeated on dropped run notes.
         std::mt19937 rng(43);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         static const int spbs[] = { 4, 8, 16 };
@@ -5864,6 +5869,8 @@ int main(int argc, char** argv)
         int bars = 0, checked = 0, afterRun = 0, off = 0;
         int afterRunRepeat = 0, afterRunNeighbour = 0, afterRunPassing = 0, afterRunOctave = 0, afterRunReversal = 0;
         int runInSlot = 0;
+        int fillChecked = 0, offC = 0, fillWanted = 0, fillRatchet = 0, fillPlainStepInLast = 0;
+        std::string whyC;
         int runShown = 0, offB = 0, runPasses = 0, runRises = 0, runFalls = 0, runAfterStep = 0, runNoHead = 0;
         std::string why, whyB;
         for (int t = 0; t < 30000; ++t)
@@ -5957,6 +5964,48 @@ int main(int argc, char** argv)
                 renderBar(a, next[static_cast<size_t>(i)]);
             }
             const BarVariation var = variationForBar(m, heads, c, in.bar);
+            if (c.shuffle == 0.0f)
+            {
+                auto isMain = [](const Event& e) { return e.strand == -1 && e.line == Line::Main; };
+                std::vector<double> want, got;
+                for (int j = 0; j < 4; ++j)
+                {
+                    const double q = lastBeatQ + 0.25 * j;
+                    if (q >= in.barLenQ - 1e-9) break;
+                    bool taken = false;
+                    for (int i = 0; i < r.count; ++i)
+                    {
+                        const Event& e = r.events[static_cast<size_t>(i)];
+                        taken = taken || (isMain(e) && std::abs(e.vel - kFillVel) > 1e-4 && std::abs(e.onQ - q) < 0.125 - 1e-9);
+                    }
+                    if (!taken) want.push_back(q);
+                }
+                bool stepInLast = false;
+                for (int i = 0; i < r.count; ++i)
+                {
+                    const Event& e = r.events[static_cast<size_t>(i)];
+                    if (!isMain(e)) continue;
+                    if (std::abs(e.vel - kFillVel) < 1e-4) got.push_back(e.onQ);
+                    else stepInLast = stepInLast || e.onQ >= lastBeatQ - 1e-9;
+                }
+                std::sort(got.begin(), got.end());
+                ++fillChecked;
+                fillWanted += static_cast<int>(want.size());
+                fillRatchet += var.ratchet;
+                fillPlainStepInLast += !var.ratchet && stepInLast;
+                bool same = want.size() == got.size();
+                for (size_t i = 0; same && i < want.size(); ++i) same = std::abs(want[i] - got[i]) < 1e-9;
+                if (!same && offC++ < 4)
+                {
+                    auto list = [](const std::vector<double>& v) {
+                        std::string o;
+                        for (double q : v) o += (o.empty() ? "" : " ") + std::to_string(q).substr(0, 5);
+                        return o.empty() ? std::string("none") : o;
+                    };
+                    whyC += " | t" + std::to_string(t) + " bar " + std::to_string(in.bar) + (var.ratchet ? " ratchet" : "")
+                          + ": run at " + list(got) + ", free 16ths " + list(want);
+                }
+            }
             std::vector<const Event*> line;
             for (int i = 0; i < r.count; ++i)
             {
@@ -6088,6 +6137,11 @@ int main(int argc, char** argv)
               "B. coverage: " + std::to_string(runPasses) + " p, " + std::to_string(runRises) + " rising, "
                   + std::to_string(runFalls) + " falling, " + std::to_string(runAfterStep) + " after a step, "
                   + std::to_string(runNoHead) + " bars without a head ahead");
+        check(offC == 0, "C. " + std::to_string(fillChecked) + " Fill bars without shuffle: the run plays on every free 16th of the "
+                         "last beat and on no other (" + std::to_string(offC) + " off)" + whyC);
+        check(fillWanted > 10000 && fillRatchet > 500 && fillPlainStepInLast > 2000,
+              "C. coverage: " + std::to_string(fillWanted) + " free 16ths, " + std::to_string(fillRatchet) + " bars with Ratchet, "
+                  + std::to_string(fillPlainStepInLast) + " without it and a step in the last beat");
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
