@@ -3633,7 +3633,13 @@ int main(int argc, char** argv)
         // after. An embellishment that opens a bar before its last beat (a
         // Fill note can sound before a step there) lies where its function
         // puts it from that note, a Passing note a scale step towards the
-        // next sounding head.
+        // next sounding head. A Passing step anywhere lies a scale step from
+        // the note before it (P, PP from the line and its Fill run) towards
+        // that head where one lies strictly between, else on P's neighbour
+        // away from it (above P for a head on P), and the view names that
+        // neighbour; the stored function, as the variation re-pitches it,
+        // decides. With no sounding head within two bars, an approach or
+        // Passing step takes P for the head (§3.4).
         std::mt19937 rng(32);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, motifHead = false, octave = false, fill = false; };
@@ -3726,10 +3732,18 @@ int main(int argc, char** argv)
         // Evolve phrase 2 on latches. `own`: the bar before reads past its
         // phrase from its own phrase's motif (for the count of entries the
         // next phrase's motif decides).
-        using Entry = std::function<int(int, bool)>;
-        auto entryOf = [&](const Config& c, const Config& after, const Motif& m, const Meter& me) -> Entry {
+        // `stored`: the function bar b's step k stores, as the bar's
+        // variation re-pitches it.
+        struct Entry
+        {
+            std::function<std::pair<int, int>(int, bool)> notes;   // P and PP
+            std::function<Fn(int, int)> stored;
+            int operator()(int b, bool own) const { return notes(b, own).first; }
+        };
+        auto entryOf = [&](const Config& c, const Config& after, const Motif& m, const Meter& me) {
             const Motif f = fitMotif(m, c);
-            return [c, after, f, me](int b, bool own) {
+            Entry e;
+            e.notes = [c, after, f, me](int b, bool own) {
                 const int N = phraseBarsOf(c);
                 auto motifOf = [&](int p) { return evolvedMotif(f, p >= 2 ? after : c, p); };
                 const int pb = floorDiv(b - 1, N);
@@ -3737,8 +3751,20 @@ int main(int argc, char** argv)
                 int p = -1, pp = -1;
                 entryNotes(floorDiv(b, N) >= 2 ? after : c, motifOf(pb), motifOf(own ? pb : pb + 1), b, me.barLenQ,
                            nullptr, scratch, p, pp);
-                return p;
+                return std::make_pair(p, pp);
             };
+            e.stored = [c, after, f](int b, int k) {
+                const int p = floorDiv(b, phraseBarsOf(c));
+                const Config& cp = p >= 2 ? after : c;
+                const Motif mp = evolvedMotif(f, cp, p);
+                std::array<bool, kMaxMotifSteps> heads {};
+                computeHeads(mp, heads);
+                const BarVariation v = variationForBar(mp, heads, cp, b);
+                const int s = floorMod(b, mp.len) * mp.stepsPerBar + k;
+                const Fn fn = mp.slots[static_cast<size_t>(s)].fn;
+                return fn != Fn::Rest && s == v.repitchStep ? v.repitchFn : fn;
+            };
+            return e;
         };
 
         struct Tally
@@ -3748,7 +3774,10 @@ int main(int argc, char** argv)
             int crossing = 0, moved = 0, fillCrossing = 0, fillMoved = 0;
             int checkedOther = 0, fillOther = 0, movedCadence = 0;
             int entryChecked = 0, entryBad = 0, entryFirst = 0, entryDecided = 0;
-            std::string why, fillWhy, entryWhy;
+            int approachNoHead = 0;
+            int passChecked = 0, passBad = 0, passFallback = 0, passEqual = 0, passNoHead = 0, passReversal = 0;
+            int passCrossing = 0, passMoved = 0;
+            std::string why, fillWhy, entryWhy, passWhy;
         };
         // Checks the approach notes and the Fill notes of run r that sound
         // from fromQ on. With `without` (the same trial without the turn), it
@@ -3841,6 +3870,31 @@ int main(int argc, char** argv)
                 return false;
             };
 
+            // P and PP before bar b's step k, in the line without Lift: the
+            // notes its steps and its Fill run sound before it, after the two
+            // the bar enters with (§3.9). Bass's octave pulse is the last
+            // step of the bar that sounds a motif step: no step after it
+            // takes it as P.
+            auto before = [&](int b, int k, int& P, int& PP) {
+                std::vector<std::pair<double, int>> ns;
+                const Bar& bar = line[static_cast<size_t>(b)];
+                for (int j = 0; j < k; ++j)
+                    if (bar[static_cast<size_t>(j)].note >= 0 && !bar[static_cast<size_t>(j)].fill)
+                        ns.emplace_back(j * stepQ, bar[static_cast<size_t>(j)].note);
+                for (const Played& p : r.events)
+                {
+                    if (p.ev.strandId != -1 || p.ev.type != VoiceEvent::Type::NoteOn) continue;
+                    if (std::abs(p.ev.velocity - kFillVel) >= 1.0e-4) continue;
+                    const double inBar = p.q - me.barLenQ * b;
+                    if (inBar < -1.0e-3 || inBar > k * stepQ - 1.0e-3) continue;
+                    ns.emplace_back(inBar, p.ev.note - c.transpose - (bass ? 0 : 12));
+                }
+                std::stable_sort(ns.begin(), ns.end(), [](const auto& x, const auto& z) { return x.first < z.first; });
+                std::tie(P, PP) = entered.notes(b, false);
+                for (const auto& n : ns) { PP = P; P = n.second; }
+            };
+
+            // Approach notes; with no sounding head within two bars, T is P.
             for (int b = 0; b + 2 < kBars; ++b)
                 for (int k = 0; k < kMaxBarSteps; ++k)
                 {
@@ -3848,7 +3902,23 @@ int main(int argc, char** argv)
                     if (a.note < 0 || a.fill || !isApproachFn(a.fn)) continue;
                     if (me.barLenQ * b + k * stepQ < fromQ + 1.0e-6) continue;
                     const Target h = nextHead(line, b, k);
-                    if (h.note < 0) continue;
+                    if (h.note < 0)
+                    {
+                        int P = -1, PP = -1;
+                        before(b, k, P, PP);
+                        const int want = a.fn == Fn::ApproachUp ? scaleStep(P, -1, mask)
+                                       : a.fn == Fn::ApproachDown ? scaleStep(P, 1, mask) : P - 1;
+                        ++y.checked;
+                        ++y.approachNoHead;
+                        if (a.note != want && y.bad++ < 3)
+                        {
+                            char s[200];
+                            std::snprintf(s, sizeof s, " | t %d form %d part %d: bar %d step %d note %d, no head, P %d wants %d",
+                                          t, static_cast<int>(c.form), static_cast<int>(c.part), b, k, a.note, P, want);
+                            y.why += s;
+                        }
+                        continue;
+                    }
                     const int want = a.fn == Fn::ApproachUp ? scaleStep(h.note, -1, mask)
                                    : a.fn == Fn::ApproachDown ? scaleStep(h.note, 1, mask) : h.note - 1;
                     ++y.checked;
@@ -3869,6 +3939,50 @@ int main(int argc, char** argv)
                                       t, static_cast<int>(c.form), static_cast<int>(c.part), b, k, a.note, h.note, h.bar,
                                       h.step, want);
                         y.why += s;
+                    }
+                }
+
+            // Passing (§3.2): the scale step from P towards T, where one lies
+            // strictly between them; where none does, P's neighbour away from
+            // T (above P for T == P), and the view names that neighbour. Lead
+            // after a leap of more than 4 semitones from PP to P steps back
+            // (post-skip reversal). No sounding head within two bars: T is P.
+            // The stored function decides, as the bar's variation re-pitches
+            // it: the view shows the one played.
+            for (int b = 0; b + 2 < kBars; ++b)
+                for (int k = 0; k < kMaxBarSteps; ++k)
+                {
+                    const Note& a = line[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                    if (a.note < 0 || a.fill || a.head || a.octave) continue;
+                    if (me.barLenQ * b + k * stepQ < fromQ + 1.0e-6) continue;
+                    if (entered.stored(b, k) != Fn::Passing) continue;
+                    int P = -1, PP = -1;
+                    before(b, k, P, PP);
+                    const Target h = nextHead(line, b, k);
+                    const int T = h.note >= 0 ? h.note : P;
+                    Fn fn = Fn::Passing;
+                    int want = -1;
+                    const bool reversal = c.part == Part::Lead && std::abs(P - PP) > 4;
+                    if (reversal) fn = P > PP ? Fn::NeighbourDown : Fn::NeighbourUp;
+                    else if (T > P) { want = scaleStep(P, 1, mask); if (want >= T) fn = Fn::NeighbourDown; }
+                    else if (T < P) { want = scaleStep(P, -1, mask); if (want <= T) fn = Fn::NeighbourUp; }
+                    else fn = Fn::NeighbourUp;
+                    if (fn != Fn::Passing) want = scaleStep(P, fn == Fn::NeighbourUp ? 1 : -1, mask);
+                    ++y.passChecked;
+                    y.passReversal += reversal;
+                    y.passFallback += !reversal && fn != Fn::Passing;
+                    y.passEqual += !reversal && T == P;
+                    y.passNoHead += h.note < 0;
+                    if (h.note >= 0 && floorDiv(h.bar, N) != floorDiv(b, N)) ++y.passCrossing;
+                    if (without && h.note >= 0 && crosses(b, h)) y.passMoved += nextHead(*without, b, k).note != h.note;
+                    if ((a.note != want || a.fn != fn) && y.passBad++ < 3)
+                    {
+                        char s[220];
+                        std::snprintf(s, sizeof s,
+                                      " | t %d form %d part %d: bar %d step %d note %d fn %d, P %d PP %d T %d wants %d fn %d",
+                                      t, static_cast<int>(c.form), static_cast<int>(c.part), b, k, a.note,
+                                      static_cast<int>(a.fn), P, PP, T, want, static_cast<int>(fn));
+                        y.passWhy += s;
                     }
                 }
 
@@ -4003,6 +4117,18 @@ int main(int argc, char** argv)
         check(one.fillCadence > 0, "lookahead as played: Fill runs into cadence heads (" + std::to_string(one.fillCadence) + ")");
         check(one.fillBad == 0, "lookahead as played: a Fill runs into the head that sounds (" + std::to_string(one.fillBad)
                                     + " of " + std::to_string(one.fillChecked) + " off)" + one.fillWhy);
+        check(one.approachNoHead > 0, "lookahead as played: approach notes with no head ahead, into the note before ("
+                                          + std::to_string(one.approachNoHead) + ")");
+        check(one.passFallback > 0 && one.passEqual > 0 && one.passNoHead > 0 && one.passReversal > 0
+                  && one.passCrossing > 0,
+              "lookahead as played: Passing steps (" + std::to_string(one.passChecked) + "), "
+                  + std::to_string(one.passFallback) + " with no scale step between P and T ("
+                  + std::to_string(one.passEqual) + " with T at P, " + std::to_string(one.passNoHead)
+                  + " with no head ahead), " + std::to_string(one.passReversal) + " after a Lead leap, "
+                  + std::to_string(one.passCrossing) + " into the next phrase");
+        check(one.passBad == 0, "lookahead as played: a Passing step lies a scale step from P towards the head that "
+                                "sounds, else on P's neighbour away from it (" + std::to_string(one.passBad) + " of "
+                                + std::to_string(one.passChecked) + " off)" + one.passWhy);
         check(one.entryFirst > 0 && one.entryDecided > 0,
               "lookahead as played: embellishments opening a phrase's first bar (" + std::to_string(one.entryFirst) + "), "
                   + std::to_string(one.entryDecided) + " of them entered from a note the next phrase's motif decides");
@@ -4201,6 +4327,14 @@ int main(int argc, char** argv)
                   + std::to_string(two.fillMoved) + " of them into a head the turn moved");
         check(two.fillBad == 0, "Evolve turned: a Fill runs into the head that sounds (" + std::to_string(two.fillBad)
                                     + " of " + std::to_string(two.fillChecked) + " off)" + two.fillWhy);
+        check(two.passCrossing > 0 && two.passMoved > 0,
+              "Evolve turned: Passing steps from phrase 1 into phrase 2 (" + std::to_string(two.passCrossing) + " into "
+                  + "the next phrase), " + std::to_string(two.passMoved) + " of them into a head the turn moved");
+        check(two.passBad == 0 && again.passBad == 0,
+              "Evolve turned: a Passing step lies a scale step from P towards the head that sounds, else on P's "
+              "neighbour away from it (" + std::to_string(two.passBad) + " of " + std::to_string(two.passChecked)
+                  + ", rebuilt " + std::to_string(again.passBad) + " of " + std::to_string(again.passChecked) + " off)"
+                  + two.passWhy + again.passWhy);
         check(two.entryFirst > 0, "Evolve turned: embellishments opening a phrase's first bar ("
                                       + std::to_string(two.entryFirst) + ")");
         check(two.entryBad == 0, "Evolve turned: an embellishment opening a bar lies where its function puts it from the "

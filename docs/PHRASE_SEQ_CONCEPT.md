@@ -142,13 +142,14 @@ position, so an approach note before a chord change targets the *new*
 chord — which is what an approach note is for. T is the head as its bar
 plays it: an ABAB cadence's note, not a head Drop silences, not the pulse
 Bass's Lift turns into an Octave; under the octave Lift the line is led as
-it plays without Lift.
+it plays without Lift. Where no head sounds in the rest of the bar and the
+two bars after it, T is P.
 
 | Kind | Resolution |
 |------|-----------|
 | Repeat | P |
 | Octave | P ± 12, direction alternating to stay in range |
-| Passing | the scale step between P and T, moving toward T; if P and T are adjacent or equal, falls back to Neighbour |
+| Passing | the scale step from P toward T, where it lies strictly between them; otherwise (P and T adjacent or equal) the Neighbour of P away from T, above P when T = P |
 | Neighbour ↑/↓ | scale step above/below P |
 | Approach ↑/↓ | scale step below/above T, rising/falling into it |
 | Approach chromatic | T − 1 semitone |
