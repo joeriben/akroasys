@@ -30,7 +30,7 @@ Links:
 - Preset collection: [`joeriben/T5ynth-Presets`](https://github.com/joeriben/T5ynth-Presets)
 - Technical description of the Language-Resonant Oscillator: [`docs/LRO_TECHNICAL_DISCLOSURE.md`](docs/LRO_TECHNICAL_DISCLOSURE.md)
 - Developer documentation index: [`docs/README.md`](docs/README.md) · release history: [`CHANGELOG.md`](CHANGELOG.md)
-- Latest release: [`v3.1.2-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.2-beta.0) — the dice on the T5 Oscillator composes a new A/B impulse pair from ten categories on every roll, and writes it without generating. [`v3.1.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.0-beta.0) made the clarinet a real bore, envelope curves a continuous travel, and Shift fine adjustment on every control. [`v3.0.0-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v3.0.0-beta.1) was the first under the new name and the first with the Language-Resonant Oscillator; [`v2.5.3-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v2.5.3-beta.1) is the last one published as **T5ynth**.
+- Latest release: [`v3.2.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.2.0-beta.0) — Phrase, a sequencer mode between Step and Gen for bass lines, riffs, leads and stabs that fit your chords and vary at the ends of phrases. [`v3.1.2-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.2-beta.0) made the dice on the T5 Oscillator compose a new A/B impulse pair from ten categories on every roll. [`v3.1.0-beta.0`](https://github.com/joeriben/akroasys/releases/tag/v3.1.0-beta.0) made the clarinet a real bore, envelope curves a continuous travel, and Shift fine adjustment on every control. [`v3.0.0-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v3.0.0-beta.1) was the first under the new name and the first with the Language-Resonant Oscillator; [`v2.5.3-beta.1`](https://github.com/joeriben/akroasys/releases/tag/v2.5.3-beta.1) is the last one published as **T5ynth**.
 
 Current tagged GitHub Releases publish:
 
@@ -219,6 +219,18 @@ Women and Youth (BMBFSFJ).
 akróasys is dedicated to my dear colleague at the DFKI, musician and AI
 researcher Dr. Stephan Baumann, without whom AI4ArtsEd would not have come
 into being.
+
+## What Is New in 3.2.0
+
+- **Phrase, a third sequencer mode between Step and Gen.** It writes a bass
+  line, riff, lead or stab that loops, fits your chords and varies at the ends
+  of phrases. Choose a Part, a harmony (a pedal on the tonic, a loop of up to
+  four chord slots, or the keys you hold), a Euclidean rhythm with Pulses and
+  Rot, then Bars, Form (Loop, AAAB, AABA, ABAB), Var and Evolve. ⚄ rolls a new
+  motif, Keep holds the one you hear, ↶ goes back. A bar plays the same
+  wherever the host locates, and the motif is saved with the preset.
+- **Fixes across generation, the sample engine's loop seams and MIDI;** the
+  [changelog](CHANGELOG.md) lists them.
 
 ## What Is New in 3.1.2
 

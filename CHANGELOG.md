@@ -4,7 +4,33 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
-## Unreleased
+## 3.2.0 — shipped as v3.2.0-beta.0
+
+### Sequencer
+
+- **Phrase, a third sequencer mode between Step and Gen.** For conventional
+  electronic music: a bass line, riff, lead or stab that loops, fits your
+  chords, varies at the ends of phrases and sits in the host's bars. Choose a
+  Part (Bass, Riff, Lead, Stab). The harmony is a pedal on the tonic, a loop of
+  up to four chord slots changing every 1, 2 or 4 bars (Ext 7 adds sevenths),
+  or the keys you hold, which then steer and do not sound. Pulses and Rot set a
+  Euclidean rhythm over a motif of one or two bars; the strongest pulse of
+  each beat (each half bar for Lead) takes a chord tone, the others passing,
+  neighbour and approach notes. Bars (4, 8,
+  16) and Form (Loop, AAAB, AABA, ABAB) shape the phrase, and Var sets how much
+  the last bar of a unit and the B units change: a note re-pitched, the last
+  beat an octave up, a 16th run into the next downbeat, a ratchet, a silent
+  last beat. ABAB ends its A units open and its B units on the root. Evolve
+  changes a few notes of the motif at every phrase boundary. ⚄ rolls a new
+  motif, Keep holds the one you hear, ↶ goes back, and From Step takes the
+  Step pattern as the motif; switching from Phrase to Step puts the bar the
+  phrase view shows into the step grid. A layer adds the line an octave away,
+  the chord on the line's strong notes, or an Answer motif in the B units.
+  Shuffle, Gate, Slide and Seq Octave apply. What a bar plays depends only on
+  the motif, the settings and the bar number, so locating in the host or
+  bouncing plays what was heard, and the motif is saved with the preset. The
+  Launch Control XL buttons that switched Step and Gen now cycle Step, Phrase,
+  Gen. Concept: `docs/PHRASE_SEQ_CONCEPT.md`.
 
 ### Language-Resonant Oscillator
 
