@@ -2713,7 +2713,13 @@ int main(int argc, char** argv)
         // A host's block starts land a hair off the beats: it accumulates its
         // position block by block, or derives it from a sample count while the
         // sequencer adds the block length to it. The block before a latch can
-        // end a hair past a beat, with that beat's onset played. The chord
+        // end a hair past a beat, with that beat's onset played, while the
+        // latch's own block starts exactly on that beat: a sample-count host
+        // started two quarters before the first bar (a pre-roll) does so
+        // inside the pre-roll (at q -0.5 and -1), one started at 0 nowhere in
+        // these runs. There the beat is to be found from where playback
+        // reached, not from the block start, so latches fall in the pre-roll
+        // too. The chord
         // takes effect at the first beat whose onset has not played: the first
         // note it changes is the first onset from that beat on (a bar longer
         // than 16 sixteenths, 3/2, leaves its last beat empty), and every note
@@ -2728,10 +2734,11 @@ int main(int argc, char** argv)
         c.variation = 0.0f;
         c.slide = 0.0f;
         c.layer = Layer::Off;
-        int wrong = 0, errs = 0, cases = 0, beatPlayed = 0, beatAhead = 0;
+        int wrong = 0, errs = 0, cases = 0, beatPlayed = 0, beatAhead = 0, onBeatPlayed = 0;
         std::string why;
         struct Meter { int num, den; };
-        for (bool accumulated : { true, false })
+        struct Host { bool accumulated; double startQ; };
+        for (const Host& h : { Host { true, 0.0 }, Host { false, 0.0 }, Host { true, -2.0 }, Host { false, -2.0 } })
             for (const Meter& m : { Meter { 4, 4 }, Meter { 6, 8 }, Meter { 3, 2 } })
                 for (int block : { 32, 64, 128, 256, 512 })
                 {
@@ -2739,10 +2746,11 @@ int main(int argc, char** argv)
                     const int stepsPerBeat = static_cast<int>(beatQ / 0.25);
                     const double dq = block * kBpm / (60.0 * kSr);
                     const int afterBlocks = static_cast<int>(std::ceil((2.0 * beatQ + 0.5) / dq));
+                    const long startSample = std::lround(h.startQ * 60.0 * kSr / kBpm);
                     std::vector<double> starts;
                     for (long n = 0; starts.empty() || starts.back() < 24.0 + 2.0 * beatQ + 1.0; ++n)
-                        starts.push_back(accumulated ? (n == 0 ? 0.0 : starts.back() + dq)
-                                                     : static_cast<double>(n * block) * kBpm / (60.0 * kSr));
+                        starts.push_back(h.accumulated ? (n == 0 ? h.startQ : starts.back() + dq)
+                                                       : static_cast<double>(startSample + n * block) * kBpm / (60.0 * kSr));
                     struct On { int block, step, note; };
                     // Main-line onsets of the blocks before `end`, the chord
                     // changing before block `latchAt` (none when negative).
@@ -2791,38 +2799,45 @@ int main(int argc, char** argv)
                     for (size_t n = 1; n + static_cast<size_t>(afterBlocks) < starts.size() && taken < 6; ++n)
                     {
                         const double beat = std::round(starts[n] / beatQ) * beatQ;
-                        if (starts[n] < 1.0 || std::abs(starts[n] - beat) > 1.0e-6) continue;
+                        if (starts[n] < h.startQ + 1.0 || std::abs(starts[n] - beat) > 1.0e-6) continue;
                         ++taken;
                         ++cases;
                         const int latchAt = static_cast<int>(n);
                         std::vector<On> got;
                         errs += run(latchAt, latchAt + afterBlocks, got);
-                        int lastStep = -1;
+                        // Before the first block nothing has played: the
+                        // step before the host's start.
+                        int lastStep = static_cast<int>(std::lround(h.startQ / 0.25)) - 1;
                         for (const On& o : got)
                             if (o.block < latchAt) lastStep = std::max(lastStep, o.step);
-                        const int beatStep = (lastStep / stepsPerBeat + 1) * stepsPerBeat;
-                        int expectStep = -1;
-                        for (size_t i = 0; expectStep < 0 && i < still.size(); ++i)
+                        const int beatStep = (floorDiv(lastStep, stepsPerBeat) + 1) * stepsPerBeat;
+                        // Steps are negative in the pre-roll: none is a step.
+                        constexpr int kNone = std::numeric_limits<int>::min();
+                        int expectStep = kNone;
+                        for (size_t i = 0; expectStep == kNone && i < still.size(); ++i)
                             if (still[i].step >= beatStep) expectStep = still[i].step;
-                        (lastStep >= static_cast<int>(std::lround(beat / 0.25)) ? beatPlayed : beatAhead)++;
-                        int firstStep = -1;
-                        for (size_t i = 0; firstStep < 0 && i < got.size() && i < still.size(); ++i)
+                        const bool played = lastStep >= static_cast<int>(std::lround(beat / 0.25));
+                        (played ? beatPlayed : beatAhead)++;
+                        if (played && starts[n] <= beat) ++onBeatPlayed;
+                        int firstStep = kNone;
+                        for (size_t i = 0; firstStep == kNone && i < got.size() && i < still.size(); ++i)
                             if (got[i].step != still[i].step || got[i].note != still[i].note) firstStep = got[i].step;
                         if (firstStep != expectStep && wrong++ < 3)
                         {
-                            char tag[200];
-                            std::snprintf(tag, sizeof tag, "%s%s host, %d/%d, %d-sample blocks, latch before q %.17g:"
+                            char tag[256];
+                            std::snprintf(tag, sizeof tag, "%s%s host from q %g, %d/%d, %d-sample blocks, latch before q %.17g:"
                                           " first changed note at q %g, beat q %g, its first onset q %g",
-                                          why.empty() ? "" : "; ", accumulated ? "accumulating" : "sample-count",
-                                          m.num, m.den, block, starts[n], firstStep * 0.25, beatStep * 0.25,
+                                          why.empty() ? "" : "; ", h.accumulated ? "accumulating" : "sample-count",
+                                          h.startQ, m.num, m.den, block, starts[n], firstStep * 0.25, beatStep * 0.25,
                                           expectStep * 0.25);
                             why += tag;
                         }
                     }
                 }
-        check(beatPlayed > 0 && beatAhead > 0,
+        check(beatPlayed > 0 && beatAhead > 0 && onBeatPlayed > 0,
               "Keys beat a hair off the block: both kinds occur, the block-start beat played before the latch ("
-                  + std::to_string(beatPlayed) + ") and not (" + std::to_string(beatAhead) + ")");
+                  + std::to_string(beatPlayed) + ", " + std::to_string(onBeatPlayed)
+                  + " of them with the block starting on the beat) and not (" + std::to_string(beatAhead) + ")");
         check(wrong == 0, "Keys beat a hair off the block: the chord's first note is the first unplayed beat's ("
                               + std::to_string(wrong) + " of " + std::to_string(cases) + " elsewhere) " + why);
         check(errs == 0, "Keys beat a hair off the block: no hanging or orphan note, no bad glide (" + std::to_string(errs) + ")");
