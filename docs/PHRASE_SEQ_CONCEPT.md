@@ -1,9 +1,9 @@
 # Phrase Sequencer — Concept
 
-Status: concept 2026-11-13; engine, params, persistence and transfers
-implemented 2026-11-14 on `feature/phrase-seq`; the Phrase UI (§4) is not
-built yet. Where the implementation settled a point differently from the
-first draft, this text says what was built. `GenerativeSequencer` is
+Status: concept 2026-11-13; engine, params, persistence, transfers and the
+Phrase UI (§4) implemented 2026-11-14, shipped in v3.2.0-beta.0. Where the
+implementation settled a point differently from the first draft, this text
+says what was built. `GenerativeSequencer` is
 unchanged.
 
 ## 1. Purpose
@@ -372,8 +372,7 @@ harmony → which rhythm → how it unfolds over the phrase.
   so "Phrase" never drops below the 11 px minimum
   (`INTERFACE_DESIGN_POLICY.md`).
 - Phrase view, v1: read-only. Hand editing happens in Step.
-- Transfers between modes (implemented; the buttons that call them are
-  part of the pending UI):
+- Transfers between modes:
   - Phrase → Step: the rendered current bar (the bar the phrase view
     shows) goes into the step grid. A slide becomes a Glide bind, an
     accent velocity 1.0, every other step the Step default velocity.
