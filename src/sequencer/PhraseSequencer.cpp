@@ -391,10 +391,25 @@ void T5ynthPhraseSequencer::endPendingByNextOnset(int fromIndex)
 
 void T5ynthPhraseSequencer::rebuildEvolution(int phrase)
 {
+    // The phrase before the phrase last entered played with the Evolve it
+    // latched (prevEvolve). Any other phrase, or another phrase length that
+    // numbers them anew, has no phrase before that played as such: as after
+    // a locate it derives with the Evolve latched last. A length that comes
+    // back within the phrase last entered numbers them as they played.
+    const float before = phrase == entryPhrase && phraseBarsOf(cfg) == entryBars ? prevEvolve : latchedEvolve;
     const Config L = latchedConfig();
     evoPrev = evolvedMotif(fitted, L, phrase - 1);
     evoCur = evoPrev;
     if (phrase > fitted.origin) evolveOnce(evoCur, L, phrase);
+    if (before != latchedEvolve)
+    {
+        // A phrase's motif is the origin's evolved with its own latch
+        // (deriveNext): the line entered from that one, and Keep keeps it as
+        // the lead-in.
+        Config B = L;
+        B.evolve = before;
+        evoPrev = evolvedMotif(fitted, B, phrase - 1);
+    }
     deriveNext(phrase);
     if (leadsInto(phrase)) evoPrev = fittedLeadIn;
     evoPhrase = phrase;
@@ -522,16 +537,27 @@ void T5ynthPhraseSequencer::enterBar(int newBar, bool continuous)
     const int p = floorDiv(bar, N);
     if (!continuous || !evoValid)
     {
-        latchedEvolve = cfg.evolve;
-        rebuildEvolution(p);
-    }
-    else if (floorMod(bar, N) == 0 && cfg.evolve != latchedEvolve)
-    {
-        latchedEvolve = cfg.evolve;
+        latchedEvolve = prevEvolve = cfg.evolve;
+        entryPhrase = p;
+        entryBars = N;
         rebuildEvolution(p);
     }
     else
     {
+        // A phrase entry latches Evolve (§3.8). The motif the phrase plays is
+        // already derived with it (processBlock re-derives the next phrase's
+        // when Evolve turns), and the phrase before stays the one that
+        // played: the line enters from its last bar (§3.9), and Keep keeps
+        // it as the lead-in. Rebuilt with the new value, the entry came from
+        // a bar that never sounded; a rebuild inside the phrase therefore
+        // derives the phrase before with the value it latched (prevEvolve).
+        if (p != evoPhrase)
+        {
+            prevEvolve = latchedEvolve;
+            entryPhrase = p;
+            entryBars = N;
+        }
+        if (floorMod(bar, N) == 0) latchedEvolve = cfg.evolve;
         advanceEvolution(p);
     }
 

@@ -3683,16 +3683,16 @@ int main(int argc, char** argv)
 
         // Plays c with motif m from bar 0 and reads the bar views into line.
         // turnQ >= 0: Evolve turns to turnTo in the first block from turnQ on,
-        // which starts at turnedAt.
+        // which starts at turnedAt. `also` acts before every block after that.
         auto playLine = [&](const Config& c, const Meter& me, const Motif& m, double turnQ, float turnTo, Line& line,
-                            double& turnedAt) {
+                            double& turnedAt, const Hook& also = {}, double startQ = 0.0) {
             line.assign(kBars, Bar {});
             turnedAt = -1.0;
             // Evolve leaves the rhythm, and so the heads, as they are.
             std::array<bool, kMaxMotifSteps> heads {};
             computeHeads(m, heads);
             bool loaded = false;
-            return play(c, 0.0, kBars * me.barLenQ, me.num, me.den, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+            return play(c, startQ, kBars * me.barLenQ, me.num, me.den, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
                 if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
                 if (turnQ >= 0.0 && turnedAt < 0.0 && q >= turnQ)
                 {
@@ -3701,6 +3701,7 @@ int main(int argc, char** argv)
                     s.setConfig(n);
                     turnedAt = q;
                 }
+                if (also) also(s, q);
                 const int b = s.currentBarForGui.load();
                 if (b < 0 || b >= kBars) return;
                 std::array<StepView, kMaxBarSteps> v {};
@@ -4018,8 +4019,34 @@ int main(int argc, char** argv)
         // that is all last beat (the bar re-renders, and the view read after
         // the turn shows it). Oracle of 32, for what sounds from the block of
         // the turn on; the same trial unturned counts the heads the turn
-        // moves.
-        Tally two;
+        // moves. Phrase 2 enters from phrase 1's last bar as it played, with
+        // the Evolve phrase 1 latched: at the entry the sequencer re-derived
+        // phrase 1 with the turned value, and phrase 2's first bar entered
+        // from a bar that never sounded. So it does when the sequencer
+        // rebuilds its phrases later: the same trial played again has the
+        // motif published as it is in a bar of phrase 2 or 3 (a host
+        // restoring its state; a third of the trials) and Keep in the next.
+        // Nothing that plays changes, the oracle of 32 holds, and Keep keeps
+        // the phrase before as it played as the lead-in. A rebuild derived
+        // that phrase with the Evolve the playing phrase latched, and the
+        // first bar re-rendered from it; Keep kept it. In another third the
+        // transport stops and starts there instead: a locate has no phrase
+        // before that played (§3.9), so from there on everything plays and
+        // Keep keeps as when playback starts there with Evolve turned.
+        auto sameBody = [](const MotifBody& a, const MotifBody& b) {
+            if (a.len != b.len || a.stepsPerBar != b.stepsPerBar) return false;
+            for (int k = 0; k < a.numSteps(); ++k)
+            {
+                const Slot& x = a.slots[static_cast<size_t>(k)];
+                const Slot& y = b.slots[static_cast<size_t>(k)];
+                if (x.fn != y.fn || x.member != y.member || x.octave != y.octave) return false;
+            }
+            return true;
+        };
+        Tally two, again;
+        int republished = 0, republished3 = 0, republishedLater = 0, keptChecked = 0, keptBad = 0, viewsDiffer = 0, onsDiffer = 0;
+        int restarted = 0, restartedEntry = 0, restartDiffer = 0;
+        std::string keptWhy, againWhy, restartWhy;
         for (int t = 0; t < 1000; ++t)
         {
             const Config c = draw();
@@ -4037,6 +4064,130 @@ int main(int argc, char** argv)
             two.runErrs += r0.hangs + r0.orphanOffs + r0.badGlides + r0.polyMain;
             Config turned = c;
             turned.evolve = turnTo;
+
+            const int P = N < 16 && U(0, 1) ? 3 : 2;   // 40 bars hold phrase 3's second bar
+            const bool republish = t % 3 == 0, restart = t % 3 == 2;
+            // In the phrase's first bar in half the trials, else in a later
+            // one: the re-render shows the entry, Keep after it the lead-in.
+            const int repBar = P * N + (U(0, 1) ? 0 : U(1, std::min(N - 2, kBars - 2 - P * N)));
+            const double republishQ = me.barLenQ * repBar + 0.25 * U(0, before), keepQ = me.barLenQ * (repBar + 1);
+            bool repDone = false, keepDone = false;
+            double restartedAt = -1.0;
+            Motif kept;
+            Line line2;
+            double turnedAt2 = -1.0;
+            const Run r2 = playLine(c, me, m, turnQ, turnTo, line2, turnedAt2, [&](T5ynthPhraseSequencer& s, double q) {
+                if ((republish || restart) && !repDone && q >= republishQ)
+                {
+                    if (republish)
+                    {
+                        s.setStoredMotif(s.getStoredMotif());
+                        ++republished;
+                        republished3 += P == 3;
+                        republishedLater += repBar > P * N;
+                    }
+                    else
+                    {
+                        s.stop();
+                        s.start();
+                        restartedAt = q;
+                    }
+                    repDone = true;
+                }
+                if (!keepDone && q >= keepQ)
+                {
+                    s.keep();
+                    kept = s.getStoredMotif();
+                    keepDone = true;
+                }
+            });
+            if (restart)
+            {
+                // The same from a start there with Evolve turned; the blocks
+                // fall on the same samples.
+                Line fresh;
+                double unused = -1.0;
+                bool freshKept = false;
+                Motif keptFresh;
+                const Run rf = playLine(turned, me, m, -1.0, 0.0f, fresh, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                    if (!freshKept && q >= keepQ)
+                    {
+                        s.keep();
+                        keptFresh = s.getStoredMotif();
+                        freshKept = true;
+                    }
+                }, restartedAt);
+                ++restarted;
+                const int from = static_cast<int>(std::floor(restartedAt / me.barLenQ + 1.0e-9));
+                std::string diff;
+                for (int b = from; b < kBars && diff.empty(); ++b)
+                    for (int k = 0; k < kMaxBarSteps; ++k)
+                    {
+                        const Note& x = fresh[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                        const Note& y = line2[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                        if (x.note != y.note || x.fn != y.fn || x.head != y.head)
+                        {
+                            diff = "bar " + std::to_string(b) + " step " + std::to_string(k) + " note "
+                                   + std::to_string(x.note) + " vs " + std::to_string(y.note);
+                            break;
+                        }
+                    }
+                auto onsFrom = [&](const Run& run) {
+                    std::vector<Played> v;
+                    for (const Played& e : run.events)
+                        if (e.ev.type == VoiceEvent::Type::NoteOn && e.q >= restartedAt - 1.0e-9) v.push_back(e);
+                    return v;
+                };
+                const std::vector<Played> a = onsFrom(rf), b = onsFrom(r2);
+                std::string onsWhy;
+                if (diff.empty() && !(a.empty() && b.empty()) && !sameOns(a, b, onsWhy)) diff = "played: " + onsWhy;
+                if (diff.empty()
+                    && (keptFresh.origin != kept.origin || keptFresh.leadInKept != kept.leadInKept
+                        || !sameBody(keptFresh, kept) || (kept.leadInKept && !sameBody(keptFresh.leadIn, kept.leadIn))))
+                    diff = "Keep";
+                const int errs = r2.hangs + r2.orphanOffs + r2.badGlides + r2.polyMain + rf.hangs + rf.orphanOffs
+                               + rf.badGlides + rf.polyMain;
+                if (diff.empty() && errs > 0) diff = std::to_string(errs) + " hanging or orphan notes, bad glides";
+                // Does the entry depend on the phrase before at all?
+                restartedEntry += !sameBody(evolvedMotif(fitMotif(m, c), c, P - 1), evolvedMotif(fitMotif(m, c), turned, P - 1));
+                if (!diff.empty() && restartDiffer++ < 3)
+                    restartWhy += " | t " + std::to_string(t) + " phrase " + std::to_string(P) + ": " + diff;
+            }
+            else
+            {
+                // Before checkRun reads them under the Lift.
+                bool viewSame = true;
+                for (int b = 0; b < kBars && viewSame; ++b)
+                    for (int k = 0; k < kMaxBarSteps; ++k)
+                    {
+                        const Note& x = line[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                        const Note& y = line2[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                        if (x.note != y.note || x.fn != y.fn || x.head != y.head)
+                        {
+                            viewSame = false;
+                            if (viewsDiffer < 3)
+                                againWhy += " | t " + std::to_string(t) + (republish ? " republished" : "") + ": bar "
+                                            + std::to_string(b) + " step " + std::to_string(k) + " note "
+                                            + std::to_string(x.note) + " vs " + std::to_string(y.note);
+                            break;
+                        }
+                    }
+                viewsDiffer += !viewSame;
+                std::string onsWhy;   // a bar of 1/4 or n/32 can leave a whole run silent
+                if (!(r.events.empty() && r2.events.empty()) && !sameOns(r.events, r2.events, onsWhy))
+                {
+                    if (onsDiffer++ < 3) againWhy += " | t " + std::to_string(t) + " played: " + onsWhy;
+                }
+                if (keepDone)
+                {
+                    ++keptChecked;
+                    const Motif played = evolvedMotif(fitMotif(m, c), P == 2 ? c : turned, P - 1);
+                    if ((!kept.leadInKept || !sameBody(kept.leadIn, played)) && keptBad++ < 3)
+                        keptWhy += " | t " + std::to_string(t) + " phrase " + std::to_string(P) + (republish ? " republished" : "");
+                }
+
+                checkRun(t, c, me, entryOf(c, turned, m, me), line2, r2, turnedAt2, nullptr, again);
+            }
             checkRun(t, c, me, entryOf(c, turned, m, me), line, r, turnedAt, &without, two);
         }
         check(two.runErrs == 0, "Evolve turned: no hanging or orphan note, no bad glide (" + std::to_string(two.runErrs) + ")");
@@ -4050,6 +4201,587 @@ int main(int argc, char** argv)
                   + std::to_string(two.fillMoved) + " of them into a head the turn moved");
         check(two.fillBad == 0, "Evolve turned: a Fill runs into the head that sounds (" + std::to_string(two.fillBad)
                                     + " of " + std::to_string(two.fillChecked) + " off)" + two.fillWhy);
+        check(two.entryFirst > 0, "Evolve turned: embellishments opening a phrase's first bar ("
+                                      + std::to_string(two.entryFirst) + ")");
+        check(two.entryBad == 0, "Evolve turned: an embellishment opening a bar lies where its function puts it from the "
+                                 "note the bar enters with, the last bar of the phrase before as it played ("
+                                 + std::to_string(two.entryBad) + " of " + std::to_string(two.entryChecked) + " off)"
+                                 + two.entryWhy);
+        check(republished > 300 && republished3 > 50 && republishedLater > 100 && keptChecked > 600 && again.entryFirst > 0,
+              "Evolve turned, phrases rebuilt later: motif published again (" + std::to_string(republished) + ", "
+                  + std::to_string(republished3) + " in phrase 3, " + std::to_string(republishedLater)
+                  + " after its first bar), Keep (" + std::to_string(keptChecked)
+                  + "), embellishments opening a phrase's first bar (" + std::to_string(again.entryFirst) + ")");
+        check(restarted > 300 && restartedEntry > 100,
+              "Evolve turned, transport stopped and started later: " + std::to_string(restarted) + " trials, "
+                  + std::to_string(restartedEntry) + " where the phrase before plays another motif with Evolve turned");
+        check(restartDiffer == 0, "Evolve turned, transport stopped and started later: everything plays and Keep keeps as "
+                                  "from a start there (" + std::to_string(restartDiffer) + " of " + std::to_string(restarted)
+                                  + " differ)" + restartWhy);
+        check(viewsDiffer == 0 && onsDiffer == 0,
+              "Evolve turned, phrases rebuilt later: every bar renders and plays as without the rebuild ("
+                  + std::to_string(viewsDiffer) + " views, " + std::to_string(onsDiffer) + " runs differ)" + againWhy);
+        check(again.runErrs == 0 && again.bad == 0 && again.fillBad == 0 && again.entryBad == 0,
+              "Evolve turned, phrases rebuilt later: the oracle of 32 holds (" + std::to_string(again.runErrs)
+                  + " run errors; approach " + std::to_string(again.bad) + ", Fill " + std::to_string(again.fillBad)
+                  + ", entry " + std::to_string(again.entryBad) + " of " + std::to_string(again.entryChecked) + " off)"
+                  + again.why + again.fillWhy + again.entryWhy);
+        check(keptBad == 0, "Evolve turned: Keep keeps the phrase before as it played as the lead-in ("
+                                + std::to_string(keptBad) + " of " + std::to_string(keptChecked) + " off)" + keptWhy);
+
+        // Evolve turns in phrase 1 and phrase 2 latches it; in phrase 2 the
+        // phrase length shrinks. That numbers the phrases anew: the bar
+        // playing lies in a later phrase, and the phrase before it never
+        // played as such. Like a locate, the sequencer derives it with the
+        // Evolve the playing phrase latched, so from the change on everything
+        // plays, and Keep in the next bar keeps, as when playback starts
+        // there with the new length and Evolve turned. The change falls early
+        // in the bar, so the bar's view is read after its re-render.
+        int renumbered = 0, renumberedEntry = 0, renumberDiffer = 0;
+        std::string renumberWhy;
+        for (int t = 0; t < 300; ++t)
+        {
+            Config c = draw();
+            c.phraseBars = U(0, 1) ? 8 : 16;
+            const Meter me = drawMeter();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(34000 + t), 0, c);
+            const int N = c.phraseBars;
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double turnQ = me.barLenQ * U(0, N - 1) + 0.25 * U(0, before);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Config changed = c;
+            changed.evolve = turnTo;
+            changed.phraseBars = N == 16 && U(0, 1) ? 8 : 4;
+            // In half the trials the change falls in the first bar of a phrase
+            // as now numbered: the bar enters from the phrase before.
+            const int lastBar = std::min(2 * N - 1, kBars - 3), Nc = changed.phraseBars;
+            const int chBar = U(0, 1) ? Nc * U(N / Nc, lastBar / Nc) : U(N, lastBar);
+            const double chQ = me.barLenQ * chBar + 0.1 * std::min(1.0, me.barLenQ);
+            const double keepQ = me.barLenQ * (chBar + 1);
+            double changedAt = -1.0;
+            bool keepDone = false;
+            Motif kept;
+            Line line;
+            double turnedAt = -1.0;
+            const Run r = playLine(c, me, m, turnQ, turnTo, line, turnedAt, [&](T5ynthPhraseSequencer& s, double q) {
+                if (changedAt < 0.0 && q >= chQ)
+                {
+                    s.setConfig(changed);
+                    changedAt = q;
+                }
+                if (!keepDone && q >= keepQ)
+                {
+                    s.keep();
+                    kept = s.getStoredMotif();
+                    keepDone = true;
+                }
+            });
+            Line fresh;
+            double unused = -1.0;
+            bool freshKept = false;
+            Motif keptFresh;
+            const Run rf = playLine(changed, me, m, -1.0, 0.0f, fresh, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!freshKept && q >= keepQ)
+                {
+                    s.keep();
+                    keptFresh = s.getStoredMotif();
+                    freshKept = true;
+                }
+            }, changedAt);
+            ++renumbered;
+            std::string diff;
+            for (int b = chBar; b < kBars && diff.empty(); ++b)
+                for (int k = 0; k < kMaxBarSteps; ++k)
+                {
+                    const Note& x = fresh[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                    const Note& y = line[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                    if (x.note != y.note || x.fn != y.fn || x.head != y.head)
+                    {
+                        diff = "bar " + std::to_string(b) + " step " + std::to_string(k) + " note "
+                               + std::to_string(x.note) + " vs " + std::to_string(y.note);
+                        break;
+                    }
+                }
+            auto onsFrom = [&](const Run& run) {
+                std::vector<Played> v;
+                for (const Played& e : run.events)
+                    if (e.ev.type == VoiceEvent::Type::NoteOn && e.q >= changedAt - 1.0e-9) v.push_back(e);
+                return v;
+            };
+            const std::vector<Played> a = onsFrom(rf), b = onsFrom(r);
+            std::string onsWhy;
+            if (diff.empty() && !(a.empty() && b.empty()) && !sameOns(a, b, onsWhy)) diff = "played: " + onsWhy;
+            if (diff.empty()
+                && (keptFresh.origin != kept.origin || keptFresh.leadInKept != kept.leadInKept
+                    || !sameBody(keptFresh, kept) || (kept.leadInKept && !sameBody(keptFresh.leadIn, kept.leadIn))))
+                diff = "Keep";
+            const int errs = r.hangs + r.orphanOffs + r.badGlides + r.polyMain + rf.hangs + rf.orphanOffs + rf.badGlides
+                           + rf.polyMain;
+            if (diff.empty() && errs > 0) diff = std::to_string(errs) + " hanging or orphan notes, bad glides";
+            // Does the phrase before depend on the Evolve it is derived with?
+            const int p = chBar / changed.phraseBars;
+            Config unturned = changed;
+            unturned.evolve = c.evolve;
+            renumberedEntry += !sameBody(evolvedMotif(fitMotif(m, changed), changed, p - 1),
+                                         evolvedMotif(fitMotif(m, changed), unturned, p - 1));
+            if (!diff.empty() && renumberDiffer++ < 3)
+                renumberWhy += " | t " + std::to_string(t) + " bar " + std::to_string(chBar) + ", " + std::to_string(N)
+                               + " -> " + std::to_string(changed.phraseBars) + " bars: " + diff;
+        }
+        check(renumbered == 300 && renumberedEntry > 100,
+              "Evolve turned, phrase length shortened later: " + std::to_string(renumbered) + " trials, "
+                  + std::to_string(renumberedEntry) + " where the phrase before plays another motif with Evolve turned");
+        check(renumberDiffer == 0, "Evolve turned, phrase length shortened later: everything plays and Keep keeps as "
+                                   "from a start there (" + std::to_string(renumberDiffer) + " of "
+                                   + std::to_string(renumbered) + " differ)" + renumberWhy);
+
+        // The phrase length goes away and comes back. Run x against run y
+        // from bar fromBar and q fromQ on: the views, the note-ons, what Keep
+        // kept, and neither run hangs, orphans a note or glides wrong.
+        const double dq = kBlock * kBpm / (60.0 * kSr);
+        auto differFrom = [&](const Line& x, const Run& rx, const Motif& kx, const Line& y, const Run& ry, const Motif& ky,
+                              int fromBar, double fromQ) -> std::string {
+            for (int b = fromBar; b < kBars; ++b)
+                for (int k = 0; k < kMaxBarSteps; ++k)
+                {
+                    const Note& u = x[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                    const Note& v = y[static_cast<size_t>(b)][static_cast<size_t>(k)];
+                    if (u.note != v.note || u.fn != v.fn || u.head != v.head)
+                        return "bar " + std::to_string(b) + " step " + std::to_string(k) + " note " + std::to_string(u.note)
+                               + " vs " + std::to_string(v.note);
+                }
+            auto onsFrom = [&](const Run& run) {
+                std::vector<Played> v;
+                for (const Played& e : run.events)
+                    if (e.ev.type == VoiceEvent::Type::NoteOn && e.q >= fromQ - 1.0e-9) v.push_back(e);
+                return v;
+            };
+            const std::vector<Played> a = onsFrom(rx), b = onsFrom(ry);
+            std::string onsWhy;
+            if (!(a.empty() && b.empty()) && !sameOns(a, b, onsWhy)) return "played: " + onsWhy;
+            if (kx.origin != ky.origin || kx.leadInKept != ky.leadInKept || !sameBody(kx, ky)
+                || (kx.leadInKept && !sameBody(kx.leadIn, ky.leadIn)))
+                return "Keep";
+            const int errs = rx.hangs + rx.orphanOffs + rx.badGlides + rx.polyMain + ry.hangs + ry.orphanOffs
+                           + ry.badGlides + ry.polyMain;
+            return errs > 0 ? std::to_string(errs) + " hanging or orphan notes, bad glides" : std::string();
+        };
+
+        // (a) Evolve turns in phrase 2 and phrase 3 latches it. In phrase 3
+        // the length goes to another and comes back, within one phrase as
+        // the other length numbers them. Phrase 3 was entered with the length
+        // that comes back, so the phrases are numbered as they played: the
+        // phrase before is phrase 2 with the Evolve it latched, and from the
+        // return on everything plays, and Keep later in phrase 3 keeps, as
+        // without the excursion. The excursion starts early in a bar, half
+        // the time phrase 3's first, which enters from phrase 2, and lasts
+        // two blocks or into a later bar.
+        int awayChecked = 0, awayFirst = 0, awayLong = 0, awayMatters = 0, awayDiffer = 0;
+        std::string awayWhy;
+        for (int t = 0; t < 300; ++t)
+        {
+            Config c = draw();
+            c.phraseBars = U(0, 1) ? 4 : 8;
+            const int N = c.phraseBars;
+            const Meter me = drawMeter();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(35000 + t), 0, c);
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double turnQ = me.barLenQ * (N + U(0, N - 1)) + 0.25 * U(0, before);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Config turned = c;
+            turned.evolve = turnTo;
+            Config away = turned;
+            away.phraseBars = N == 4 ? (U(0, 1) ? 8 : 16) : (U(0, 1) ? 4 : 16);
+            const int M = away.phraseBars;
+            const int exBar = U(0, 1) ? 2 * N : U(2 * N, 3 * N - 1);
+            int backBar = exBar;
+            if (U(0, 1))
+            {
+                const int last = std::min(3 * N - 1, (exBar / M + 1) * M - 1);
+                if (last > exBar) backBar = U(exBar + 1, last);
+            }
+            const double early = 0.1 * std::min(1.0, me.barLenQ);
+            const double exQ = me.barLenQ * exBar + early;
+            const double backQ = backBar == exBar ? exQ + 2.0 * dq : me.barLenQ * backBar + early;
+            const double keepQ = backBar < 3 * N - 1 ? me.barLenQ * U(backBar + 1, 3 * N - 1) : backQ + 4.0 * dq;
+            double awayAt = -1.0, backAt = -1.0, turnedAt = -1.0;
+            bool keepDone = false;
+            Motif kept;
+            Line line;
+            const Run r = playLine(c, me, m, turnQ, turnTo, line, turnedAt, [&](T5ynthPhraseSequencer& s, double q) {
+                if (awayAt < 0.0 && q >= exQ)
+                {
+                    s.setConfig(away);
+                    awayAt = q;
+                }
+                if (awayAt >= 0.0 && backAt < 0.0 && q >= backQ)
+                {
+                    s.setConfig(turned);
+                    backAt = q;
+                }
+                if (!keepDone && q >= keepQ)
+                {
+                    s.keep();
+                    kept = s.getStoredMotif();
+                    keepDone = true;
+                }
+            });
+            bool keptStay = false;
+            Motif keptStayed;
+            Line stayed;
+            double turnedStay = -1.0;
+            const Run rs = playLine(c, me, m, turnQ, turnTo, stayed, turnedStay, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!keptStay && q >= keepQ)
+                {
+                    s.keep();
+                    keptStayed = s.getStoredMotif();
+                    keptStay = true;
+                }
+            });
+            ++awayChecked;
+            awayFirst += exBar == 2 * N && backBar == exBar;
+            awayLong += backBar > exBar;
+            const Motif F = fitMotif(m, c);
+            awayMatters += !sameBody(evolvedMotif(F, c, 1), evolvedMotif(F, turned, 1));
+            const std::string diff = differFrom(line, r, kept, stayed, rs, keptStayed, backBar, backAt);
+            if (!diff.empty() && awayDiffer++ < 3)
+                awayWhy += " | t " + std::to_string(t) + " bars " + std::to_string(exBar) + ".." + std::to_string(backBar)
+                           + ", " + std::to_string(N) + " -> " + std::to_string(M) + " -> " + std::to_string(N) + ": " + diff;
+        }
+        check(awayChecked == 300 && awayFirst > 50 && awayLong > 50 && awayMatters > 100,
+              "Evolve turned, phrase length away and back within the phrase that latched it: " + std::to_string(awayChecked)
+                  + " trials, " + std::to_string(awayFirst) + " within its first bar, " + std::to_string(awayLong)
+                  + " into a later bar, " + std::to_string(awayMatters)
+                  + " where the phrase before plays another motif with Evolve turned");
+        check(awayDiffer == 0, "Evolve turned, phrase length away and back within the phrase that latched it: everything "
+                               "plays and Keep keeps as without the excursion (" + std::to_string(awayDiffer) + " of "
+                               + std::to_string(awayChecked) + " differ)" + awayWhy);
+
+        // (c) As (a), but the length comes back in phrase 4, as the length
+        // that comes back numbers them. A longer length has no boundary at
+        // phrase 4's start, so phrase 4 was never entered; a shorter one
+        // entered phrases of its own. Either way the phrase playing is not
+        // the phrase last entered: the phrases are numbered anew, and from
+        // the return on everything plays, and Keep keeps, as when playback
+        // starts there. Half the returns fall in phrase 4's first bar.
+        int crossed = 0, crossedLonger = 0, crossedFirst = 0, crossedMatters = 0, crossDiffer = 0;
+        std::string crossWhy;
+        for (int t = 0; t < 300; ++t)
+        {
+            Config c = draw();
+            c.phraseBars = U(0, 1) ? 4 : 8;
+            const int N = c.phraseBars;
+            const Meter me = drawMeter();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(37000 + t), 0, c);
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double turnQ = me.barLenQ * (N + U(0, N - 1)) + 0.25 * U(0, before);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Config turned = c;
+            turned.evolve = turnTo;
+            Config away = turned;
+            away.phraseBars = N == 4 ? (U(0, 1) ? 8 : 16) : (U(0, 2) ? 16 : 4);
+            const int M = away.phraseBars;
+            const int exBar = U(2 * N, 3 * N - 1);
+            const int backBar = U(0, 1) ? 3 * N : U(3 * N, 4 * N - 1);
+            const double early = 0.1 * std::min(1.0, me.barLenQ);
+            const double exQ = me.barLenQ * exBar + early;
+            const double backQ = me.barLenQ * backBar + early;
+            const double keepQ = backBar < 4 * N - 1 ? me.barLenQ * (backBar + 1) : backQ + 4.0 * dq;
+            double awayAt = -1.0, backAt = -1.0, turnedAt = -1.0, unused = -1.0;
+            bool keepDone = false;
+            Motif kept;
+            Line line;
+            const Run r = playLine(c, me, m, turnQ, turnTo, line, turnedAt, [&](T5ynthPhraseSequencer& s, double q) {
+                if (awayAt < 0.0 && q >= exQ)
+                {
+                    s.setConfig(away);
+                    awayAt = q;
+                }
+                if (awayAt >= 0.0 && backAt < 0.0 && q >= backQ)
+                {
+                    s.setConfig(turned);
+                    backAt = q;
+                }
+                if (!keepDone && q >= keepQ)
+                {
+                    s.keep();
+                    kept = s.getStoredMotif();
+                    keepDone = true;
+                }
+            });
+            bool freshKept = false;
+            Motif keptFresh;
+            Line fresh;
+            const Run rf = playLine(turned, me, m, -1.0, 0.0f, fresh, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!freshKept && q >= keepQ)
+                {
+                    s.keep();
+                    keptFresh = s.getStoredMotif();
+                    freshKept = true;
+                }
+            }, backAt);
+            ++crossed;
+            crossedLonger += M > N;
+            crossedFirst += backBar == 3 * N;
+            const Motif F = fitMotif(m, c);
+            crossedMatters += M > N && !sameBody(evolvedMotif(F, c, 2), evolvedMotif(F, turned, 2));
+            const std::string diff = differFrom(fresh, rf, keptFresh, line, r, kept, backBar, backAt);
+            if (!diff.empty() && crossDiffer++ < 3)
+                crossWhy += " | t " + std::to_string(t) + " bars " + std::to_string(exBar) + ".." + std::to_string(backBar)
+                            + ", " + std::to_string(N) + " -> " + std::to_string(M) + " -> " + std::to_string(N) + ": " + diff;
+        }
+        check(crossed == 300 && crossedLonger > 150 && crossedFirst > 100 && crossedMatters > 100,
+              "Evolve turned, phrase length away from the phrase that latched it and back in the next: "
+                  + std::to_string(crossed) + " trials, " + std::to_string(crossedLonger) + " away to a longer one ("
+                  + std::to_string(crossedMatters) + " where the phrase before plays another motif with Evolve turned), "
+                  + std::to_string(crossedFirst) + " back in the phrase's first bar");
+        check(crossDiffer == 0, "Evolve turned, phrase length away from the phrase that latched it and back in the next: "
+                                "everything plays and Keep keeps as from a start there ("
+                                + std::to_string(crossDiffer) + " of " + std::to_string(crossed) + " differ)" + crossWhy);
+
+        // (b) The length goes to another in phrase 1 or later, before
+        // phrase j (j >= 2 as the other length numbers them); Evolve turns in
+        // phrase j and phrase j + 1 latches it, entered with the other
+        // length. In phrase j + 1 the length comes back. That numbers the
+        // phrases anew: the phrase before the bar playing never played as
+        // such, and from the return on everything plays, and Keep keeps, as
+        // when playback starts there with Evolve turned.
+        int returned = 0, returnedMatters = 0, returnDiffer = 0;
+        std::string returnWhy;
+        for (int t = 0; t < 300; ++t)
+        {
+            Config c = draw();
+            const int M = U(0, 1) ? 4 : 8;
+            int N = M;
+            while (N == M) N = kPhraseBars[U(0, 2)];
+            c.phraseBars = N;
+            const Meter me = drawMeter();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(36000 + t), 0, c);
+            const int j = U(2, (kBars - 2) / M - 1);
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double early = 0.1 * std::min(1.0, me.barLenQ);
+            const double awayQ = me.barLenQ * U(0, (j - 1) * M - 1) + early;
+            const double turnQ = me.barLenQ * ((j - 1) * M + U(0, M - 1)) + 0.25 * U(0, before);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Config away = c;
+            away.phraseBars = M;
+            Config awayTurned = away;
+            awayTurned.evolve = turnTo;
+            Config turned = c;
+            turned.evolve = turnTo;
+            const int backBar = U(j * M, j * M + M - 1);
+            const double backQ = me.barLenQ * backBar + early;
+            const double keepQ = (backBar + 1) / N == backBar / N ? me.barLenQ * (backBar + 1) : backQ + 4.0 * dq;
+            double awayAt = -1.0, turnAt = -1.0, backAt = -1.0, unused = -1.0;
+            bool keepDone = false;
+            Motif kept;
+            Line line;
+            const Run r = playLine(c, me, m, -1.0, 0.0f, line, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                if (awayAt < 0.0 && q >= awayQ)
+                {
+                    s.setConfig(away);
+                    awayAt = q;
+                }
+                if (turnAt < 0.0 && q >= turnQ)
+                {
+                    s.setConfig(awayTurned);
+                    turnAt = q;
+                }
+                if (backAt < 0.0 && q >= backQ)
+                {
+                    s.setConfig(turned);
+                    backAt = q;
+                }
+                if (!keepDone && q >= keepQ)
+                {
+                    s.keep();
+                    kept = s.getStoredMotif();
+                    keepDone = true;
+                }
+            });
+            bool freshKept = false;
+            Motif keptFresh;
+            Line fresh;
+            const Run rf = playLine(turned, me, m, -1.0, 0.0f, fresh, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!freshKept && q >= keepQ)
+                {
+                    s.keep();
+                    keptFresh = s.getStoredMotif();
+                    freshKept = true;
+                }
+            }, backAt);
+            ++returned;
+            const int p = backBar / N;
+            const Motif F = fitMotif(m, c);
+            returnedMatters += p >= 2 && !sameBody(evolvedMotif(F, c, p - 1), evolvedMotif(F, turned, p - 1));
+            const std::string diff = differFrom(fresh, rf, keptFresh, line, r, kept, backBar, backAt);
+            if (!diff.empty() && returnDiffer++ < 3)
+                returnWhy += " | t " + std::to_string(t) + " bar " + std::to_string(backBar) + ", " + std::to_string(N)
+                             + " -> " + std::to_string(M) + " -> " + std::to_string(N) + ": " + diff;
+        }
+        check(returned == 300 && returnedMatters > 50,
+              "Evolve turned, latched in a phrase entered with another length that then comes back: "
+                  + std::to_string(returned) + " trials, " + std::to_string(returnedMatters)
+                  + " where the phrase before plays another motif with Evolve turned");
+        check(returnDiffer == 0, "Evolve turned, latched in a phrase entered with another length that then comes back: "
+                                 "everything plays and Keep keeps as from a start there ("
+                                 + std::to_string(returnDiffer) + " of " + std::to_string(returned) + " differ)"
+                                 + returnWhy);
+
+        // (d) Phrases 0 and -1 keep their number under every length, no other
+        // phrase does. In a host's pre-roll, with a motif heard from phrase -2
+        // on, Evolve turns in phrase -1 and phrase 0 latches it. In phrase 0,
+        // half the time in its first bar, the length goes to another: that
+        // numbers the phrases anew though phrase 0 keeps its number, and from
+        // the change on everything plays, and Keep keeps, as when playback
+        // starts there with Evolve turned.
+        int zeroed = 0, zeroedFirst = 0, zeroedMatters = 0, zeroDiffer = 0;
+        std::string zeroWhy;
+        for (int t = 0; t < 300; ++t)
+        {
+            Config c = draw();
+            c.phraseBars = kPhraseBars[U(0, 2)];
+            const int N = c.phraseBars;
+            int M = N;
+            while (M == N) M = kPhraseBars[U(0, 2)];
+            const Meter me = drawMeter();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(38000 + t), -2, c);
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double startQ = -me.barLenQ * N;
+            const double turnQ = me.barLenQ * (U(0, N - 1) - N) + 0.25 * U(0, before);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Config turned = c;
+            turned.evolve = turnTo;
+            Config changed = turned;
+            changed.phraseBars = M;
+            const int span = std::min(N, M);
+            const int chBar = U(0, 1) ? 0 : U(0, span - 1);
+            const double chQ = me.barLenQ * chBar + 0.1 * std::min(1.0, me.barLenQ);
+            const double keepQ = chBar < span - 1 ? me.barLenQ * (chBar + 1) : chQ + 4.0 * dq;
+            double turnAt = -1.0, changedAt = -1.0, unused = -1.0;
+            bool keepDone = false;
+            Motif kept;
+            Line line;
+            const Run r = playLine(c, me, m, -1.0, 0.0f, line, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                if (turnAt < 0.0 && q >= turnQ)
+                {
+                    s.setConfig(turned);
+                    turnAt = q;
+                }
+                if (changedAt < 0.0 && q >= chQ)
+                {
+                    s.setConfig(changed);
+                    changedAt = q;
+                }
+                if (!keepDone && q >= keepQ)
+                {
+                    s.keep();
+                    kept = s.getStoredMotif();
+                    keepDone = true;
+                }
+            }, startQ);
+            bool freshKept = false;
+            Motif keptFresh;
+            Line fresh;
+            const Run rf = playLine(changed, me, m, -1.0, 0.0f, fresh, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                if (!freshKept && q >= keepQ)
+                {
+                    s.keep();
+                    keptFresh = s.getStoredMotif();
+                    freshKept = true;
+                }
+            }, changedAt);
+            ++zeroed;
+            zeroedFirst += chBar == 0;
+            const Motif F = fitMotif(m, c);
+            zeroedMatters += !sameBody(evolvedMotif(F, c, -1), evolvedMotif(F, turned, -1));
+            const std::string diff = differFrom(fresh, rf, keptFresh, line, r, kept, chBar, changedAt);
+            if (!diff.empty() && zeroDiffer++ < 3)
+                zeroWhy += " | t " + std::to_string(t) + " bar " + std::to_string(chBar) + ", " + std::to_string(N)
+                           + " -> " + std::to_string(M) + ": " + diff;
+        }
+        check(zeroed == 300 && zeroedFirst > 100 && zeroedMatters > 100,
+              "Evolve turned in a host's pre-roll, phrase length changed in phrase 0: " + std::to_string(zeroed)
+                  + " trials, " + std::to_string(zeroedFirst) + " in its first bar, " + std::to_string(zeroedMatters)
+                  + " where phrase -1 plays another motif with Evolve turned");
+        check(zeroDiffer == 0, "Evolve turned in a host's pre-roll, phrase length changed in phrase 0: everything plays "
+                               "and Keep keeps as from a start there ("
+                               + std::to_string(zeroDiffer) + " of " + std::to_string(zeroed) + " differ)" + zeroWhy);
+
+        // (e) Playback starts with one phrase length and goes to another in
+        // phrase 0; the phrases from phrase 1 on are entered with that one.
+        // Evolve turns in phrase 1 and phrase 2 latches it. A rebuild in
+        // phrase 2 (the motif published again, half the time in its first
+        // bar) keeps the phrase before as it played: everything plays, and
+        // Keep in the next bar keeps, as without the rebuild.
+        int startedOther = 0, startedFirst = 0, startedMatters = 0, startedDiffer = 0;
+        std::string startedWhy;
+        for (int t = 0; t < 300; ++t)
+        {
+            Config c = draw();
+            c.phraseBars = U(0, 1) ? 4 : 8;
+            const int N = c.phraseBars;
+            Config begun = c;
+            while (begun.phraseBars == N) begun.phraseBars = kPhraseBars[U(0, 2)];
+            const Meter me = drawMeter();
+            const Motif m = generateMotif(static_cast<std::uint32_t>(39000 + t), 0, c);
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double early = 0.1 * std::min(1.0, me.barLenQ);
+            const double chQ = me.barLenQ * U(0, std::min(N, begun.phraseBars) - 1) + early;
+            const double turnQ = me.barLenQ * U(N, 2 * N - 1) + 0.25 * U(0, before);
+            const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
+            Config turned = c;
+            turned.evolve = turnTo;
+            const int repBar = 2 * N + (U(0, 1) ? 0 : U(1, N - 2));
+            const double repQ = me.barLenQ * repBar + 0.25 * U(0, before), keepQ = me.barLenQ * (repBar + 1);
+            auto run = [&](bool republish, Line& line, Motif& kept) {
+                double unused = -1.0, chAt = -1.0, turnAt = -1.0;
+                bool repDone = false, keepDone = false;
+                return playLine(begun, me, m, -1.0, 0.0f, line, unused, [&](T5ynthPhraseSequencer& s, double q) {
+                    if (chAt < 0.0 && q >= chQ)
+                    {
+                        s.setConfig(c);
+                        chAt = q;
+                    }
+                    if (turnAt < 0.0 && q >= turnQ)
+                    {
+                        s.setConfig(turned);
+                        turnAt = q;
+                    }
+                    if (republish && !repDone && q >= repQ)
+                    {
+                        s.setStoredMotif(s.getStoredMotif());
+                        repDone = true;
+                    }
+                    if (!keepDone && q >= keepQ)
+                    {
+                        s.keep();
+                        kept = s.getStoredMotif();
+                        keepDone = true;
+                    }
+                });
+            };
+            Line line, without;
+            Motif kept, keptWithout;
+            const Run r = run(true, line, kept);
+            const Run r0 = run(false, without, keptWithout);
+            ++startedOther;
+            startedFirst += repBar == 2 * N;
+            const Motif F = fitMotif(m, c);
+            startedMatters += !sameBody(evolvedMotif(F, c, 1), evolvedMotif(F, turned, 1));
+            const std::string diff = differFrom(without, r0, keptWithout, line, r, kept, repBar, repQ);
+            if (!diff.empty() && startedDiffer++ < 3)
+                startedWhy += " | t " + std::to_string(t) + " bar " + std::to_string(repBar) + ", "
+                              + std::to_string(begun.phraseBars) + " -> " + std::to_string(N) + ": " + diff;
+        }
+        check(startedOther == 300 && startedFirst > 100 && startedMatters > 100,
+              "Evolve turned, playback started with another phrase length, phrase rebuilt: " + std::to_string(startedOther)
+                  + " trials, " + std::to_string(startedFirst) + " in its first bar, " + std::to_string(startedMatters)
+                  + " where the phrase before plays another motif with Evolve turned");
+        check(startedDiffer == 0, "Evolve turned, playback started with another phrase length, phrase rebuilt: everything "
+                                  "plays and Keep keeps as without the rebuild ("
+                                  + std::to_string(startedDiffer) + " of " + std::to_string(startedOther) + " differ)"
+                                  + startedWhy);
     }
 
     std::printf("\n== 34. An ABAB cadence under Bass's Lift lands on the last head that sounds\n");

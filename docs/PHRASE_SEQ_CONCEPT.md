@@ -289,7 +289,19 @@ stay aligned.
 - Evolve is latched at phrase entry: turning it changes the evolution from
   the next phrase boundary on, not the phrase now playing. The line into
   the next phrase leads into the motif that phrase will play with Evolve
-  as it stands, re-led from where playback is when it turns.
+  as it stands, re-led from where playback is when it turns. That phrase
+  enters from the phrase before as it played, with the Evolve that phrase
+  latched, and Keep keeps that one as its lead-in. A locate has no phrase
+  that played before it: there the phrase before is derived with Evolve as
+  it stands. Nor has a change of the phrase length, which numbers the
+  phrases anew (phrases 0 and −1 too, though they keep their numbers):
+  there it is derived with the Evolve latched last, the one the phrase
+  playing plays with. A length that comes back within the phrase last
+  entered, to the length it was entered with, numbers the phrases as they
+  played again, and the phrase before is again the one that played. Where
+  the length comes back in a later phrase, that phrase was never entered
+  at that length (the other length entered phrases of its own, or has no
+  boundary there): the phrases stay numbered anew.
 - **Keep** stores the motif heard in the phrase now playing (evolved, as
   the audio thread played it) as the new stored motif, so playback goes on
   unchanged. It keeps the motif the phrase entered from as its lead-in and
@@ -320,9 +332,12 @@ bar. Under Keys the chord is played, not a function of b, so the bar
 before is rendered with the chord it ended on (after a locate: the chord
 held at the locate). A bar then plays the same whether it is reached by
 playing or by locating with the same chord held, and Keys on one chord
-plays what Chords on that chord plays. The voicing of Stab and of the
-Chord layer is the exception: it is voice-led live from the voicing
-before (§3.5), which keeps it near its anchor.
+plays what Chords on that chord plays. The first bar of a phrase after an
+Evolve turn is the exception on the line: played into, it enters from the
+phrase before as that played; located, from that phrase as Evolve now
+makes it (§3.8). The voicing of Stab and of the Chord layer is the other
+exception: it is voice-led live from the voicing before (§3.5), which
+keeps it near its anchor.
 
 ### 3.10 Layers
 

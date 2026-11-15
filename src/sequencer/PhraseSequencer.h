@@ -204,6 +204,9 @@ private:
     bool motifDirty = false;             // the heard motif may differ: refit, rebuild evolution
     bool renderDirty = false;            // the bar renders differently: re-render it
     float latchedEvolve = 0.0f;          // Evolve as of the current phrase entry
+    float prevEvolve = 0.0f;             // Evolve the phrase before entryPhrase latched (the one evoPrev played)
+    int entryPhrase = 0;                 // phrase last entered (or located into)
+    int entryBars = 0;                   // phrase length that numbered it
     float evoNextEvolve = 0.0f;          // Evolve evoNext was derived with
 
     // Heard motifs of the phrases around the current bar; evoPrev is the
