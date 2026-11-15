@@ -3486,6 +3486,14 @@ int main(int argc, char** argv)
         // barLen − 1 (§3.7), a bar longer than 4/4 ends its steps before
         // it. A quarter of the trials draws the bars that lead into a
         // cadence moved off Bass's octave pulse onto the head before it.
+        // A bar enters with the last note of the bar before rendered on its
+        // own (§3.9); in a phrase's first bar that bar is the last of the
+        // phrase before, and its lookahead reads this phrase from this
+        // phrase's motif, not from the one Evolve makes for the phrase
+        // after. An embellishment that opens a bar before its last beat (a
+        // Fill note can sound before a step there) lies where its function
+        // puts it from that note, a Passing note a scale step towards the
+        // next sounding head.
         std::mt19937 rng(32);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, motifHead = false, octave = false, fill = false; };
@@ -3574,18 +3582,20 @@ int main(int argc, char** argv)
         // rendered on its own from its chord root, without the Lift. In a
         // bar whose run reads its entry (no step before its last beat) it
         // can differ from the note heard before the bar. `after` is the
-        // Evolve phrase 2 on latches.
-        using Entry = std::function<int(int)>;
+        // Evolve phrase 2 on latches. `own`: the bar before reads past its
+        // phrase from its own phrase's motif (for the count of entries the
+        // next phrase's motif decides).
+        using Entry = std::function<int(int, bool)>;
         auto entryOf = [&](const Config& c, const Config& after, const Motif& m, const Meter& me) -> Entry {
             const Motif f = fitMotif(m, c);
-            return [c, after, f, me](int b) {
+            return [c, after, f, me](int b, bool own) {
                 const int N = phraseBarsOf(c);
                 auto motifOf = [&](int p) { return evolvedMotif(f, p >= 2 ? after : c, p); };
                 const int pb = floorDiv(b - 1, N);
                 BarRender scratch;
                 int p = -1, pp = -1;
-                entryNotes(floorDiv(b, N) >= 2 ? after : c, motifOf(pb), motifOf(pb + 1), b, me.barLenQ, nullptr,
-                           scratch, p, pp);
+                entryNotes(floorDiv(b, N) >= 2 ? after : c, motifOf(pb), motifOf(own ? pb : pb + 1), b, me.barLenQ,
+                           nullptr, scratch, p, pp);
                 return p;
             };
         };
@@ -3596,7 +3606,8 @@ int main(int argc, char** argv)
             int fillChecked = 0, fillBad = 0, fillCadence = 0;
             int crossing = 0, moved = 0, fillCrossing = 0, fillMoved = 0;
             int checkedOther = 0, fillOther = 0, movedCadence = 0;
-            std::string why, fillWhy;
+            int entryChecked = 0, entryBad = 0, entryFirst = 0, entryDecided = 0;
+            std::string why, fillWhy, entryWhy;
         };
         // Checks the approach notes and the Fill notes of run r that sound
         // from fromQ on. With `without` (the same trial without the turn), it
@@ -3744,7 +3755,7 @@ int main(int argc, char** argv)
                     else if (inBar < me.lastBeatQ - 1.0e-3) from = note;
                 }
                 if (fills.empty()) continue;
-                if (from < 0) from = entered(b);
+                if (from < 0) from = entered(b, false);
                 if (from < 0) continue;
                 const int dir = h.note >= from ? -1 : 1;
                 const bool cross = without && crosses(b, h);
@@ -3766,6 +3777,51 @@ int main(int argc, char** argv)
                                       h.step, want);
                         y.fillWhy += s;
                     }
+                }
+            }
+
+            // The embellishment that opens a bar, before its last beat, from
+            // the note the bar enters with.
+            const int center = tonicNote(partAnchor(c.part), c.scaleRoot) + 6;
+            for (int b = 1; b + 2 < kBars; ++b)
+            {
+                const Bar& bar = line[static_cast<size_t>(b)];
+                int k = 0;
+                while (k < kMaxBarSteps && bar[static_cast<size_t>(k)].note < 0 && !bar[static_cast<size_t>(k)].octave) ++k;
+                if (k == kMaxBarSteps || inLast(k) || me.barLenQ * b + k * stepQ < fromQ + 1.0e-6) continue;
+                const Note& a = bar[static_cast<size_t>(k)];
+                if (a.octave || a.fill || a.head) continue;
+                const int from = entered(b, false);
+                if (from < 0) continue;
+                int want = -1;
+                switch (a.fn)
+                {
+                    case Fn::Repeat:        want = from; break;
+                    case Fn::NeighbourUp:   want = scaleStep(from, 1, mask); break;
+                    case Fn::NeighbourDown: want = scaleStep(from, -1, mask); break;
+                    case Fn::Octave:        want = from > center ? from - 12 : from + 12; break;
+                    case Fn::Passing:
+                    {
+                        const Target h = nextHead(line, b, k);
+                        if (h.note >= 0 && h.note != from) want = scaleStep(from, h.note > from ? 1 : -1, mask);
+                        break;
+                    }
+                    default: break;
+                }
+                if (want < 0) continue;
+                ++y.entryChecked;
+                if (floorMod(b, N) == 0)
+                {
+                    ++y.entryFirst;
+                    y.entryDecided += entered(b, true) != from;
+                }
+                if (a.note != want && y.entryBad++ < 3)
+                {
+                    char s[200];
+                    std::snprintf(s, sizeof s, " | t %d form %d part %d: bar %d step %d fn %d note %d, entered from %d wants %d",
+                                  t, static_cast<int>(c.form), static_cast<int>(c.part), b, k, static_cast<int>(a.fn),
+                                  a.note, from, want);
+                    y.entryWhy += s;
                 }
             }
         };
@@ -3806,6 +3862,12 @@ int main(int argc, char** argv)
         check(one.fillCadence > 0, "lookahead as played: Fill runs into cadence heads (" + std::to_string(one.fillCadence) + ")");
         check(one.fillBad == 0, "lookahead as played: a Fill runs into the head that sounds (" + std::to_string(one.fillBad)
                                     + " of " + std::to_string(one.fillChecked) + " off)" + one.fillWhy);
+        check(one.entryFirst > 0 && one.entryDecided > 0,
+              "lookahead as played: embellishments opening a phrase's first bar (" + std::to_string(one.entryFirst) + "), "
+                  + std::to_string(one.entryDecided) + " of them entered from a note the next phrase's motif decides");
+        check(one.entryBad == 0, "lookahead as played: an embellishment opening a bar lies where its function puts it from "
+                                 "the note the bar enters with (" + std::to_string(one.entryBad) + " of "
+                                 + std::to_string(one.entryChecked) + " off)" + one.entryWhy);
 
         std::printf("\n== 33. The line leads into the next phrase with the Evolve it latches\n");
         // Evolve is latched at phrase entry (§3.8), so turning it in a phrase
