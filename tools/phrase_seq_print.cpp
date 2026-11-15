@@ -3465,7 +3465,12 @@ int main(int argc, char** argv)
         // motif leaves a rest: nothing else sounds there) is no approach
         // step: the view shows it as the run it approaches the head with,
         // and the Fill check places it. All forms, ABAB weighted;
-        // phrases of 4, 8 and 16 bars; Variation 0, 2/5, 3/5 and 1.
+        // phrases of 4, 8 and 16 bars; Variation 0, 2/5, 3/5 and 1. In 4/4
+        // and in bars shorter and longer: a bar of a beat or less is all
+        // last beat, a bar of n/32 starts it on the 16th a 32nd after
+        // barLen − 1 (§3.7), a bar longer than 4/4 ends its steps before
+        // it. A quarter of the trials draws the bars that lead into a
+        // cadence moved off Bass's octave pulse onto the head before it.
         std::mt19937 rng(32);
         auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
         struct Note { int note = -1; Fn fn = Fn::Rest; bool head = false, motifHead = false, octave = false, fill = false; };
@@ -3476,6 +3481,21 @@ int main(int argc, char** argv)
         const float kFillVel = 72.0f / 127.0f;
         static const float kVariation[] = { 0.0f, 0.4f, 0.6f, 1.0f };
         static const int kPhraseBars[] = { 4, 8, 16 };
+        static const int kMeters[][2] = { { 4, 4 }, { 4, 4 }, { 3, 4 }, { 2, 4 }, { 1, 4 }, { 5, 8 }, { 7, 8 },
+                                          { 7, 16 }, { 5, 16 }, { 3, 16 }, { 15, 32 }, { 7, 32 }, { 5, 4 } };
+        constexpr int kNumMeters = static_cast<int>(sizeof kMeters / sizeof kMeters[0]);
+        struct Meter { int num = 4, den = 4; double barLenQ = 4.0, lastBeatQ = 3.0; };
+        // The last beat starts on the first 16th at or after barLen − 1.
+        auto drawMeter = [&]() {
+            const int i = U(0, kNumMeters - 1);
+            Meter me;
+            me.num = kMeters[i][0];
+            me.den = kMeters[i][1];
+            me.barLenQ = 4.0 * me.num / me.den;
+            me.lastBeatQ = 0.0;
+            while (me.lastBeatQ < me.barLenQ - 1.0 - 1.0e-9) me.lastBeatQ += 0.25;
+            return me;
+        };
         auto draw = [&]() {
             Config c = base();
             c.part = static_cast<Part>(U(0, 2));   // Bass, Riff, Lead
@@ -3489,14 +3509,19 @@ int main(int argc, char** argv)
             c.variation = kVariation[U(0, 3)];
             c.slide = 0.0f; c.shuffle = 0.0f;
             c.layer = Layer::Off;
-            c.len = U(1, 2); c.pulses = U(1, 8); c.rotation = U(0, 7);
+            // Pulses over the whole motif, up to every step. An approach
+            // leads into a cadence moved off Bass's octave pulse only in a
+            // bar of two heads (the cadence moves to the first) after a bar
+            // that ends on an approach: the two motif bars differ, and a
+            // beat holds two pulses (more than half the steps sound).
+            c.len = U(1, 2); c.pulses = U(1, c.len * c.stepsPerBar); c.rotation = U(0, 7);
             return c;
         };
 
         // Plays c with motif m from bar 0 and reads the bar views into line.
         // turnQ >= 0: Evolve turns to turnTo in the first block from turnQ on,
         // which starts at turnedAt.
-        auto playLine = [&](const Config& c, const Motif& m, double turnQ, float turnTo, Line& line,
+        auto playLine = [&](const Config& c, const Meter& me, const Motif& m, double turnQ, float turnTo, Line& line,
                             double& turnedAt) {
             line.assign(kBars, Bar {});
             turnedAt = -1.0;
@@ -3504,7 +3529,7 @@ int main(int argc, char** argv)
             std::array<bool, kMaxMotifSteps> heads {};
             computeHeads(m, heads);
             bool loaded = false;
-            return play(c, 0.0, kBars * 4.0, 4, 4, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
+            return play(c, 0.0, kBars * me.barLenQ, me.num, me.den, {}, 0, [&](T5ynthPhraseSequencer& s, double q) {
                 if (!loaded) { s.setStoredMotif(m); loaded = true; return; }
                 if (turnQ >= 0.0 && turnedAt < 0.0 && q >= turnQ)
                 {
@@ -3530,19 +3555,40 @@ int main(int argc, char** argv)
             });
         };
 
+        // The note bar b enters with (§3.9): the last of the bar before,
+        // rendered on its own from its chord root, without the Lift. In a
+        // bar whose run reads its entry (no step before its last beat) it
+        // can differ from the note heard before the bar. `after` is the
+        // Evolve phrase 2 on latches.
+        using Entry = std::function<int(int)>;
+        auto entryOf = [&](const Config& c, const Config& after, const Motif& m, const Meter& me) -> Entry {
+            const Motif f = fitMotif(m, c);
+            return [c, after, f, me](int b) {
+                const int N = phraseBarsOf(c);
+                auto motifOf = [&](int p) { return evolvedMotif(f, p >= 2 ? after : c, p); };
+                const int pb = floorDiv(b - 1, N);
+                BarRender scratch;
+                int p = -1, pp = -1;
+                entryNotes(floorDiv(b, N) >= 2 ? after : c, motifOf(pb), motifOf(pb + 1), b, me.barLenQ, nullptr,
+                           scratch, p, pp);
+                return p;
+            };
+        };
+
         struct Tally
         {
             int runErrs = 0, checked = 0, bad = 0, cadenceTargets = 0, dropSkips = 0, octaveSkips = 0;
             int fillChecked = 0, fillBad = 0, fillCadence = 0;
             int crossing = 0, moved = 0, fillCrossing = 0, fillMoved = 0;
+            int checkedOther = 0, fillOther = 0, movedCadence = 0;
             std::string why, fillWhy;
         };
         // Checks the approach notes and the Fill notes of run r that sound
         // from fromQ on. With `without` (the same trial without the turn), it
         // counts those that lead from phrase 1 into phrase 2, and among them
         // those whose head there is another without the turn.
-        auto checkRun = [&](int t, const Config& c, Line& line, const Run& r, double fromQ, Line* without,
-                            Tally& y) {
+        auto checkRun = [&](int t, const Config& c, const Meter& me, const Entry& entered, Line& line, const Run& r,
+                            double fromQ, Line* without, Tally& y) {
             y.runErrs += r.hangs + r.orphanOffs + r.badGlides + r.polyMain;
 
             const int N = phraseBarsOf(c), unitBars = N / 4;
@@ -3550,14 +3596,17 @@ int main(int argc, char** argv)
             const bool bass = c.part == Part::Bass;
             const double stepQ = 4.0 / c.stepsPerBar;
             const std::uint16_t mask = scaleMask(c.scaleType, c.scaleRoot);
-            auto inLast = [&](int k) { return k * stepQ >= 3.0 - 1.0e-9; };
+            const bool other = me.num != 4 || me.den != 4;
+            auto inLast = [&](int k) { return k * stepQ >= me.lastBeatQ - 1.0e-9; };
             auto lifted = [&](int bar) {
                 const int j = floorMod(bar, N);
                 return ops >= 2 && ((isBUnit(c, bar) && j % unitBars == unitBars - 1) || j == N - 1);
             };
             auto cadenceBar = [&](int bar) { return c.form == Form::ABAB && floorMod(bar, N) % unitBars == unitBars - 1; };
 
-            // The line under the octave Lift.
+            // The line under the octave Lift. Bass's octave pulse is the last
+            // step of the last beat that sounds a motif step (a Fill note on
+            // an empty step after it is none).
             auto underLift = [&](Line& L) {
                 for (int b = 0; b < kBars; ++b)
                 {
@@ -3567,7 +3616,7 @@ int main(int argc, char** argv)
                     for (int k = 0; k < kMaxBarSteps; ++k)
                         if (bar[static_cast<size_t>(k)].note >= 0 && inLast(k))
                         {
-                            lastK = k;
+                            if (!bar[static_cast<size_t>(k)].fill) lastK = k;
                             if (!bass) bar[static_cast<size_t>(k)].note -= 12;
                         }
                     if (bass && lastK >= 0)
@@ -3608,18 +3657,36 @@ int main(int argc, char** argv)
                 return true;
             };
             auto crosses = [&](int b, const Target& h) { return floorDiv(b, N) == 1 && floorDiv(h.bar, N) == 2; };
+            // A head in a later bar whose cadence Bass's octave pulse moved
+            // off the last pulse onto it. Approach notes lead into one. A
+            // Fill's run reaches one only past a bar that sounds no head
+            // (lifted bars lie two apart or more), and Euclid spaces the
+            // pulses too evenly for that bar to be empty while the next
+            // holds two heads, but where a beat is cut short at the bar end;
+            // the draw reaches none, so only approach notes are counted.
+            auto movedCadenceIn = [&](int b, const Target& h) {
+                if (!isCadence(h) || h.bar <= b) return false;
+                for (int j = h.step + 1; j < kMaxBarSteps; ++j)
+                {
+                    const Note& n = line[static_cast<size_t>(h.bar)][static_cast<size_t>(j)];
+                    if (n.octave && n.motifHead) return true;
+                }
+                return false;
+            };
 
             for (int b = 0; b + 2 < kBars; ++b)
                 for (int k = 0; k < kMaxBarSteps; ++k)
                 {
                     const Note& a = line[static_cast<size_t>(b)][static_cast<size_t>(k)];
                     if (a.note < 0 || a.fill || !isApproachFn(a.fn)) continue;
-                    if (4.0 * b + k * stepQ < fromQ + 1.0e-6) continue;
+                    if (me.barLenQ * b + k * stepQ < fromQ + 1.0e-6) continue;
                     const Target h = nextHead(line, b, k);
                     if (h.note < 0) continue;
                     const int want = a.fn == Fn::ApproachUp ? scaleStep(h.note, -1, mask)
                                    : a.fn == Fn::ApproachDown ? scaleStep(h.note, 1, mask) : h.note - 1;
                     ++y.checked;
+                    y.checkedOther += other;
+                    y.movedCadence += movedCadenceIn(b, h);
                     y.cadenceTargets += isCadence(h);
                     y.dropSkips += h.drops;
                     y.octaveSkips += h.octaves;
@@ -3639,8 +3706,7 @@ int main(int argc, char** argv)
                 }
 
             // Fill: from the bar's last note before its last beat, else from
-            // the note the bar entered with (the last of the bar before, in
-            // the line under the Lift), into the next bar's first sounding
+            // the note the bar enters with, into the next bar's first sounding
             // head; the run sounds with the Lift (not Bass). That head is
             // looked for from bar b + 1 up to two bars on, so the last bar the
             // loop reaches is b + 3.
@@ -3648,32 +3714,32 @@ int main(int argc, char** argv)
             {
                 const Target h = nextHead(line, b + 1, -1);
                 if (h.note < 0) continue;
-                int from = -1, entered = -1;
+                int from = -1;
                 std::vector<std::pair<double, int>> fills;
                 for (const Played& p : r.events)
                 {
                     if (p.ev.strandId != -1 || p.ev.type != VoiceEvent::Type::NoteOn) continue;
-                    const double inBar = p.q - 4.0 * b;
+                    const double inBar = p.q - me.barLenQ * b;
                     const int note = p.ev.note - c.transpose;
-                    if (inBar >= -4.0 - 1.0e-3 && inBar < -1.0e-3)
-                        entered = note - (lifted(b - 1) && !bass && inBar >= -1.0 - 1.0e-3 ? 12 : 0);
-                    if (inBar < -1.0e-3 || inBar > 4.0 - 1.0e-3) continue;
+                    if (inBar < -1.0e-3 || inBar > me.barLenQ - 1.0e-3) continue;
                     if (std::abs(p.ev.velocity - kFillVel) < 1.0e-4)
                     {
                         if (p.q >= fromQ + 1.0e-6) fills.emplace_back(inBar, note);
                     }
-                    else if (inBar < 3.0 - 1.0e-3) from = note;
+                    else if (inBar < me.lastBeatQ - 1.0e-3) from = note;
                 }
-                if (from < 0) from = entered;
-                if (fills.empty() || from < 0) continue;
+                if (fills.empty()) continue;
+                if (from < 0) from = entered(b);
+                if (from < 0) continue;
                 const int dir = h.note >= from ? -1 : 1;
                 const bool cross = without && crosses(b, h);
                 const bool moved = cross && nextHead(*without, b + 1, -1).note != h.note;
                 for (const auto& [inBar, note] : fills)
                 {
-                    const int j = static_cast<int>(std::lround((inBar - 3.0) / 0.25));
+                    const int j = static_cast<int>(std::lround((inBar - me.lastBeatQ) / 0.25));
                     const int want = scaleSteps(h.note, dir * (4 - j), mask) + (bass ? 0 : 12);
                     ++y.fillChecked;
+                    y.fillOther += other;
                     y.fillCadence += isCadence(h);
                     y.fillCrossing += cross;
                     y.fillMoved += moved;
@@ -3692,18 +3758,34 @@ int main(int argc, char** argv)
         Tally one;
         for (int t = 0; t < 2000; ++t)
         {
-            const Config c = draw();
+            Config c = draw();
+            // A quarter of the trials draws the bars a moved cadence follows
+            // (see draw): Bass in ABAB under Lift without Drop, two motif
+            // bars, more than half the steps sounding.
+            if (t % 4 == 3)
+            {
+                c.part = Part::Bass;
+                c.form = Form::ABAB;
+                c.variation = U(0, 1) ? 0.4f : 0.6f;
+                c.len = 2;
+                c.pulses = U(c.stepsPerBar + 1, 2 * c.stepsPerBar);
+            }
+            const Meter me = drawMeter();
             const Motif m = generateMotif(static_cast<std::uint32_t>(32000 + t), 0, c);
             Line line;
             double unturned = -1.0;
-            const Run r = playLine(c, m, -1.0, 0.0f, line, unturned);
-            checkRun(t, c, line, r, -1.0e9, nullptr, one);
+            const Run r = playLine(c, me, m, -1.0, 0.0f, line, unturned);
+            checkRun(t, c, me, entryOf(c, c, m, me), line, r, -1.0e9, nullptr, one);
         }
         check(one.runErrs == 0, "lookahead as played: no hanging or orphan note, no bad glide (" + std::to_string(one.runErrs) + ")");
         check(one.cadenceTargets > 0 && one.dropSkips > 0 && one.octaveSkips > 0,
               "lookahead as played: approach notes into cadence heads (" + std::to_string(one.cadenceTargets)
                   + "), past dropped heads (" + std::to_string(one.dropSkips) + ") and past Bass's octave pulse ("
                   + std::to_string(one.octaveSkips) + ")");
+        check(one.checkedOther > 0 && one.fillOther > 0 && one.movedCadence > 0,
+              "lookahead as played: approach notes (" + std::to_string(one.checkedOther) + ") and Fill notes ("
+                  + std::to_string(one.fillOther) + ") in meters other than 4/4; approach notes into a later bar's "
+                  "cadence moved off Bass's octave pulse (" + std::to_string(one.movedCadence) + ")");
         check(one.bad == 0, "lookahead as played: an approach note leads into the head that sounds (" + std::to_string(one.bad)
                                 + " of " + std::to_string(one.checked) + " off)" + one.why);
         check(one.fillCadence > 0, "lookahead as played: Fill runs into cadence heads (" + std::to_string(one.fillCadence) + ")");
@@ -3715,24 +3797,30 @@ int main(int argc, char** argv)
         // gives the next phrase another motif; the line led into the motif the
         // next phrase had before the turn. Evolve turns by 0.5 in phrase 1,
         // half the time in its last bar, always inside a bar's first three
-        // beats (the bar re-renders, and the view read after the turn shows
-        // it). Oracle of 32, for what sounds from the block of the turn on;
-        // the same trial unturned counts the heads the turn moves.
+        // beats, before its last beat in other meters, at its start in a bar
+        // that is all last beat (the bar re-renders, and the view read after
+        // the turn shows it). Oracle of 32, for what sounds from the block of
+        // the turn on; the same trial unturned counts the heads the turn
+        // moves.
         Tally two;
         for (int t = 0; t < 1000; ++t)
         {
             const Config c = draw();
+            const Meter me = drawMeter();
             const Motif m = generateMotif(static_cast<std::uint32_t>(33000 + t), 0, c);
             const int N = phraseBarsOf(c);
             const int turnBar = U(0, 1) ? 2 * N - 1 : U(N, 2 * N - 1);
-            const double turnQ = 4.0 * turnBar + 0.25 * U(0, 11);
+            const int before = std::max(0, static_cast<int>(std::lround(me.lastBeatQ / 0.25)) - 1);
+            const double turnQ = me.barLenQ * turnBar + 0.25 * U(0, before);
             const float turnTo = c.evolve >= 0.5f ? 0.0f : 1.0f;
             Line line, without;
             double turnedAt = -1.0, unturned = -1.0;
-            const Run r = playLine(c, m, turnQ, turnTo, line, turnedAt);
-            const Run r0 = playLine(c, m, -1.0, 0.0f, without, unturned);
+            const Run r = playLine(c, me, m, turnQ, turnTo, line, turnedAt);
+            const Run r0 = playLine(c, me, m, -1.0, 0.0f, without, unturned);
             two.runErrs += r0.hangs + r0.orphanOffs + r0.badGlides + r0.polyMain;
-            checkRun(t, c, line, r, turnedAt, &without, two);
+            Config turned = c;
+            turned.evolve = turnTo;
+            checkRun(t, c, me, entryOf(c, turned, m, me), line, r, turnedAt, &without, two);
         }
         check(two.runErrs == 0, "Evolve turned: no hanging or orphan note, no bad glide (" + std::to_string(two.runErrs) + ")");
         check(two.crossing > 0 && two.moved > 0,
