@@ -2670,7 +2670,8 @@ int main(int argc, char** argv)
 
         // AABA, 8 bars: B units are bars 4-5. Bar 4 leads into bar 5, where
         // the Answer plays (the control: its approach follows bar 5's head);
-        // bar 5 into bars 6-7, both A.
+        // bar 5 into bars 6-7, both A: neither bar 6's head (head0) nor bar
+        // 7's (its chord; head1 is bar 5's own) changes it.
         {
             const Config c = cfgOf(Form::AABA, 8, chords);
             const auto into5a = answerNotes(c, answerOf(Root, Root), 4);
@@ -2679,18 +2680,21 @@ int main(int argc, char** argv)
                   "answer: AABA bar 4's approach follows bar 5's head (" + show(into5a) + " /" + show(into5b) + " )");
             const auto into6a = answerNotes(c, answerOf(Root, Root), 5);
             const auto into6b = answerNotes(c, answerOf(Fifth, Root), 5);
-            check(into6a.size() == 2 && into6a == into6b,
-                  "answer: AABA bar 5's approach follows no head of the A unit after it (" + show(into6a) + " /"
-                      + show(into6b) + " )");
+            const auto into6c = answerNotes(cfgOf(Form::AABA, 8, { 1, 6, 4, 2 }), answerOf(Root, Root), 5);
+            check(into6a.size() == 2 && into6a == into6b && into6a == into6c,
+                  "answer: AABA bar 5's approach follows no head of the A unit after it, bar 6's nor bar 7's ("
+                      + show(into6a) + " /" + show(into6b) + " /" + show(into6c) + " )");
         }
-        // AAAB, 4 bars: bar 3 is the B unit; the next two bars are A.
+        // AAAB, 4 bars: bar 3 is the B unit; the next two bars are A: neither
+        // bar 4's head (head0) nor bar 5's (its chord, ii for vi) changes it.
         {
             const Config c = cfgOf(Form::AAAB, 4, chords);
             const auto a = answerNotes(c, answerOf(Root, Root), 3);
             const auto b = answerNotes(c, answerOf(Fifth, Root), 3);
-            check(a.size() == 2 && a == b,
-                  "answer: AAAB bar 3's approach follows no head of the next phrase's A units (" + show(a) + " /"
-                      + show(b) + " )");
+            const auto d = answerNotes(cfgOf(Form::AAAB, 4, { 1, 2, 4, 5 }), answerOf(Root, Root), 3);
+            check(a.size() == 2 && a == b && a == d,
+                  "answer: AAAB bar 3's approach follows no head of the next phrase's A units, bar 4's nor bar 5's ("
+                      + show(a) + " /" + show(b) + " /" + show(d) + " )");
         }
         // ABAB, 4 bars: B units are bars 1 and 3. Bar 1 leads across bar 2
         // (A) to bar 3's head: bar 2's head leaves it as it is, bar 3's chord
