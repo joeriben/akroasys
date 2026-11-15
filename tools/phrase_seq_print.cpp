@@ -6598,6 +6598,123 @@ int main(int argc, char** argv)
                   + std::to_string(runPitchesShuffled) + " shuffled");
     }
 
+    std::printf("\n== 44. A ratchet's hits divide what is left of its slot, each sounding Gate of its own\n");
+    {
+        // Ratchet (§3.7 op 4): the step sounds 2 or 3 times, its hits
+        // dividing what is left of its slot after its (shuffled) onset, the
+        // slot cut at the bar end as a step's is; each hit sounds by the
+        // step-length rule (§3.6), Gate of its own sub-step. The render
+        // carries that as the note's own off (gateOffQ), the length a change
+        // lets a note sound when it takes the note's bounding onset away
+        // (scenario 24, which plays no variation). A repeat's own length was
+        // never checked: doubled, it passed every scenario. Oracle from what
+        // plays: the main line's repeats (their velocity) and the step onset
+        // before them, the hit; its slot from the step the hit lies in.
+        // Variation 4/5 (Re-pitch, Lift, Fill, Ratchet), every part and
+        // layer, 1/2 to 1/16, Gate 0.1 to 1, shuffle on in half, in half the
+        // trials a bar from 1/32 to 9/2.
+        std::mt19937 rng(44);
+        auto U = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        const float kTailVel = 85.0f / 127.0f * 0.9f, kFillVel = 72.0f / 127.0f;
+        static const int spbs[] = { 2, 4, 8, 16 };
+        static const int dens[] = { 2, 4, 8, 16, 32 };
+        int ratchets = 0, threes = 0, shuffled = 0, cut = 0, oddMeter = 0, offOn = 0, offLen = 0;
+        std::string why;
+        auto fail = [&](int& n, int t, const std::string& what) {
+            if (n++ < 4) why += " | t " + std::to_string(t) + ": " + what;
+        };
+        for (int t = 0; t < 20000; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.stepsPerBar = spbs[U(0, 3)];
+            c.pulses = U(1, c.stepsPerBar);
+            c.rotation = U(0, c.stepsPerBar - 1);
+            c.len = U(1, 2);
+            c.phraseBars = 8;
+            c.form = static_cast<Form>(U(0, 3));
+            c.variation = 0.8f;
+            c.layer = static_cast<Layer>(U(0, 3));
+            c.shuffle = U(0, 1) ? 0.0f : 0.25f * static_cast<float>(U(1, 3));
+            c.gate = 0.1f * static_cast<float>(U(1, 10));
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(44000 + t), 0, c), c);
+            RenderInput in;
+            in.cfg = &c; in.motif = &m; in.nextPhraseMotif = &m; in.answer = &m;
+            in.bar = 7;   // the last of phrase 0: varied in every form
+            in.barLenQ = U(0, 1) ? (U(0, 3) == 0 ? 3.0 : 4.0) : 4.0 * U(1, 9) / dens[U(0, 4)];
+            in.prevNote = U(36, 72); in.prevPrevNote = U(36, 72);
+            BarRender r;
+            renderBar(in, r);
+
+            // The main line's onsets in order, each with its events (Stab: a voice each).
+            std::map<long long, std::vector<const Event*>> byOn;
+            for (int e = 0; e < r.count; ++e)
+                if (r.events[static_cast<size_t>(e)].strand == -1)
+                    byOn[std::llround(r.events[static_cast<size_t>(e)].onQ * 1.0e9)].push_back(&r.events[static_cast<size_t>(e)]);
+            // Fill notes (their velocity) left out: a run plays on the free
+            // 16ths, inside a ratchet's slot too (scenario 43 C).
+            std::vector<std::vector<const Event*>> on;
+            for (auto& [q, evs] : byOn)
+                if (std::abs(evs.front()->vel - kFillVel) >= 1.0e-4f) on.push_back(evs);
+            auto isRepeat = [&](const std::vector<const Event*>& evs) {
+                return std::abs(evs.front()->vel - kTailVel) < 1.0e-4f;
+            };
+            int first = -1, repeats = 0;
+            for (int i = 0; i < static_cast<int>(on.size()); ++i)
+                if (isRepeat(on[static_cast<size_t>(i)])) { if (first < 0) first = i; ++repeats; }
+            if (first < 0) continue;
+            const std::string at = "bar " + std::to_string(in.barLenQ) + "q spb " + std::to_string(c.stepsPerBar) + " gate "
+                                 + std::to_string(c.gate) + " shuffle " + std::to_string(c.shuffle);
+            if (first == 0) { fail(offOn, t, "a repeat with no hit before it: " + at); continue; }
+            ++ratchets;
+            const int hits = repeats + 1;
+            threes += hits == 3;
+            oddMeter += in.barLenQ != 3.0 && in.barLenQ != 4.0;
+            const double hitOn = on[static_cast<size_t>(first - 1)].front()->onQ;
+            const double stepQ = 4.0 / c.stepsPerBar;
+            const double posQ = std::floor(hitOn / stepQ + 1.0e-9) * stepQ;
+            const double slotEnd = std::min(posQ + stepQ, in.barLenQ);
+            shuffled += hitOn > posQ + 1.0e-9;
+            cut += slotEnd < posQ + stepQ - 1.0e-9;
+            const double hitQ = (slotEnd - hitOn) / hits;
+            const double own = std::max(1.0e-3, std::clamp(static_cast<double>(c.gate), 0.1, 1.0) * hitQ);
+            if (hits > 3) fail(offOn, t, std::to_string(hits) + " hits: " + at);
+            for (int h = 0; h < hits; ++h)
+            {
+                const int i = first - 1 + h;
+                if (i >= static_cast<int>(on.size()) || (h > 0 && !isRepeat(on[static_cast<size_t>(i)])))
+                {
+                    fail(offOn, t, "the repeats are not the onsets after the hit: " + at);
+                    break;
+                }
+                for (const Event* e : on[static_cast<size_t>(i)])
+                {
+                    const double want = hitOn + h * hitQ;
+                    if (std::abs(e->onQ - want) > 1.0e-9)
+                        fail(offOn, t, "hit " + std::to_string(h) + " at " + std::to_string(e->onQ) + ", want "
+                                           + std::to_string(want) + ": " + at);
+                    if (std::abs(e->gateOffQ - e->onQ - own) > 1.0e-9 || e->offQ - e->onQ > own + 1.0e-9)
+                        fail(offLen, t, "hit " + std::to_string(h) + " at " + std::to_string(e->onQ) + " sounds "
+                                            + std::to_string(e->offQ - e->onQ) + ", own " + std::to_string(e->gateOffQ - e->onQ)
+                                            + ", want " + std::to_string(own) + ": " + at);
+                }
+            }
+            const int after = first - 1 + hits;
+            if (after < static_cast<int>(on.size()) && on[static_cast<size_t>(after)].front()->onQ < slotEnd - 1.0e-9)
+                fail(offOn, t, "an onset inside the ratchet's slot after its last hit: " + at);
+        }
+        check(ratchets > 5000 && threes > 1000 && shuffled > 500 && cut > 200 && oddMeter > 2000,
+              "coverage: " + std::to_string(ratchets) + " ratchets, " + std::to_string(threes) + " of 3 hits, "
+                  + std::to_string(shuffled) + " on a shuffled onset, " + std::to_string(cut) + " in a slot the bar end cuts, "
+                  + std::to_string(oddMeter) + " in a meter other than 3/4 and 4/4");
+        check(offOn == 0, "the hits divide what is left of the slot after the (shuffled) onset (" + std::to_string(offOn)
+                              + " off)" + why);
+        check(offLen == 0, "each hit sounds Gate of its own sub-step, and that is its own length (" + std::to_string(offLen)
+                               + " off)" + why);
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
