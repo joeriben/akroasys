@@ -3459,6 +3459,142 @@ int main(int argc, char** argv)
         check(ends > 5000 && endsLifted > 500 && endOff == 0,
               "Riff / Lead: a bar ends on its last two notes as played without Lift (" + std::to_string(endOff) + " of "
                   + std::to_string(ends) + " off, " + std::to_string(endsLifted) + " ending in a lifted beat)" + endWhy);
+
+        // The layers and the ratchet go up with the beat (§3.7, §3.10). The
+        // Octave layer doubles the line as it plays: a lifted note, and
+        // Stab's lifted chord, are doubled lifted. The Chord layer's chord on
+        // a head of the lifted beat goes up with it (not Bass's: its Lift is
+        // an Octave pulse, which is no head). A ratchet repeat sounds what
+        // its hit sounds, lifted once. Oracle: the varied bar at Variation
+        // 2/5 to 5/5 (Lift, then Fill, Ratchet, Drop) rendered with the
+        // layer and with Layer Off. The main line is the same in both; the
+        // Octave layer is the main line 12 down (Bass: up), onset by onset;
+        // a Chord-layer hit is the bar's voicing (voicingForBar), 12 up in
+        // the lifted beat; a repeat (its velocity) sounds the notes of the
+        // onset before it.
+        const float tailVel = 85.0f / 127.0f * 0.9f;
+        int mainOff = 0, octOff = 0, chordOff = 0, tailOff = 0, tails = 0;
+        int octLifted[2] = { 0, 0 }, chordLifted = 0, tailsLifted[2] = { 0, 0 };   // [0] Riff / Lead, [1] Stab
+        std::string layerWhy;
+        for (int t = 0; t < 3000; ++t)
+        {
+            Config c = base();
+            c.part = static_cast<Part>(U(0, 3));   // Bass, Riff, Lead, Stab
+            c.harm = U(0, 1) ? Harm::Chords : Harm::Pedal;
+            c.chordDegrees = { U(1, 7), U(1, 7), U(1, 7), U(1, 7) };
+            c.stepsPerBar = U(0, 1) ? 16 : 8;
+            c.len = U(1, 2); c.pulses = U(2, 12); c.rotation = U(0, 7);
+            c.phraseBars = 8;
+            c.form = static_cast<Form>(U(0, 3));
+            c.shuffle = U(0, 1) ? 0.0f : 0.3f;
+            c.variation = 0.2f * static_cast<float>(U(2, 5));
+            const Layer layer = c.part == Part::Stab || U(0, 1) ? Layer::Octave : Layer::Chord;
+            const bool stab = c.part == Part::Stab, bass = c.part == Part::Bass;
+            const Motif m = fitMotif(generateMotif(static_cast<std::uint32_t>(31700 + t), 0, c), c);
+            const int pn = U(45, 69), ppn = U(45, 69);
+            BarRender r[2];
+            Config v[2] = { c, c };
+            for (int i = 0; i < 2; ++i)
+            {
+                v[i].layer = i == 0 ? Layer::Off : layer;
+                RenderInput in;
+                in.cfg = &v[i]; in.motif = &m; in.nextPhraseMotif = &m;
+                in.bar = 7; in.barLenQ = 4.0;   // the last of phrase 0: varied in every form
+                in.prevNote = pn; in.prevPrevNote = ppn;
+                renderBar(in, r[i]);
+            }
+            // Notes per onset, sorted: the main line (strand −1) or the layer.
+            using Groups = std::map<long long, std::vector<int>>;
+            auto groups = [](const BarRender& b, bool layerStrands) {
+                Groups g;
+                for (int e = 0; e < b.count; ++e)
+                {
+                    const Event& ev = b.events[static_cast<size_t>(e)];
+                    if ((ev.strand >= 5) == layerStrands) g[std::llround(ev.onQ * 1.0e6)].push_back(ev.note);
+                }
+                for (auto& [q, n] : g) std::sort(n.begin(), n.end());
+                return g;
+            };
+            const Groups main = groups(r[1], false), lay = groups(r[1], true);
+            auto inLast = [](long long q) { return q >= 3000000 - 1; };
+            auto note = [&](const std::string& what, long long q, const std::vector<int>& want, const Groups& g) {
+                if (layerWhy.size() < 400)
+                {
+                    const auto it = g.find(q);
+                    layerWhy += " | t " + std::to_string(t) + " part " + std::to_string(static_cast<int>(c.part)) + " " + what
+                              + " at " + std::to_string(static_cast<double>(q) * 1.0e-6) + ": want";
+                    for (int n : want) layerWhy += " " + std::to_string(n);
+                    layerWhy += ", got";
+                    if (it != g.end())
+                        for (int n : it->second) layerWhy += " " + std::to_string(n);
+                }
+            };
+            if (main != groups(r[0], false)) ++mainOff;
+
+            if (layer == Layer::Octave)
+            {
+                Groups want;
+                for (const auto& [q, n] : main)
+                    for (int x : n) want[q].push_back(std::clamp(x + (bass ? 12 : -12), 0, 127));
+                for (auto& [q, n] : want) std::sort(n.begin(), n.end());
+                if (want != lay)
+                {
+                    ++octOff;
+                    for (const auto& [q, n] : want)
+                        if (lay.count(q) == 0 || lay.at(q) != n) { note("octave", q, n, lay); break; }
+                }
+                for (const auto& [q, n] : lay)
+                    if (inLast(q) && !bass) octLifted[stab] += static_cast<int>(n.size());
+            }
+            else
+            {
+                int vo[kMaxVoices];
+                const int nv = voicingForBar(v[1], 7, c.part == Part::Lead ? 48 : 60, vo);
+                for (const auto& [q, n] : lay)
+                {
+                    const int s = inLast(q) && !bass ? 12 : 0;
+                    std::vector<int> want;
+                    for (int i = 0; i < nv; ++i) want.push_back(std::clamp(vo[i] + s, 0, 127));
+                    std::sort(want.begin(), want.end());
+                    if (main.count(q) == 0 || n != want) { ++chordOff; note("chord", q, want, lay); }
+                    if (s != 0) chordLifted += static_cast<int>(n.size());
+                }
+            }
+
+            const std::vector<int>* before = nullptr;
+            for (const auto& [q, n] : main)
+            {
+                bool tail = false;
+                for (int e = 0; e < r[1].count; ++e)
+                {
+                    const Event& ev = r[1].events[static_cast<size_t>(e)];
+                    if (ev.strand < 5 && std::llround(ev.onQ * 1.0e6) == q && std::abs(ev.vel - tailVel) < 1.0e-4f) tail = true;
+                }
+                if (tail)
+                {
+                    ++tails;
+                    if (!bass) tailsLifted[stab] += inLast(q);
+                    if (before == nullptr || *before != n)
+                    {
+                        ++tailOff;
+                        note("repeat", q, before ? *before : std::vector<int> {}, main);
+                    }
+                }
+                before = &n;
+            }
+        }
+        check(mainOff == 0, "a layer leaves the main line as it is (" + std::to_string(mainOff) + " bars off)");
+        check(octLifted[0] > 300 && octLifted[1] > 300 && octOff == 0,
+              "Octave layer: the line doubled as it plays, lifted notes (" + std::to_string(octLifted[0])
+                  + ") and Stab's lifted chords (" + std::to_string(octLifted[1]) + " voices) included ("
+                  + std::to_string(octOff) + " bars off)" + layerWhy);
+        check(chordLifted > 300 && chordOff == 0,
+              "Chord layer: a hit is the bar's chord, an octave up in the lifted beat but for Bass (" + std::to_string(chordLifted)
+                  + " lifted voices, " + std::to_string(chordOff) + " hits off)" + layerWhy);
+        check(tailsLifted[0] > 300 && tailsLifted[1] > 300 && tailOff == 0,
+              "a ratchet repeat sounds what its hit sounds, lifted once (" + std::to_string(tails) + " repeats, "
+                  + std::to_string(tailsLifted[0]) + " Riff / Lead and " + std::to_string(tailsLifted[1]) + " Stab lifted; "
+                  + std::to_string(tailOff) + " off)" + layerWhy);
     }
 
     std::printf("\n== 32. The lookahead leads into the head as its bar plays it\n");
