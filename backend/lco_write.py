@@ -513,6 +513,7 @@ AVAILABLE IN SCOPE
    GETS below: they are the library's own parameter lines, kept in your body)
   giSine (sine table)  giCos (cosine table, for gbuzz/buzz)
   giCheb (Chebyshev transfer table)  giImp (short strike impulse table)
+  giWin  (sin^2 bell, zero at both ends: the window `hsboscil` wants)
   t5bow  the head's bowed string, a real bow on a waveguide string (Smith 1986):
          `astr t5bow kfreq, kspeed, kslope, kplace, kcut` — kspeed ~0.10 the bow speed,
          kslope 1.0 (leaning in) .. 2.5 (a light bow), kplace 0.10 .. 0.20 of the string
@@ -2025,6 +2026,11 @@ _HEAD = (
     # Short decaying harmonic burst: the mallet contact for struck models, which
     # take their strike argument as a TABLE NUMBER, not a scalar.
     "giImp  ftgen 4, 0, 256, 10, 1, 0.5, 0.3, 0.2, 0.1\n"
+    # A sin^2 bell (GEN19: 0.5 - 0.5 cos), zero at both ends: the spectral
+    # window `hsboscil` lays over its octave-spaced partials (`shepard`). 8192
+    # points because the opcode reads the table truncating — a coarse one steps
+    # audibly while the window moves.
+    "giWin  ftgen 5, 0, 8192, 19, 1, 0.5, 270, 0.5\n"
     + _BOW_UDO +
     # Starting values for the player's mix/octave knobs. The three `oscNvol`
     # channels ARE driven from the plugin — processBlock writes them every

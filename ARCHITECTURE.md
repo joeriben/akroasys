@@ -401,9 +401,10 @@ else is the host's:
   `ksmps = 64`, `nchnls = 16` (one channel per voice, matching
   `CsoundEngine::kMaxVoices`), `0dbfs = 1`.
 - ftables `giSine` (1, sine), `giCos` (2, cosine — `gbuzz`'s harmonics are
-  cosines), `giCheb` (3, a GEN13 Chebyshev transfer function) and `giImp`
+  cosines), `giCheb` (3, a GEN13 Chebyshev transfer function), `giImp`
   (4, a strike impulse for models that take their excitation as a table
-  number).
+  number) and `giWin` (5, a sin² bell — the spectral window `hsboscil`
+  lays over its octave-spaced partials).
 - one numeric `instr 1` with `ivoice = p4` and sixteen always-on score
   instances (`i 1 0 2000000000 <v>` for v = 1..16, ~63 years) — there is
   no note-off and no per-note score event; every struck idiom in the
