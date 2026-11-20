@@ -1,5 +1,5 @@
 {
- "lexicon_version": 35,
+ "lexicon_version": 36,
  "techniques": [
   {
    "key": "sine",
@@ -3468,6 +3468,91 @@
     "version_note": "Der Klang, den BJ abgenommen hat: Hash über `code`, `params` und `anchor_code`. Stimmt er nicht mehr, haelt lco_build_library.py den Eintrag zurueck und er verschwindet aus dem Panel, bis BJ die neue Fassung gehoert hat (tools/lco_approvals.py --restamp)."
    },
    "display_name": "transistor organ/string machine"
+  },
+  {
+   "key": "shepard",
+   "surface_forms": [
+    "shepard",
+    "shepard tone",
+    "shepard-ton",
+    "shepard scale",
+    "shepard-risset",
+    "risset glissando",
+    "endless glissando",
+    "endloses glissando",
+    "endless rise",
+    "barber pole"
+   ],
+   "priority": 10,
+   "why": "A Shepard tone: six sines an octave apart under one fixed bell-shaped window over log frequency, so the key sets the chroma and not the octave -- organ-like and hollow, a pitch you can name but not place; at follow 0 every octave of a key is the same sound, and a scale climbed long enough comes back to where it began. With rise off 0 it is Risset's endless glissando, the barber pole that rises or falls forever. Method: Shepard (JASA 36(12), 1964) and Risset's continuous version (JASA 46(1A), 1969) on Csound's hsboscil. height = where the window sits, follow = window fixed (Shepard scale) or riding the key, rise = speed of the endless glissando. No partial is the fundamental by design: the pitch probe reports period doubling, and a low key does not sound low at follow 0. NOT an organ: an octave-stack organ with a real fundamental is `organ` or `divider_organ`.",
+   "code": "kheight = 0    ; height[-1.5..2]: octaves the Shepard window sits above or below 440 Hz\nkfollow = 0    ; follow[0..1]: 0 the window stands still for every key, the Shepard scale; 1 it rides the key's register\nkrise   = 0    ; rise[-1..1]: endless Risset glissando, octaves per 4 s; 0 stands on the key\n; FOLLOWS kfreq: yes (chroma only; the octave is the window, set by height and follow)\n; Shepard tone (Shepard, JASA 36(12), 1964) and Risset's endless glissando (Risset, JASA 46(1A),\n; 1969; 7th ICA, 1971): six octave-spaced sines under one bell-shaped window over log\n; frequency. hsboscil (Neubaecker) is that construction: ktone places the octave grid, kbrite\n; the window, both in octaves above ibasfreq; giWin is a sin^2 bell across the six octaves.\n; C0 as the base: a constant, so the i-rate ibasfreq needs no reinit, and the key enters only\n; through ktone, whose whole octaves the opcode discards - the key sets the chroma.\nkshpos  = log(kfreq * koct1 / 16.351597831) / log(2)\n; The glissando integrates rise, so moving the knob mid-note bends the slope instead of\n; jumping the pitch. Whole octaves of it are dropped (hsboscil reads only frac(ktone)) so the\n; sum stays bounded however long a note is held.\nkshgl   init 0\nkshgl   = kshgl + krise * 0.25 * ksmps / sr\nif changed2(ktrig) == 1 then\n  kshgl = 0\nendif\nkshgl   = kshgl - floor(kshgl)\nkshtone = kshpos + kshgl\n; The default movement: the window wanders 0.6 octave at 0.05 Hz from the note's start, so\n; the colour travels while the chroma stays put. Shallower drift is not heard as movement\n; once the window sits low (measured: height -2 fails, -1.5 holds).\nkshdrf  = 0.6 * sin(6.283185307 * 0.05 * knote)\n; 4.75 octaves above C0 is 440 Hz; follow slides that reference to the key's own octave. The\n; resting centre is held between 3.25 and 7.25 octaves (155.6 Hz .. 2.49 kHz): the window is\n; zero three octaves either side of its centre, so at rest its edges stay inside 19.4 Hz ..\n; 19.9 kHz and no key at follow 1 carries the energy out of the audible range (unbounded, a\n; 12 kHz key at height 2 was 22 dB down inside 20 kHz). The drift is added after the bounds,\n; so the centre itself travels 0.6 octave past either of them.\nkshwin  = min(max(4.75 + kfollow * (kshpos - 4.75) + kheight, 3.25), 7.25) + kshdrf   ; window centre, FIXED in Hz at follow 0\n; A sin^2 bell read at six evenly spaced points has a constant sum and a constant power\n; wherever it sits, so the level is the same at every window position and every key; 0.8\n; puts the peak near 0.5.\nashep   hsboscil 0.8, kshtone, kshwin, 16.351597831, giSine, giWin, 6\nasig    = ashep * kvol1",
+   "params": {
+    "height": {
+     "range": [
+      -1.5,
+      2
+     ],
+     "default": 0,
+     "note": "where the bell window sits, in octaves around 440 Hz (follow 0) or the key (follow 1): dark to bright at one loudness. Its resting centre stays within 155.6 Hz..2.49 kHz; the slow drift moves it 0.6 octave around that.",
+     "anchors": {
+      "deep": {
+       "value": -1.5,
+       "gloss": "window resting at 156 Hz, drifting 103-235 Hz: dark and hollow, the low octaves lead"
+      },
+      "bright": {
+       "value": 1.5,
+       "gloss": "window near 1.2 kHz: glassy and thin, the high octaves lead"
+      }
+     }
+    },
+    "follow": {
+     "range": [
+      0,
+      1
+     ],
+     "default": 0,
+     "note": "0: the window stands for every key, so all octaves of a key sound alike (the Shepard scale; the octave switch does nothing); 1: it rides the key's register while its centre lies within 155.6 Hz..2.49 kHz.",
+     "anchors": {
+      "circular": {
+       "value": 0,
+       "gloss": "one octave for every key: pitch class without height, a scale that circles"
+      },
+      "registered": {
+       "value": 1,
+       "gloss": "the window rides the key from 156 Hz to 2.5 kHz: lower keys darker, higher brighter"
+      }
+     }
+    },
+    "rise": {
+     "range": [
+      -1,
+      1
+     ],
+     "default": 0,
+     "note": "Risset's endless glissando, +-1 = an octave per 4 s, restarting at each note-on. Off 0 the pitch leaves the key on purpose. Integrated, so turning it mid-note bends the slope, never jumps the pitch.",
+     "anchors": {
+      "falling": {
+       "value": -0.5,
+       "gloss": "sinks without end, an octave every 8 s, never arriving lower"
+      },
+      "still": {
+       "value": 0,
+       "gloss": "stands on the key"
+      },
+      "rising": {
+       "value": 0.5,
+       "gloss": "climbs without end, an octave every 8 s, never arriving higher"
+      }
+     }
+    }
+   },
+   "heard": {
+    "status": "offen",
+    "datum": "2026-11-20",
+    "hinweis": "Neu gebaut 2026-11-20, nur gemessen: Gate PASS bei 44100 und 176400 (rms -10,97 dB an 27 Ecken x 6 Registern); bei follow 1 im Band 20 Hz-20 kHz -10,97 dB auf jeder Taste von 20 Hz bis 12 kHz (Fenstermitte auf 155,6 Hz..2,49 kHz begrenzt); Teiltöne exakte Oktavvielfache der Taste; Glissando +-0,25 Okt/s ohne Klick; Oktaven bei follow 0 spektral identisch.",
+    "wie": "ungehört; am Instrument zu prüfen"
+   },
+   "display_name": "shepard tone"
   }
  ],
  "adjectives": [
