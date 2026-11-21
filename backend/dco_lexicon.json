@@ -1,5 +1,5 @@
 {
- "lexicon_version": 44,
+ "lexicon_version": 45,
  "techniques": [
   {
    "key": "sine",
@@ -2412,14 +2412,10 @@
     "bass",
     "bassline",
     "bass synth",
-    "acid",
-    "acid bass",
     "synthbass",
     "bass lead",
-    "ladder bass",
     "analogue bass",
-    "analog bass",
-    "acid line"
+    "analog bass"
    ],
    "template": {
     "keyframes": [
@@ -2561,12 +2557,13 @@
     "motion_rate_hz": 0.25
    },
    "priority": 10,
-   "why": "synth bass -- ladder bass / acid bassline: a dark saw-family spectrum, harmonic count ceilinged near 24 for a rolled-off low end",
-   "code": "ivph0   = frac(ivoice * 0.6180339887)   ; per-voice phase\nkvdr0   poscil 0.0007, 0.043 + 0.0037 * ivoice, giSine, ivph0\nabs0    vco2 0.6, (kfreq * koct1) * (1 + kvdr0), 0 ; saw source\nkcut0   limit (kfreq * koct1) * 24, 100, 15000 ; 24-harmonic ceiling\nadk0    butterlp abs0, kcut0\nasb0    oscili 0.30, (kfreq * koct1) * 0.5    ; sub-octave weight\nasig    = adk0 * 0.72 + asb0",
+   "why": "synth bass: a dark sawtooth with a sine one octave below it, the plain starting point of a bass patch. One band-limited saw through Csound's 2-pole Butterworth lowpass (butterlp, no resonance), corner near the 24th harmonic; the corner travels half an octave up and down once every 5 s, restarting with each note, so a held note's colour breathes. No ladder and no resonance: there is no squelch or self-oscillation in this body, so for an acid line pair it with the synth's own filter, envelope and glide. Limit: from about 880 Hz up the corner sits at the 15 kHz cap and the colour stands still. For a pure sub use sub_sine, for a wide detuned saw supersaw, for one bare waveform with shape controls analog_osc.",
+   "code": "; FOLLOWS kfreq: yes\n; Subtractive: one band-limited saw (vco2) through Csound's 2-pole Butterworth lowpass (butterlp,\n; bilinear, no resonance) plus a sine one octave down. No ladder and no resonance: acid sweeps\n; come from the synth's own filter, envelope and glide, not from this body.\nivph0   = frac(ivoice * 0.6180339887)   ; per-voice phase, golden-ratio spaced: 16 voices never drift together\nkvdr0   = 0.0007 * sin(6.283185307 * (0.043 + 0.0037 * ivoice) * knote + 6.283185307 * ivph0)\n; ^ +-1.2 cent pitch drift keyed to knote (seconds since the note), so every note starts at the same\n;   point of it. A free-running LFO would start each note somewhere else.\nabs0    vco2 0.6, (kfreq * koct1) * (1 + kvdr0), 0 ; saw source\nkmv0    = 2 ^ (0.5 * sin(6.283185307 * 0.2 * knote))   ; corner travels +-0.5 oct at 0.2 Hz, keyed to the note\nkcut0   limit (kfreq * koct1) * 24 * kmv0, 100, 15000\n; ^ corner near the 24th harmonic. The 15 kHz cap pins it from about 880 Hz up: there the colour stands.\nalc0    tone a(log(kcut0 / 100)), 50\nacut0   = 100 * exp(alc0)\n; ^ the corner reaches butterlp smoothed, at audio rate, in log frequency (one pole, 50 Hz). butterlp is\n;   direct form II (Opcodes/butter.c, a-rate path lobuta in afilters.c): a STEP in its corner rescales\n;   the stored state at once, and a corner keyed to the note steps on every retrigger and pitch jump\n;   (measured: a click, up to the limiter on 110 -> 880 Hz). Smoothed, the coefficients move a little\n;   each sample. The one pole starts at 100 Hz and never leaves [100, 15000] Hz.\nadk0    butterlp abs0, acut0\nasb0    oscili 0.30, (kfreq * koct1) * 0.5    ; sub-octave weight; pitch trackers read this body an octave down\nasig    = (adk0 * 0.72 + asb0) * kvol1",
    "heard": {
     "status": "offen",
-    "hinweis": "kein Beleg für eine Abnahme durch BJ gefunden. NICHT als abgenommen behandeln und nicht aus Herkunft, Commit-Text oder „ear-approved“ in docs/ erschließen — genau das war der Fehler (2026-07-30).",
-    "massstab": "Abgenommen ist ein Instrument erst über eine HTML-Abhörseite, auf der die PARAMETERKOMBINATION sichtbar und von BJ wählbar ist — nicht über einen Ordner mit vorgerenderten Dateien. Generator: tools/lco_param_page.py (Kombination frei wählbar, jede Achse an ihren deklarierten Ankern). Daneben: tools/lco_listening_test.py (blinde Wort-Klang-Zuordnung, docs/LCO_TEST_POLICY.md) und tools/lco_abx_test.py."
+    "datum": "2026-11-20",
+    "hinweis": "Körper am 2026-11-20 neu gebaut (Filterecke wandert mit der Note, keine Leiter, Pegel kvol1 am Ende). Der frühere Vermerk „kein Beleg für eine Abnahme durch BJ gefunden“ betraf den Vorgänger; dieser Körper ist ungehört.",
+    "wie": "ungehört; am Instrument zu prüfen"
    }
   },
   {
