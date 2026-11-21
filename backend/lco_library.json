@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 48
+  "lexicon_version": 49
  },
  "instruments": [
   {
@@ -1481,6 +1481,76 @@
       "triangle": {
        "value": 1.0,
        "gloss": "triangle window: even harmonics off the peak drop out, by amounts moving with the drift"
+      }
+     }
+    }
+   }
+  },
+  {
+   "key": "gendy",
+   "why": "A living wave that never repeats: one cycle of breakpoints whose heights take a small random step at every repetition, so the overtones drift on and on while the pitch stays the key's; grainy at the rough end. Method: Xenakis' dynamic stochastic synthesis (Formalized Music, rev. 1992, ch. XIII-XIV; Luque, LMJ 19, 2009) on Csound's gendy, Cauchy walks between mirror barriers. rough = the step (drift speed, grain), points = breakpoints per cycle (few round, many bright), wander = the period walks too. Which partial leads is the walk's: in over half of all seconds 2f or 3f is stronger than f, in a tenth by over 10 dB (an octave or twelfth up); fewer points steady it. Each voice keeps ONE continuing walk; a note picks it up where the last left it. NOT noise, NOT a granular cloud (it stays a harmonic tone); NOT a fixed harmonic stack (name additive) or a detuned analog wave (name analog_osc).",
+   "code": "; Xenakis' dynamic stochastic synthesis (Formalized Music, ch. XIII-XIV; Luque, LMJ 19, 2009):\n; a cycle of linearly joined breakpoints whose amplitudes take a Cauchy random walk between\n; mirror barriers at every repetition. Csound's gendy (after N. Collins' Gendy1).\n; FOLLOWS kfreq: yes\n; The period is the key's; which partial is strongest is the walk's: at the defaults 2f or\n; 3f outweighs f in over half of all seconds, by more than 10 dB in about a tenth of them.\nkrough  = 0.05 ; rough[0.01..0.15]: amplitude step of every breakpoint per cycle, drifting to grainy\nkpts    = 10   ; points[6..24]: breakpoints per cycle, few round, many bright\nkwand   = 0    ; wander[0..0.05]: segment-frequency spread, the period itself walks\nkf0     = kfreq * koct1\n; The walk takes one step per cycle, so its speed in seconds grows with pitch; sqrt(220/f)\n; holds the timbral drift per second roughly even across the keyboard, capped at the\n; range's own maximum so the bass does not turn to noise.\nksc0    = min(krough * sqrt(220 / kf0), 0.15)\n; gendy advances a segment's phase by f*points/sr per sample but takes back at most one\n; segment per sample (Opcodes/gendy.c), so above f*points = sr the phase climbs without\n; bound and the line extrapolates. The count is held to f*points <= 22050 Hz, FIXED in Hz\n; and not in sr, so the top keys carry the same breakpoints at 44.1 and at 176.4 kHz;\n; gendy itself truncates the count to a whole number.\nkpn     = min(kpts, 22050 / (kf0 * (1 + kwand)))\n; gendy starts its stream at the NEXT state of Csound's global generator, so walks begun one\n; after another (the 16 voices at load) are the same increments shifted by a breakpoint: two\n; apart they correlate 0.94..0.999. A random seed per voice puts each walk at an unrelated\n; place of that generator's cycle.\niseed   = 1 + int(random:i(0, 2147483640))\n        seed iseed\n; ONE WALK PER VOICE, never restarted: a note picks the wave up where the voice's last note\n; left it. (Restarting the walk at the note-on starts every note from a fresh draw whose rms\n; balance2 has not met yet: 20 ms levels 3.6 dB over and 5.4 dB under the sustained one.)\n; Cauchy (1) for amplitude and duration walks; equal frequency barriers at wander 0 make the\n; period exactly 1/kf0, so the pitch is the key's and only the overtones move.\nagd0    gendy 0.5, 1, 1, 0.5, 0.5, kf0 * (1 - kwand), kf0 * (1 + kwand), ksc0, 0.3, 24, kpn\n; The walk carries the breakpoints' mean as a wandering DC offset.\nagd0    atone agd0, 5\n; The rms of a random walk wanders by several dB; balance2 holds it at a 0.3 sine's.\n; Its default half-power point is kept: a slower one lets more of that wander through\n; (wildest corner, 100 ms windows: 3.0 dB p-p at 2 Hz against 1.1 at 10), a faster one\n; doubles the gain ripple at 2f in the bass (55 Hz: 4.3 dB inside a period against 2.2).\naref0   poscil 0.3, kf0\nasig    balance2 agd0, aref0\nasig    = asig * kvol1",
+   "name": "stochastic synthesis",
+   "params": {
+    "rough": {
+     "range": [
+      0.01,
+      0.15
+     ],
+     "default": 0.05,
+     "note": "Each breakpoint's step per cycle, scaled by sqrt(220/f) so the drift per second is even across the keys. Change per cycle at 220 Hz: 1.2 % at 0.01, 3.6 % at 0.05, 9.5 % at 0.15. At 55 Hz no change above 0.075.",
+     "anchors": {
+      "liquid": {
+       "value": 0.02,
+       "gloss": "1.6 % change per cycle, colour sways 1.1x in 3 s: a slow, smooth glide"
+      },
+      "restless": {
+       "value": 0.05,
+       "gloss": "3.6 % per cycle, colour swings 1.3x in 3 s: a tone plainly alive"
+      },
+      "grainy": {
+       "value": 0.12,
+       "gloss": "7 % per cycle, colour swings 1.5x in 3 s: a rough, grainy surface"
+      }
+     }
+    },
+    "points": {
+     "range": [
+      6,
+      24
+     ],
+     "default": 10,
+     "note": "Breakpoints per cycle, whole numbers (10.7 plays as 10); a step changes the wave at once, without a click. Centroid at 220 Hz 1.8 f at 6, 2.5 f at 10, 5.2 f at 24. Fewer are used where f x points would pass 22050 Hz.",
+     "anchors": {
+      "round": {
+       "value": 6,
+       "gloss": "centroid 1.8 f, f leads over half the time: the roundest, most pitched"
+      },
+      "buzzy": {
+       "value": 24,
+       "gloss": "centroid 5.2 f, energy spread up to h4 and beyond: bright and buzzy"
+      }
+     }
+    },
+    "wander": {
+     "range": [
+      0.0,
+      0.05
+     ],
+     "default": 0.0,
+     "note": "Spread of the segment frequencies around the key, so the period walks as well. At 0 the period is exactly the key's. At 0.05 the pitch strays 8 cents on average, up to 15 (37 at the wildest corner).",
+     "anchors": {
+      "pitched": {
+       "value": 0.0,
+       "gloss": "the period is exactly the key's: only the overtones move"
+      },
+      "drifting": {
+       "value": 0.02,
+       "gloss": "pitch strays about 1.5 cents, up to 4: a faint life in the pitch"
+      },
+      "unstable": {
+       "value": 0.05,
+       "gloss": "pitch strays about 8 cents, up to 15: an unsteady, wobbly tone"
       }
      }
     }
