@@ -1,5 +1,5 @@
 {
- "lexicon_version": 55,
+ "lexicon_version": 56,
  "techniques": [
   {
    "key": "sine",
@@ -1148,6 +1148,71 @@
     "wie": "ungehört; am Instrument zu prüfen"
    },
    "display_name": "analog snare"
+  },
+  {
+   "key": "ks_drum",
+   "surface_forms": [
+    "karplus-strong drum",
+    "karplus strong drum",
+    "karplus drum",
+    "ks drum"
+   ],
+   "priority": 10,
+   "why": "a noise burst in a Karplus-Strong loop whose samples flip sign at random (the drum variant of Karplus & Strong 1983, Csound's pluck method 4): struck and left to ring, between a pitched rattle and a pitchless snap. NOT a membrane: struck_drum and drum_head are the modal drums; this is the 1980s digital one, grainy and string-like where it rings long. Every strike is new noise, so no two are alike. rough = how often a sign flips: little is a rattling pitched ring, much is noise; it bites most when length is short. length = the decay stretch: a click to a long buzzing ring, and low keys ring longer. The key and both knobs are read at the strike; a glide or a knob turned during the ring is not followed.",
+   "code": "krough  = 0.5    ; rough [0.25..0.75]: how often a pass flips a sample's sign: from a pitched rattle to pitchless noise; strongest when length is short\nklength = 0.25   ; length [0..1]: how long the strike rings and how much pitch it keeps, a click to a long buzzing ring; low keys ring longer\n; DECAY: SELF\n; FOLLOWS kfreq: yes\n; the key and both knobs are read at the strike; a glide or a knob turned during the ring\n; is not followed\n; the strike's noise: one table, made once for all voices, refilled at each strike and\n; copied by pluck at once (plukset reads it with the integer stride flen / npts from index\n; 0, so it holds the longest loop, 20 Hz)\ninmax   = int(sr / 20)\nitab    ftgenonce 0, 0, -inmax, -2, 0\n        if changed2(ktrig) == 1 then\n          reinit KSDRUM\n        endif\nKSDRUM:\n; i() of a knob or of kfreq reads 0 at the first init pass; pluck refuses a stretch below\n; 1 (InitError: the voice is dead), so every i-value is limited, not trusted. That first\n; pass is the instance starting, not a strike, and i(kfreq) is 0 only there: it stays\n; silent, and its 20 Hz floor allocates pluck's longest loop off the audio thread\n; (pluck reallocates only for a loop longer than any before it).\n; rough stops at 0.75: pluck stores it as int16(32768 * r), and r = 1 wraps to 0\nifq     limit i(kfreq) * i(koct1), 20, 12000\n; level: plukset fills the loop (sr / key samples) with uniform noise, a flat spectrum up to\n; sr / 2, so the share of the strike below a fixed band edge falls as 1 / sr: sqrt(sr / 44100)\n; and the fixed 16 kHz low-pass below bring the strike's rms at 176400 within 0.3-2.5 dB of\n; 44100 (pluck's interpolated read loses about 1 dB at 44100 wherever its phase increment is\n; not 256); the peak stays 1.7-3.5 dB higher at 176400, where more independent samples fall\n; into one period.\n; 1.03 is a LEVEL CHOICE, not a correction: the 200-strike median at the defaults, 220 Hz,\n; is asig 1.54 at 176400 (p95 1.73, max 1.92); the engine leaves a trig-struck body untrimmed\niamp    = (i(kfreq) > 0 ? 1.03 * sqrt(sr / 44100) : 0)\nirough  limit i(krough), 0.25, 0.75\n; the knob is a log position on pluck's stretch factor S, 1.5 .. 40 (T20 ~ 9 * S / key)\nistr    = 1.5 * (40 / 1.5) ^ limit(i(klength), 0, 1)\n; ifn 0 would fill the loop from rand16, the instance's one 16-bit generator: its cycle is\n; 65536 values, so every buffer is a window of that one cycle and on low keys a repeated\n; strike gets an earlier strike's buffer back, rotated. The loop is filled here from random\n; (the 31-bit generator, period 2^32) with the same uniform -1..1 values pluck would draw\ninpts   = (int(sr / ifq) < 64 ? 64 : int(sr / ifq))\nistep   = int(inmax / inpts)\nifill   = 0\nuntil ifill >= inpts do\n        tablew random:i(-1, 1), ifill * istep, itab\nifill   += 1\nod\n; pitch: plukset's tuned conversion assumes method 1's half-sample delay per pass and\n; truncates the phase increment to an integer (ugens4.c). Method 4 averages a sample\n; with probability p = int16(32768/S)/32768 and negates it with probability r, so the\n; mean delay per pass is p(1-2r)/2 / (1-2pr); kcps is the input that lands the period\n; on sr/ifq, the increment rounded instead of truncated\nip      = int(32768 / istr) / 32768\n; (at S 1.5 with r 0.75 the mean gain 1-2pr is 0 and there is no pitch to land: limited)\nid      limit 0.5 * ip * (1 - 2 * irough) / (1 - 2 * ip * irough + 1e-9), -0.5, 0.5\niinc    = round(256 * ifq * (inpts + id) / sr)\nicps    = (iinc + 0.5) / ((inpts * 256 + 128) / sr)\napl     pluck iamp, icps, ifq, itab, 4, irough, istr\n        rireturn\n; the strike is full-band noise: a fixed low-pass keeps what lies above 16 kHz (most of it at\n; 176400) out of the body, so both rates carry the same band\nalp     butlp apl, 16000\nasig    atone alp, 5\nasig    = asig * kvol1",
+   "params": {
+    "rough": {
+     "range": [
+      0.25,
+      0.75
+     ],
+     "default": 0.5,
+     "note": "the sign-flip probability (pluck's roughness). Strongest when length is short; at long length the ring keeps its pitch. Stops at 0.75: 1 wraps to 0 inside pluck.",
+     "anchors": {
+      "rattle": {
+       "value": 0.25,
+       "gloss": "few flips: a pitched rattle"
+      },
+      "half": {
+       "value": 0.5,
+       "gloss": "half the flips: the manual's snare setting"
+      },
+      "noise": {
+       "value": 0.75,
+       "gloss": "many flips: little pitch left"
+      }
+     }
+    },
+    "length": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.25,
+     "note": "pluck's stretch factor 1.5 to 40 on a log scale: how long the strike rings. T20 at 220 Hz 0.05 to 1.6 s; low keys ring longer.",
+     "anchors": {
+      "click": {
+       "value": 0.0,
+       "gloss": "a dry click, gone in 50 ms"
+      },
+      "drum": {
+       "value": 0.25,
+       "gloss": "a short drum, about 0.12 s at 220 Hz"
+      },
+      "long ring": {
+       "value": 1.0,
+       "gloss": "a long buzzing ring of over a second"
+      }
+     }
+    }
+   },
+   "heard": {
+    "status": "offen",
+    "datum": "2026-11-21",
+    "hinweis": "Neuer Körper, nur gemessen, nicht gehört. Tonhöhe und beide Regler werden beim Anschlag gelesen; ein Glide oder ein im Ausklang gedrehter Regler folgt nicht. Der Anschlagspegel ist eine Rauschziehung: über 25 Ziehungen hält er die Pegelregeln bei 44100 in 0, bei 176400 (Plugin-Rate) in 3 (Ecken Median 1,63/0,67 dB, Register-Kippung Median 3,55/2,06 dB); 'moves' scheitert bei Länge 1, 220 Hz in 12/19 Ziehungen. Der Effektivwert der ersten Periode liegt bei 176400 um 0,3-2,5 dB über 44100, der Spitzenwert um 1,7-3,5 dB. Die Abklingzeit unterscheidet sich zwischen den Raten um bis zu 12 % (vor den Korrekturen gemessen).",
+    "wie": "ungehört; am Instrument zu prüfen"
+   },
+   "display_name": "karplus-strong drum"
   },
   {
    "key": "cowbell",
