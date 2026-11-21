@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 51
+  "lexicon_version": 52
  },
  "instruments": [
   {
@@ -981,9 +981,97 @@
   },
   {
    "key": "struck_bar",
-   "why": "tuned struck metal bar -- glockenspiel / celesta: ideal free-free bar partials (h 2.76/5.4/8.93/13.34), brighter and thinner than a big bell, rung by a continuous noise exciter through a bank of high-Q resonators. A plucked metal tongue (kalimba, mbira, music box) is plucked_tine",
+   "why": "tuned metal bar as a STANDING tone: ideal free-free bar partials (h 2.76/5.4/8.93/13.34), brighter and thinner than a big bell, rung by a continuous noise exciter through a bank of high-Q resonators, so it holds for as long as the key is held. A bar that is struck once and rings down (glockenspiel, celesta, marimba, xylophone) is mallet_bar; a plucked metal tongue (kalimba, mbira, music box) is plucked_tine",
    "code": "aexq0   rand 0.06, 0.5, 1          ; continuous exciter -> the metal is driven, a held note stands (31-bit: no 1.365 s loop)\nk0qf0   limit (kfreq * koct1) * 1.0000, 20, 15000\nk0qg0   = ((kfreq * koct1) * 1.0000 < 15000 ? 0.850 : 0)\na0q0   mode aexq0, k0qf0, 900      ; mode 1 @ x1.00, Q 900\nk0qf1   limit (kfreq * koct1) * 2.7600, 20, 15000\nk0qg1   = ((kfreq * koct1) * 2.7600 < 15000 ? 0.700 : 0)\na0q1   mode aexq0, k0qf1, 1025      ; mode 2 @ x2.76, Q 1025\nk0qf2   limit (kfreq * koct1) * 5.4000, 20, 15000\nk0qg2   = ((kfreq * koct1) * 5.4000 < 15000 ? 0.500 : 0)\na0q2   mode aexq0, k0qf2, 1150      ; mode 3 @ x5.40, Q 1150\nk0qf3   limit (kfreq * koct1) * 8.9300, 20, 15000\nk0qg3   = ((kfreq * koct1) * 8.9300 < 15000 ? 0.320 : 0)\na0q3   mode aexq0, k0qf3, 1275      ; mode 4 @ x8.93, Q 1275\nk0qf4   limit (kfreq * koct1) * 13.3400, 20, 15000\nk0qg4   = ((kfreq * koct1) * 13.3400 < 15000 ? 0.180 : 0)\na0q4   mode aexq0, k0qf4, 1400      ; mode 5 @ x13.34, Q 1400\nasig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2 + a0q3 * k0qg3 + a0q4 * k0qg4) * 0.150 * kvol1",
-   "name": "glockenspiel"
+   "name": "struck_bar"
+  },
+  {
+   "key": "mallet_bar",
+   "why": "A struck free-free bar, wood or metal, one strike per note left to ring: a marimba, xylophone or glockenspiel bar, no resonator tube, no motor. Modal synthesis: five two-pole resonators (`zdf_2pole`) at measured tuned-bar ratios (Gough, Springer Handbook of Acoustics ch. 15), weighted by the free-free mode shapes at the strike point, damped by Chaigne & Doutaut's law, struck through a one-pole mallet. tuning = how deeply the bar is undercut, material = how long it rings, mallet = hardness, spot = where it is hit. NOT a vibraphone; a plucked metal tongue is plucked_tine, a standing noise-rung bar is struck_bar. Limits: the ring ends when the synth's envelope closes (hold the key or lengthen the release); a re-strike restarts the ring, a bend or legato retunes it; aluminium rings up to 41 s; strikes come out up to 3 dB quieter at the attack (lowest keys, soft mallet, glockenspiel tuning).",
+   "code": "; DECAY: SELF\n; LOUDNESS: tuning\n; LOUDNESS: material\n; FOLLOWS kfreq: yes\n; mallet bar: modal synthesis of a free-free bar, struck once per note.\n; Ratios from measured tuned bars (Gough, Springer Handbook of Acoustics ch. 15, Figs.\n; 15.120/15.121 after Fletcher & Rossing): glockenspiel 1:2.71:5.15:8.43:12.21, xylophone\n; 1:3:6, marimba 1:3.9:9.23. The log interpolation between them is this entry's own; modes\n; 4 and 5 keep the glockenspiel ratios and fade out by tuning .5 (no source gives them for\n; an undercut bar).\n; Strike weights: Euler-Bernoulli free-free shapes |phi_n(x)|/|phi_n(0)|, the uniform\n; bar's at every tuning (own). Damping law alpha = gB/2 + 2 pi^2 (eta/E) f^2 (Chaigne &\n; Doutaut, as given by McAdams, Chaigne & Roussarie, JASA 115(3), 2004): rosewood eta/E\n; 235 ns (Doutaut & Chaigne 1994, Table I), gB 8/s (McAdams' synthesis setting);\n; aluminium gB .33/s, eta/E 8.03 ns, INFERRED from F&R's vibraphone bar without resonator\n; (A3 40 s, A5 24 s). Q is fixed at the strike. No resonator, no motor.\n; Mallet: a one-pole stand-in for the Hertz contact, its corner a multiple of the key,\n; capped at 8 kHz. Observed as the bar's VELOCITY: every mode starts at its crest.\n; THE RESONATOR is `zdf_2pole` in bandpass (Csound Opcodes/wpfilters.c, g = tan(pi f/sr)),\n; not `mode`: a ringing `mode` that is retuned without a strike (bend, legato, bind)\n; bursts, and under a fast pitch modulation grows without bound; this filter keeps its\n; state in signal scale. Two terms follow from its recurrence; neither is fitted. Its\n; impulse answer is a cosine of amplitude 2g/(1+g^2) = sin(2 pi f/sr), so the input\n; factor 0.5/sin(2 pi f/sr) starts every mode at amplitude 1/2 at either rate. Its decay\n; rate is (sr/(2Q)) sin(2 pi f/sr), so Q = sr sin(2 pi f/sr) / (gB + 4 pi^2 (eta/E) f^2)\n; realises the damping law at either rate.\n; The contact delays mode n by atan(f_n/fc) and its own transient keeps the sum under the\n; L1 bound inrm normalises to; by how much depends on where the weight sits (up to 3 dB\n; under the default strike: lowest keys, soft mallet, glockenspiel tuning). That spread\n; of the strike peak is the model's and is not corrected.\n; Every knob is read at the strike. A re-strike restarts the ring; a bend or a legato\n; key change retunes it.\n; Level: G = 3.30 in inrm is a level choice, not part of the model.\nkc      = kfreq * koct1\nktun    = 0.5    ; tuning[0.0..1.0]: how deeply the bar is undercut, glockenspiel to xylophone to marimba\nkmat    = 0.0    ; material[0.0..1.0]: rosewood to aluminium, how long the bar rings\nkmal    = 4.0    ; mallet[1.0..16.0]: mallet hardness, yarn to hard plastic, as the contact corner over the played pitch\nkspt    = 0.333  ; spot[0.30..0.50]: where the bar is struck, from near the end towards the middle\nkup     timeinsts\n        if changed2(ktrig) == 1 then\n          reinit HIT\n        endif\nHIT:\nitn     limit i(ktun), 0, 1\nimt     limit i(kmat), 0, 1\nim      limit i(kmal), 1, 16\nix      limit i(kspt), 0.30, 0.50\nikc     = i(kc)\nikc     = (ikc < 20 ? 220 : ikc)\nifc     limit ikc * im, 20, 8000\niamp    = (i(kup) > 0 ? 1 : 0)\nacon    mpulse iamp, 0\naex     tone acon, ifc\n; damping law, log between rosewood (0) and aluminium (1)\nigb     = 8 * (0.33 / 8) ^ imt\nive     = 235e-9 * (8.03e-9 / 235e-9) ^ imt\n; tuning: glockenspiel (0) -> xylophone (.5) -> marimba (1), log per mode\nilo     = (itn < 0.5 ? 2 * itn : 1)\nihi     = (itn > 0.5 ? 2 * itn - 1 : 0)\nifd     = (itn < 0.5 ? 1 - 2 * itn : 0)\nir1     = 1\nir2     = 2.71 * (3.00 / 2.71) ^ ilo * (3.90 / 3.00) ^ ihi\nir3     = 5.15 * (6.00 / 5.15) ^ ilo * (9.23 / 6.00) ^ ihi\nir4     = 8.43\nir5     = 12.21\n; strike weights, free-free shapes (beta L, sigma) at the spot\nib      = 4.73004 * ix\niw1     = abs(cosh(ib) + cos(ib) - 0.98250 * (sinh(ib) + sin(ib))) / 2\nib      = 7.85320 * ix\niw2     = abs(cosh(ib) + cos(ib) - 1.00078 * (sinh(ib) + sin(ib))) / 2\nib      = 10.99561 * ix\niw3     = abs(cosh(ib) + cos(ib) - 0.99997 * (sinh(ib) + sin(ib))) / 2\nib      = 14.13717 * ix\niw4     = ifd * abs(cosh(ib) + cos(ib) - (sinh(ib) + sin(ib))) / 2\nib      = 17.27876 * ix\niw5     = ifd * abs(cosh(ib) + cos(ib) - (sinh(ib) + sin(ib))) / 2\n; per mode: frequency at the strike, Q from the damping law, gate, contact loss\nif1     = ikc * ir1\niQ1     = sr * sin(6.28318531 * limit(if1, 20, 16000) / sr) / (igb + 39.4784176 * ive * if1 * if1)\nig1     = (if1 >= 20 && if1 < 16000 ? 1 : 0) / sqrt(1 + (if1 / ifc)^2)\nif2     = ikc * ir2\niQ2     = sr * sin(6.28318531 * limit(if2, 20, 16000) / sr) / (igb + 39.4784176 * ive * if2 * if2)\nig2     = (if2 >= 20 && if2 < 16000 ? 1 : 0) / sqrt(1 + (if2 / ifc)^2)\nif3     = ikc * ir3\niQ3     = sr * sin(6.28318531 * limit(if3, 20, 16000) / sr) / (igb + 39.4784176 * ive * if3 * if3)\nig3     = (if3 >= 20 && if3 < 16000 ? 1 : 0) / sqrt(1 + (if3 / ifc)^2)\nif4     = ikc * ir4\niQ4     = sr * sin(6.28318531 * limit(if4, 20, 16000) / sr) / (igb + 39.4784176 * ive * if4 * if4)\nig4     = (if4 >= 20 && if4 < 16000 ? 1 : 0) / sqrt(1 + (if4 / ifc)^2)\nif5     = ikc * ir5\niQ5     = sr * sin(6.28318531 * limit(if5, 20, 16000) / sr) / (igb + 39.4784176 * ive * if5 * if5)\nig5     = (if5 >= 20 && if5 < 16000 ? 1 : 0) / sqrt(1 + (if5 / ifc)^2)\nisum    = iw1 * ig1 + iw2 * ig2 + iw3 * ig3 + iw4 * ig4 + iw5 * ig5\n; the bank: input factor 0.5/sin(2 pi f/sr), see above; a mode outside 20 Hz..16 kHz\n; at the strike is not excited, and one that leaves that band while ringing is muted\nkq1     = kc * ir1\nkp1     limit kq1, 20, 16000\na1      zdf_2pole aex * (if1 >= 20 && if1 < 16000 ? 1 : 0) * (0.5 / sin(6.28318531 * kp1 / sr)), kp1, iQ1, 2\nkq2     = kc * ir2\nkp2     limit kq2, 20, 16000\na2      zdf_2pole aex * (if2 >= 20 && if2 < 16000 ? 1 : 0) * (0.5 / sin(6.28318531 * kp2 / sr)), kp2, iQ2, 2\nkq3     = kc * ir3\nkp3     limit kq3, 20, 16000\na3      zdf_2pole aex * (if3 >= 20 && if3 < 16000 ? 1 : 0) * (0.5 / sin(6.28318531 * kp3 / sr)), kp3, iQ3, 2\nkq4     = kc * ir4\nkp4     limit kq4, 20, 16000\na4      zdf_2pole aex * (if4 >= 20 && if4 < 16000 ? 1 : 0) * (0.5 / sin(6.28318531 * kp4 / sr)), kp4, iQ4, 2\nkq5     = kc * ir5\nkp5     limit kq5, 20, 16000\na5      zdf_2pole aex * (if5 >= 20 && if5 < 16000 ? 1 : 0) * (0.5 / sin(6.28318531 * kp5 / sr)), kp5, iQ5, 2\ninrm    = 3.30 / (isum > 0 ? isum : 1)\n        rireturn\nasig    = (a1 * iw1 * (kq1 >= 20 && kq1 < 16000 ? 1 : 0) + a2 * iw2 * (kq2 >= 20 && kq2 < 16000 ? 1 : 0) + a3 * iw3 * (kq3 >= 20 && kq3 < 16000 ? 1 : 0) + a4 * iw4 * (kq4 >= 20 && kq4 < 16000 ? 1 : 0) + a5 * iw5 * (kq5 >= 20 && kq5 < 16000 ? 1 : 0)) * inrm * kvol1",
+   "name": "mallet bar",
+   "params": {
+    "tuning": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "How deeply the bar is undercut: mode ratios 1:2.71:5.15:8.43:12.21 (glockenspiel), 1:3:6 (xylophone), 1:3.9:9.23 (marimba). Read at the strike.",
+     "anchors": {
+      "glockenspiel": {
+       "value": 0.0,
+       "gloss": "plain uniform bar: five inharmonic partials, clangy"
+      },
+      "xylophone": {
+       "value": 0.5,
+       "gloss": "second partial a twelfth up: hollow, dry knock"
+      },
+      "marimba": {
+       "value": 1.0,
+       "gloss": "second partial near two octaves up: round, mellow"
+      }
+     }
+    },
+    "material": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.0,
+     "note": "Damping law from rosewood (0: fundamental T60 1.7 s at 110 Hz, 0.4 s at 1760 Hz) to aluminium (1: 41 s and 10.5 s). High modes always die first. Read at the strike.",
+     "anchors": {
+      "rosewood": {
+       "value": 0.0,
+       "gloss": "dry wooden knock, upper partials gone at once"
+      },
+      "aluminium": {
+       "value": 1.0,
+       "gloss": "long metallic ring, partials hang on for seconds"
+      }
+     }
+    },
+    "mallet": {
+     "range": [
+      1.0,
+      16.0
+     ],
+     "default": 4.0,
+     "note": "Mallet hardness: the contact's corner as a multiple of the played pitch, capped at 8 kHz. Low strikes only the fundamental, high strikes every mode. Read at the strike.",
+     "anchors": {
+      "soft": {
+       "value": 1.0,
+       "gloss": "yarn mallet: dark thump, mostly the fundamental"
+      },
+      "medium": {
+       "value": 4.0,
+       "gloss": "rubber mallet: upper partials present but rounded"
+      },
+      "hard": {
+       "value": 16.0,
+       "gloss": "hard plastic or brass: bright click, every partial"
+      }
+     }
+    },
+    "spot": {
+     "range": [
+      0.3,
+      0.5
+     ],
+     "default": 0.333,
+     "note": "Strike point as a fraction of the bar's length, from near the end (0.30) to the centre (0.50), where the second and fourth modes have a node and drop out. Read at the strike.",
+     "anchors": {
+      "end": {
+       "value": 0.3,
+       "gloss": "near the end: weak fundamental, second partial leads"
+      },
+      "centre": {
+       "value": 0.5,
+       "gloss": "centre: strongest fundamental, second partial gone"
+      }
+     }
+    }
+   }
   },
   {
    "key": "plucked_tine",
