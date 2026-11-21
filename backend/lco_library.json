@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 37
+  "lexicon_version": 38
  },
  "instruments": [
   {
@@ -803,9 +803,57 @@
   },
   {
    "key": "cymbal",
-   "why": "cymbal / crash / ride / hi-hat / splash: a struck metal plate -- a dense bank of high-Q resonators, all off the harmonic grid, rung by a noise exciter; weak fundamental, energy piled into the top",
+   "why": "cymbal / crash / ride / splash (a hi-hat or an 808 cymbal is metal_squares): a struck metal plate -- a dense bank of high-Q resonators, all off the harmonic grid, rung by a noise exciter; weak fundamental, energy piled into the top",
    "code": "aexq0   rand 0.09, 0.5, 1          ; continuous exciter -> the metal is driven, a held note stands (31-bit: no 1.365 s loop)\nk0qf0   limit (kfreq * koct1) * 1.0000, 20, 15000\nk0qg0   = ((kfreq * koct1) * 1.0000 < 15000 ? 0.220 : 0)\na0q0   mode aexq0, k0qf0, 260      ; mode 1 @ x1.00, Q 260\nk0qf1   limit (kfreq * koct1) * 2.1900, 20, 15000\nk0qg1   = ((kfreq * koct1) * 2.1900 < 15000 ? 0.380 : 0)\na0q1   mode aexq0, k0qf1, 285      ; mode 2 @ x2.19, Q 285\nk0qf2   limit (kfreq * koct1) * 3.4100, 20, 15000\nk0qg2   = ((kfreq * koct1) * 3.4100 < 15000 ? 0.550 : 0)\na0q2   mode aexq0, k0qf2, 310      ; mode 3 @ x3.41, Q 310\nk0qf3   limit (kfreq * koct1) * 4.8300, 20, 15000\nk0qg3   = ((kfreq * koct1) * 4.8300 < 15000 ? 0.720 : 0)\na0q3   mode aexq0, k0qf3, 335      ; mode 4 @ x4.83, Q 335\nk0qf4   limit (kfreq * koct1) * 6.3700, 20, 15000\nk0qg4   = ((kfreq * koct1) * 6.3700 < 15000 ? 0.880 : 0)\na0q4   mode aexq0, k0qf4, 360      ; mode 5 @ x6.37, Q 360\nk0qf5   limit (kfreq * koct1) * 8.0900, 20, 15000\nk0qg5   = ((kfreq * koct1) * 8.0900 < 15000 ? 1.000 : 0)\na0q5   mode aexq0, k0qf5, 385      ; mode 6 @ x8.09, Q 385\nk0qf6   limit (kfreq * koct1) * 10.2400, 20, 15000\nk0qg6   = ((kfreq * koct1) * 10.2400 < 15000 ? 0.860 : 0)\na0q6   mode aexq0, k0qf6, 410      ; mode 7 @ x10.24, Q 410\nk0qf7   limit (kfreq * koct1) * 12.7100, 20, 15000\nk0qg7   = ((kfreq * koct1) * 12.7100 < 15000 ? 0.640 : 0)\na0q7   mode aexq0, k0qf7, 435      ; mode 8 @ x12.71, Q 435\nk0qf8   limit (kfreq * koct1) * 15.8300, 20, 15000\nk0qg8   = ((kfreq * koct1) * 15.8300 < 15000 ? 0.420 : 0)\na0q8   mode aexq0, k0qf8, 460      ; mode 9 @ x15.83, Q 460\nasig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2 + a0q3 * k0qg3 + a0q4 * k0qg4 + a0q5 * k0qg5 + a0q6 * k0qg6 + a0q7 * k0qg7 + a0q8 * k0qg8) * 0.150",
    "name": "cymbal"
+  },
+  {
+   "key": "metal_squares",
+   "why": "TR-808 cymbal and hi-hat after Werner, Abel & Smith, ICMC-SMC 2014: six band-limited Schmitt-trigger squares at the circuit's 205.3/304.4/369.6/522.7/800/540 Hz, duty 0.4798, restarted with their filters on every strike so each hit is the same metal; two band-passes (3440, 7100 Hz) feed three high-passed bands with an envelope each: a long low band, a 7 kHz band with a 30 ms swell, a 40 ms top tick. decay runs from closed hat through open hat to cymbal; tone sets the top tick. It does NOT follow the key: the same metal on every key, never a melodic voice; add a pitched layer with + for a pitch. Linear VCAs (the clipping VCAs are not modelled). No choke between voices; a re-strike on its own voice cuts the ring. It rings only while the synth's voice lives: a long decay needs a long release. Without oversampling the top above 12 kHz is up to 9 dB darker. 1.70 is a level choice.",
+   "code": "kdecay  = 0.40   ; decay[0.0..1.0]: closed hat to long cymbal, one continuum\nktone   = 0.50   ; tone[0..1]: level of the short top band against the two long ones\n; DECAY: SELF\n; LOUDNESS: decay\n; FOLLOWS kfreq: no\n; body resonance, FIXED in Hz\n; TR-808 cymbal/hat after Werner, Abel & Smith (ICMC-SMC 2014): six Schmitt-trigger\n; squares (their measured frequencies and duty), two band-passes, three enveloped bands.\nkup timeinsts\nif changed2(ktrig) == 1 then\n  reinit MET\nendif\nMET:\n; no strike at orchestra build: the section runs once there with kup = 0\niamp = (i(kup) > 0 ? 1.0 : 0)\n; band-limited pulses restarted on every strike at fixed phases: each hit the same metal\na1 vco2 1, 205.3, 2, 0.4798, 0\na2 vco2 1, 304.4, 2, 0.4798, 0.17\na3 vco2 1, 369.6, 2, 0.4798, 0.53\na4 vco2 1, 522.7, 2, 0.4798, 0.71\na5 vco2 1, 800, 2, 0.4798, 0.29\na6 vco2 1, 540, 2, 0.4798, 0.83\n; decay never below 0.15 s: shorter moves the attack peak itself\nidk = 0.15 + i(kdecay)*i(kdecay)*1.85\nae1 expsega 0.001, 0.0003, iamp+0.001, 0.001, iamp+0.001, idk, 0.001, 1, 0.001\nae2 expsega 0.001, 0.03, iamp+0.001, idk*0.5, 0.001, 1, 0.001\nae3 expsega 0.001, 0.0003, iamp+0.001, 0.001, iamp+0.001, 0.04, 0.001, 1, 0.001\namix = a1+a2+a3+a4+a5+a6\n; the filters restart with the squares: their state is part of the strike\nab1 butbp amix, 3440, 1000\nab2 butbp amix, 7100, 1500\n; the 0.001 an exponential segment cannot reach is taken off: silent before and after\nah1 buthp ab1*(ae1-0.001), 3000\nah2 buthp ab2*(ae2-0.001), 5000\nah3 buthp ab2*(ae3-0.001), 9000\nrireturn\n; tone scales the top band from removed (0) to 1.4 (1), linear in amplitude\n; 1.70 is a level choice (strike peak 1.6 at the defaults), not part of the model\nasig = (ah1 + ah2 + ah3*1.4*ktone) * 1.70 * kvol1",
+   "name": "metal squares",
+   "params": {
+    "decay": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.4,
+     "note": "Ring time of the low band, 0.15 s to 2 s on a square law (the 7 kHz band rings half as long): at 0 the hit is gone in about 0.14 s, at 1 it rings about 1.8 s. Read at the strike, so a change applies from the next hit.",
+     "anchors": {
+      "closed": {
+       "value": 0.0,
+       "gloss": "closed hat: the strike and a short metal ring, silent after about 0.14 s"
+      },
+      "open": {
+       "value": 0.4,
+       "gloss": "open hat: the metal hangs for under half a second"
+      },
+      "cymbal": {
+       "value": 1.0,
+       "gloss": "808 cymbal: the low metal band rings for nearly two seconds"
+      }
+     }
+    },
+    "tone": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "Level of the short top band (above 9 kHz, gone in 40 ms) against the two long bands, from removed (0) to 1.4 (1): the stick's tick in the first 5 ms, about 10 dB above 9 kHz. It leaves the ring as it is.",
+     "anchors": {
+      "soft": {
+       "value": 0.0,
+       "gloss": "the top band removed: the strike without its tick"
+      },
+      "hard": {
+       "value": 1.0,
+       "gloss": "the top band's tick pushed to 1.4 of its level"
+      }
+     }
+    }
+   }
   },
   {
    "key": "ring_mod",
