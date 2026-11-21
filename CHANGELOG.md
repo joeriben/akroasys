@@ -4,6 +4,71 @@ The project was released as **T5ynth** through v2.5.3. From 3.0.0 it is
 **akróasys**; the repository, the preset format and the version line continue
 unbroken.
 
+## Unreleased
+
+### Language-Resonant Oscillator
+
+None of the instruments and repairs below has been heard and approved yet;
+each entry is marked open in the library.
+
+- **Struck and circuit drums.** "Drum", "tom", "timpani", "taiko" and their
+  German forms open `struck_drum`, a membrane struck once and left to ring:
+  Kettle runs from a free skin (a tom-like thump) to a measured kettledrum with
+  a real note, Strike moves the stroke towards the rim, Slack sets how far a
+  hard stroke stretches the head, Mallet hardens the stroke. "Kick", "bass
+  drum" and "808" open `analog_kick`, the TR-808 bass drum's bridged-T
+  resonator with Decay and Sweep; "snare" opens `analog_snare`, the 808 snare's two shell resonators
+  under noise, with Tone, Snappy and Decay; "cowbell" opens `cowbell`, the 808
+  cowbell's two squares through its band-pass, which follows the key; "hi-hat",
+  "closed hat", "open hat" and "808 cymbal" open `metal_squares`, the 808's six
+  squares, which does not follow the key. "Karplus-Strong drum" and "ks drum"
+  open `ks_drum`, the 1983 noise-loop drum, between a pitched rattle and a
+  pitchless snap (Rough, Length). All of these decay by themselves: a long ring
+  needs a long amp release.
+
+- **Bars, tines, bells.** "Marimba", "xylophone", "glockenspiel", "celesta" open
+  `mallet_bar`, a struck bar that rings down (Tuning from glockenspiel through
+  xylophone to marimba, Material from rosewood to aluminium, Mallet, Spot). "Kalimba", "mbira", "music box", "thumb piano" open
+  `plucked_tine`, a clamped tongue plucked once (Bridge, Pluck from thumb to
+  nail, Ring).
+  "Handpan", "hang drum" open `handpan`, one tone field with its octave and a
+  third mode from a twelfth to two octaves above, the octave neighbour ringing
+  up after the strike and the shell's air resonance (Upper, Hand, Neighbour,
+  Cavity). "Church bell", "carillon", "tower bell" open `cast_bell`, a cast
+  bell from its measured partials: the key is the strike note, the hum sounds
+  an octave below it, Third runs from the minor-third to the major-third bell,
+  Clapper from heavy to light, Warble sets how far the split pairs beat. A
+  prompt that says "bell" still opens `fm_bell` beside it.
+
+- **A sung vowel.** "Vowel", "singing voice", "formant synthesis", "fof" open
+  `formant_voice`: formant-wave-function synthesis, five formants per vowel.
+  Vowel glides through u, o, a, e, i; Voice runs bass, tenor, alto, soprano.
+  The formants stay where they are while the key moves, so a high note is
+  darker than a transposed sample would be. A vowel, not a singer: no
+  consonants, no vibrato of its own.
+
+- **Three digital sound generators.** "Shepard tone", "endless glissando",
+  "barber pole" open `shepard`, octave-spaced partials under a fixed spectral
+  bell that rise or fall without arriving (Height, Follow, Rise). "Phase
+  distortion", "cz", "casio cz" open `phase_dist`, the CZ's windowed resonant
+  wave (Dcw, Window). "Gendy", "xenakis", "stochastic synthesis" open `gendy`,
+  a waveform whose breakpoints walk at random (Rough, Points, Wander).
+
+- **Five existing instruments repaired.** `fm_bell`, `drum_head` and
+  `driven_metal` had their controls declared but not wired; they now have
+  knobs (Index, Ring, Detune; Pitched, Strikepos, Damping; Stretch, Drive).
+  `drum_head` and `driven_metal` no longer fall about 3 dB per octave up the
+  keyboard and no longer burst when a sounding voice takes a lower key, and
+  `driven_metal` plays in tune at low keys. `bass_saw` now moves within the
+  note and no longer clicks on an upward key change; the acid words no longer
+  lead to it. `sub_sine` is a phase-locked octave under the note whose level
+  no longer depends on when the note starts.
+
+- **A Level fader for seventeen more instruments.** The panel draws a layer's
+  Level fader only for a body that reads its level; seventeen bodies did not,
+  among them the struck bar, cymbal, organ, flute, brass, strings and supersaw.
+  At 1.0 they sound exactly as before.
+
 ## 3.2.0 — shipped as v3.2.0-beta.0
 
 ### Sequencer
