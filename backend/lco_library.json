@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 50
+  "lexicon_version": 51
  },
  "instruments": [
   {
@@ -1050,6 +1050,90 @@
       "long": {
        "value": 1.0,
        "gloss": "music-box ring: about 8 s at 220 Hz, 2 s at 880 Hz"
+      }
+     }
+    }
+   }
+  },
+  {
+   "key": "handpan",
+   "why": "A struck handpan note left to ring: the round steel tone of a hang or pantam, octave and twelfth tuned into the note, a neighbouring octave that swells back and beats after the strike, and the low air resonance of the shell. Modal synthesis on mvmfilter: modes 1:2:3 plus the shell pair 7.50/8.16 (Rossing et al., ISMA 2007), the 85 Hz Helmholtz cavity (Wessel, Morrison & Rossing 2008), decay by register after Alon (2015), struck by a raised-cosine contact pulse. upper = hang or steelpan third mode, hand = palm to fingertip, neighbour = how strongly the octave beats in, cavity = the air hum. Limits: a new strike cuts the ring, a step as large as the ring was; the ring ends when the synth's envelope closes; every knob acts at the next strike; the neighbour is linear and one way, not steelpan coupling; the cavity stays at 85 Hz at every key.",
+   "code": "; DECAY: SELF\n; LOUDNESS: hand\n; LOUDNESS: cavity\n; FOLLOWS kfreq: yes\n; handpan: modal synthesis of one struck handpan note field.\n; Modes 1 : 2 : 3, the third crossfading equal-power to 4 by `upper` (hang to steelpan\n; tuning), and the shell pair 7.50 / 8.16 (Rossing et al., ISMA 2007). Cavity: the shell's\n; Helmholtz resonance at 85 Hz (Wessel, Morrison & Rossing, POMA 2008), Q 20 this entry's own.\n; Neighbour: a second octave mode 4.5 Hz above, driven one way by mode 2, so it rings up after\n; the strike (hang note coupling: Rossing et al. 2007 Figs. 9-10; the delayed octave measured\n; by Hawley & Morrison, JASA 2021, is a STEELPAN finding). 4.5 Hz sits in the 3.1-8.6 Hz beat\n; range Alon (MSc York 2015) measured. Linear and one way: not the steelpan's coupling.\n; T60 3.2 s to 220 Hz, 3.0 s at 330-440, 2.5 s from 660, log f between (Alon 2015, per NOTE);\n; read here per MODE at its own frequency, INFERRED, so the upper modes fade first.\n; Contact: a raised-cosine force pulse (Bilbao, Numerical Sound Synthesis, 2009) of length\n; 0.7203 / (hand x key, capped 8 kHz), rounded to whole samples so its area is exactly one.\n; Its spectrum sinc(x)/(1-x^2), x = f T, is -3 dB at hand x key; each mode is struck with\n; that spectrum at its own frequency, T the rounded length.\n; mvmfilter (Mathews & Smith, SMAC 2003): impulse response r^n cos(n th), exact pitch at any\n; rate, and its level holds while the key glides. A mode outside 20 Hz..16 kHz at the strike\n; is not struck. A new strike CUTS the ring (a one-sample step as large as the ring was at\n; that moment) and restarts it; every knob acts at the next strike.\nkc      = kfreq * koct1\nkupr    = 0.0    ; upper[0.0..1.0]: third mode a twelfth above (hang) to two octaves above (steelpan tuning)\nkhnd    = 2.0    ; hand[1.0..8.0]: contact corner as a multiple of the played pitch, palm to fingertip\nknbr    = 0.4    ; neighbour[0.2..0.6]: how strongly the octave neighbour rings up after the strike\nkcav    = 0.5    ; cavity[0.0..1.0]: level of the shell's air resonance, fixed at 85 Hz\nkup     timeinsts\n        if changed2(ktrig) == 1 then\n          reinit HIT\n        endif\nHIT:\niu      limit i(kupr), 0.0, 1.0\nih      limit i(khnd), 1.0, 8.0\ninb     limit i(knbr), 0.2, 0.6\nicv     limit i(kcav), 0.0, 1.0\nikc     = i(kc)\nikc     = (ikc < 20 ? 220 : ikc)                      ; kfreq is 0 on a never-played voice\nifc     limit ikc * ih, 20, 8000\niNs     = round(0.7203 * sr / ifc)                    ; pulse length in samples: -3 dB at ifc\niNs     = (iNs < 2 ? 2 : iNs)\niT      = iNs / sr\niamp    = (i(kup) > 0 ? 1 : 0)                        ; the build pass is silent\naph     linseg 0, iT, 1\naex     = (1 - cos(2 * $M_PI * aph)) * iamp / iNs     ; unit area, ends at exactly 0\niw3     = cos($M_PI / 2 * iu)\niw4     = sin($M_PI / 2 * iu)\nir[]    fillarray 1, 2, 3, 4, 7.50, 8.16\niw[]    fillarray 1, 1, iw3, iw4, 1, 1\niv[]    init 6\nitau[]  init 6\nisum    = 0\nii      = 0\nwhile ii < 6 do\n  ifq    = ikc * ir[ii]\n  iv[ii] = iw[ii] * (ifq >= 20 && ifq < 16000 ? 1 : 0)\n  ix     = ifq * iT\n  idn    = 1 - ix * ix\n  idn    = (abs(idn) < 1e-6 ? 1 : idn)\n  ip     = (abs(1 - ix * ix) < 1e-6 ? 0.5 : sin($M_PI * ix) / ($M_PI * ix) / idn)\n  isum   += iv[ii] * ip\n  il     = log(ifq)\n  it60   = (ifq <= 220 ? 3.2 : (ifq < 330 ? 3.2 - 0.2 * (il - log(220)) / log(1.5) : (ifq <= 440 ? 3.0 : (ifq < 660 ? 3.0 - 0.5 * (il - log(440)) / log(1.5) : 2.5))))\n  itau[ii] = it60 / log(1000)\n  ii     += 1\nod\nix      = 85 * iT\nidn     = 1 - ix * ix\nidn     = (abs(idn) < 1e-6 ? 1 : idn)\nigc     = (abs(1 - ix * ix) < 1e-6 ? 0.5 : sin($M_PI * ix) / ($M_PI * ix) / idn)\nisum    += icv * igc\n; Level: the signed pulse gains sum to isum at the pulse centre; G = 1.690 is a LEVEL choice\n; (a default strike at 220 Hz peaks near asig 1.6). The cavity takes its share of that sum,\n; so more cavity is less note: declared LOUDNESS. Not a correction of the model.\ninrm    = 1.690 / (isum > 0 ? isum : 1)\n; Neighbour feed for mvmfilter, derived: B (detuned D = 4.5 Hz, same tau as mode 2) driven by\n; mode 2 crests at t* = atan(pi D tau)/(pi D); the feed puts that crest at `neighbour` times\n; mode 2's initial amplitude, at every key and both rates.\nitb     = itau[1]\nidl     = 2 * $M_PI * 4.5 / sr\nitp     = taninv($M_PI * 4.5 * itb) / ($M_PI * 4.5)\nifb     = inb * idl / (sin($M_PI * 4.5 * itp) * exp(-itp / itb))\nifb     = ifb * (ikc * 2 + 4.5 < 16000 ? 1 : 0)\nktau1   = itau[0]\nkl1     limit kc, 20, 0.45 * sr\na1      mvmfilter aex * iv[0], kl1, ktau1\nktau2   = itau[1]\nkl2     limit kc * 2, 20, 0.45 * sr\na2      mvmfilter aex * iv[1], kl2, ktau2\nktau3   = itau[2]\nkl3     limit kc * 3, 20, 0.45 * sr\na3      mvmfilter aex * iv[2], kl3, ktau3\nktau4   = itau[3]\nkl4     limit kc * 4, 20, 0.45 * sr\na4      mvmfilter aex * iv[3], kl4, ktau4\nktau5   = itau[4]\nkl5     limit kc * 7.50, 20, 0.45 * sr\na5      mvmfilter aex * iv[4], kl5, ktau5\nktau6   = itau[5]\nkl6     limit kc * 8.16, 20, 0.45 * sr\na6      mvmfilter aex * iv[5], kl6, ktau6\nklb     limit kc * 2 + 4.5, 20, 0.45 * sr + 4.5       ; keeps its 4.5 Hz when mode 2 sits at its cap\nab      mvmfilter a2 * ifb, klb, ktau2\nktc     = 20 / ($M_PI * 85)                           ; body resonance, FIXED in Hz\nacv     mvmfilter aex * icv, 85, ktc                  ; body resonance, FIXED in Hz\namix    = (a1 + a2 + a3 + a4 + a5 + a6 + ab + acv) * inrm\n        rireturn\nasig    = amix * kvol1",
+   "name": "handpan",
+   "params": {
+    "upper": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.0,
+     "note": "Third mode of the note: 0 a twelfth above the fundamental (1:2:3, hang tuning), 1 two octaves above (1:2:4, steelpan tuning), equal-power between. Read at the strike.",
+     "anchors": {
+      "hang": {
+       "value": 0.0,
+       "gloss": "1:2:3, octave and twelfth: the open, sweet hang note"
+      },
+      "steelpan": {
+       "value": 1.0,
+       "gloss": "1:2:4, octave and double octave: the steelpan's colour"
+      }
+     }
+    },
+    "hand": {
+     "range": [
+      1.0,
+      8.0
+     ],
+     "default": 2.0,
+     "note": "Contact: a raised-cosine pulse, -3 dB at this multiple of the played pitch, capped at 8 kHz. 1 strikes fundamental and octave, 8 reaches the shell modes. The strike level moves about 1 dB over it. Read at the strike.",
+     "anchors": {
+      "palm": {
+       "value": 1.0,
+       "gloss": "soft palm or thumb: dark, fundamental and a faint octave"
+      },
+      "finger": {
+       "value": 2.0,
+       "gloss": "fingertip tap: fundamental, octave and twelfth"
+      },
+      "flick": {
+       "value": 8.0,
+       "gloss": "hard nail flick: the high shell modes ring as well"
+      }
+     }
+    },
+    "neighbour": {
+     "range": [
+      0.2,
+      0.6
+     ],
+     "default": 0.4,
+     "note": "A second octave mode 4.5 Hz above, driven by the note's octave: it rings up to this fraction of the octave's strike level at about 0.1 s and beats against it at 4.5 Hz. Linear and one way. Read at the strike.",
+     "anchors": {
+      "faint": {
+       "value": 0.2,
+       "gloss": "a slight shimmer on the octave"
+      },
+      "beating": {
+       "value": 0.6,
+       "gloss": "the octave swells back after the strike and beats clearly"
+      }
+     }
+    },
+    "cavity": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "The shell's Helmholtz resonance, 85 Hz at every key, T60 0.5 s. It takes its share of the strike: at 1 the steel note's attack is about 3 dB down (more at the top keys), the whole strike about 1 dB. Read at the strike.",
+     "anchors": {
+      "none": {
+       "value": 0.0,
+       "gloss": "no air resonance: the steel note alone"
+      },
+      "full": {
+       "value": 1.0,
+       "gloss": "a short low air hum under every strike"
       }
      }
     }
