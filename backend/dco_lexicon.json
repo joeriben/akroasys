@@ -1,5 +1,5 @@
 {
- "lexicon_version": 49,
+ "lexicon_version": 50,
  "techniques": [
   {
    "key": "sine",
@@ -1424,13 +1424,8 @@
   {
    "key": "struck_bar",
    "surface_forms": [
-    "music box",
-    "musicbox",
     "glockenspiel",
     "celesta",
-    "kalimba",
-    "mbira",
-    "spieluhr",
     "metallophone",
     "tuned bar",
     "stabspiel"
@@ -1480,13 +1475,102 @@
     "motion_rate_hz": 0.25
    },
    "priority": 10,
-   "why": "tuned struck metal bar -- glockenspiel / music box / celesta / kalimba: ideal free-free bar partials (h 2.76/5.4/8.93/13.34), brighter and thinner than a big bell, rung by a continuous noise exciter through a bank of high-Q resonators",
+   "why": "tuned struck metal bar -- glockenspiel / celesta: ideal free-free bar partials (h 2.76/5.4/8.93/13.34), brighter and thinner than a big bell, rung by a continuous noise exciter through a bank of high-Q resonators. A plucked metal tongue (kalimba, mbira, music box) is plucked_tine",
    "code": "aexq0   rand 0.06, 0.5, 1          ; continuous exciter -> the metal is driven, a held note stands (31-bit: no 1.365 s loop)\nk0qf0   limit (kfreq * koct1) * 1.0000, 20, 15000\nk0qg0   = ((kfreq * koct1) * 1.0000 < 15000 ? 0.850 : 0)\na0q0   mode aexq0, k0qf0, 900      ; mode 1 @ x1.00, Q 900\nk0qf1   limit (kfreq * koct1) * 2.7600, 20, 15000\nk0qg1   = ((kfreq * koct1) * 2.7600 < 15000 ? 0.700 : 0)\na0q1   mode aexq0, k0qf1, 1025      ; mode 2 @ x2.76, Q 1025\nk0qf2   limit (kfreq * koct1) * 5.4000, 20, 15000\nk0qg2   = ((kfreq * koct1) * 5.4000 < 15000 ? 0.500 : 0)\na0q2   mode aexq0, k0qf2, 1150      ; mode 3 @ x5.40, Q 1150\nk0qf3   limit (kfreq * koct1) * 8.9300, 20, 15000\nk0qg3   = ((kfreq * koct1) * 8.9300 < 15000 ? 0.320 : 0)\na0q3   mode aexq0, k0qf3, 1275      ; mode 4 @ x8.93, Q 1275\nk0qf4   limit (kfreq * koct1) * 13.3400, 20, 15000\nk0qg4   = ((kfreq * koct1) * 13.3400 < 15000 ? 0.180 : 0)\na0q4   mode aexq0, k0qf4, 1400      ; mode 5 @ x13.34, Q 1400\nasig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2 + a0q3 * k0qg3 + a0q4 * k0qg4) * 0.150 * kvol1",
    "heard": {
     "status": "offen",
     "hinweis": "kein Beleg für eine Abnahme durch BJ gefunden. NICHT als abgenommen behandeln und nicht aus Herkunft, Commit-Text oder „ear-approved“ in docs/ erschließen — genau das war der Fehler (2026-07-30).",
     "massstab": "Abgenommen ist ein Instrument erst über eine HTML-Abhörseite, auf der die PARAMETERKOMBINATION sichtbar und von BJ wählbar ist — nicht über einen Ordner mit vorgerenderten Dateien. Generator: tools/lco_param_page.py (Kombination frei wählbar, jede Achse an ihren deklarierten Ankern). Daneben: tools/lco_listening_test.py (blinde Wort-Klang-Zuordnung, docs/LCO_TEST_POLICY.md) und tools/lco_abx_test.py."
    }
+  },
+  {
+   "key": "plucked_tine",
+   "surface_forms": [
+    "thumb piano",
+    "daumenklavier",
+    "plucked tine",
+    "lamellophone",
+    "lamellophon",
+    "kalimba",
+    "mbira",
+    "music box",
+    "musicbox",
+    "spieluhr"
+   ],
+   "priority": 10,
+   "why": "A metal tongue clamped at one end, plucked once and left to ring: the tine of a kalimba, mbira or music-box comb. Modal synthesis of a clamped-free bar: two `mvmfilter` modes at the Euler-Bernoulli ratio 1 : 6.27, the overtone weighted by the force it puts into the bridge (derived from the mode shapes). bridge pulls the overtone down to the 5.3x Chapman (2006) measured on a kalimba key with overhang; pluck = thumb to nail; ring = how long it holds. Limits: the bar's 17.5x and 34.4x modes are left out, so no high clang; past the first ping the note is a plain decaying sine (the overtone dies about 6x sooner than the fundamental); a new pluck cuts the ring with a click as loud as the ring; the ring ends when the synth's envelope closes (hold the key or lengthen the release); knobs act at the next pluck. No box, no buzzers, no mbira 14x mode, no lead-weighted music-box teeth.",
+   "code": "; DECAY: SELF\n; FOLLOWS kfreq: yes\n; METHOD: modal synthesis of a clamped-free bar (Euler-Bernoulli, Rayleigh 1896; roots\n; 1.875104 4.694091 -> 1 : 6.2669). A pluck is a static tip deflection let go. Each mode is\n; weighted by the force it puts into the bridge, the root shear force, sigma_n/sqrt(r_n)\n; from the clamped-free mode shapes (derived, not fitted): mode 2 at -5.1 dB re the\n; fundamental. bridge lowers mode 2 toward the 5.30x Chapman measured on the kalimba key\n; with the smallest a/b (Canadian Acoustics 34(3) 2006, Table 1); the stretch between is\n; interpolated, not modelled.\n; ABSENT: the bar's modes 3 and 4 (17.5x, 34.4x): they die before they line up with the\n; fundamental, so with them the strike peak wandered 1.75 dB across the knobs, and the\n; measured kalimba keys show no 17.5x mode. Also absent: box, buzz, the mbira's 14x mode,\n; lead-weighted music-box teeth.\n; ring is this entry's own range: one Q for both modes, so mode 2 dies about 6x sooner than\n; the fundamental (fundamental T60 1..8 s at 220 Hz); past the ping the note is a sine.\n; THE RESONATORS ARE `mvmfilter`, NOT `mode`: they rotate their state, so a pitch change\n; under a ring moves the pitch and not the energy. Frequency and tau both k-rate.\n; THE WHOLE BANK IS INSIDE THE REINIT: every pluck restarts it from rest, so a new pluck\n; cuts the ring (a one-sample step as large as the ring was). The ring lasts only as long\n; as the synth's voice does. mpulse also fires at build; kup is 0 then and it is silent.\nkc      = kfreq * koct1\nkbrg    = 0.5    ; bridge[0.0..1.0]: free cantilever to a tine with an overhang behind the bridge\nkplk    = 6.0    ; pluck[1.0..16.0]: release corner as a multiple of the played pitch, thumb to nail\nkrng    = 0.5    ; ring[0.0..1.0]: how long the tine holds\nkup     timeinsts\n        if changed2(ktrig) == 1 then\n          reinit HIT\n        endif\nHIT:\nib      limit i(kbrg), 0.0, 1.0\nip      limit i(kplk), 1.0, 16.0\nirn     limit i(krng), 0.0, 1.0\niqf     = 100 * 8 ^ irn\nikc     = i(kc)\nikc     = (ikc < 20 ? 220 : ikc)\nifc     limit ikc * ip, 20, 8000\niamp    = (i(kup) > 0 ? 1 : 0)\nacon    mpulse iamp, 0\naex     tone acon, ifc\nir2     = 6.2669 * (5.30 / 6.2669) ^ ib\niw2     = 1.3874 / sqrt(ir2)\nio1     = (ikc < 16000 ? 1 : 0)\nio2     = (ikc * ir2 < 16000 ? 1 : 0)\nisum    = io1 / sqrt(1 + (ikc / ifc) ^ 2) + iw2 * io2 / sqrt(1 + (ikc * ir2 / ifc) ^ 2)\nisum    = (isum > 0 ? isum : 1)\n; LEVEL CHOICE, not a correction of the model: an impulse into mvmfilter rings at 1, the\n; isum normalisation holds the pluck across knobs and keys, and 1.67 puts one pluck at the\n; defaults, 220 Hz, at asig 1.6 (the host leaves a trig-struck body untrimmed).\ninrm    = 1.67 / isum\nkp1     limit kc, 20, 16000\nkp2     limit kc * ir2, 20, 16000\na1      mvmfilter aex, kp1, iqf / (3.14159265 * kp1)\na2      mvmfilter aex, kp2, iqf / (3.14159265 * kp2)\namix    = (a1 * io1 + a2 * iw2 * io2) * inrm\n        rireturn\nasig    = amix * kvol1",
+   "params": {
+    "bridge": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "How the tine is held: 0 a free cantilever (overtone at 6.27x), 1 an overhang behind the bridge (overtone at 5.30x, Chapman 2006). Between: interpolated. Above 2.5-3 kHz played the overtone is dropped. Read at the pluck.",
+     "anchors": {
+      "cantilever": {
+       "value": 0.0,
+       "gloss": "music-box tooth: a free tongue, overtone at 6.27x"
+      },
+      "long key": {
+       "value": 0.4,
+       "gloss": "overtone at 5.86x, as on Chapman's lowest kalimba key"
+      },
+      "overhang": {
+       "value": 1.0,
+       "gloss": "short kalimba key: the overtone pulled down to 5.30x"
+      }
+     }
+    },
+    "pluck": {
+     "range": [
+      1.0,
+      16.0
+     ],
+     "default": 6.0,
+     "note": "How sharply the tine is let go: a release corner as a multiple of the played pitch, capped at 8 kHz. Low is the soft flesh of a thumb, high a fingernail snapping off. Read at the pluck.",
+     "anchors": {
+      "thumb": {
+       "value": 1.0,
+       "gloss": "soft release: nearly a pure tone, overtone 17 dB down"
+      },
+      "fingertip": {
+       "value": 6.0,
+       "gloss": "the sproing: overtone 7.5 dB under the fundamental"
+      },
+      "nail": {
+       "value": 16.0,
+       "gloss": "snapped off a nail: the overtone at its brightest, 5 dB under"
+      }
+     }
+    },
+    "ring": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "How long the tine holds: one Q for both modes, 100 to 800, so the fundamental's T60 is 1 to 8 s at 220 Hz and halves each octave up; the overtone dies about 6x sooner. Read at the pluck.",
+     "anchors": {
+      "plink": {
+       "value": 0.0,
+       "gloss": "short: gone in about 1 s at 220 Hz, the overtone a blip"
+      },
+      "long": {
+       "value": 1.0,
+       "gloss": "music-box ring: about 8 s at 220 Hz, 2 s at 880 Hz"
+      }
+     }
+    }
+   },
+   "heard": {
+    "status": "offen",
+    "datum": "2026-11-20",
+    "hinweis": "Neuer Körper, nur gemessen, nicht gehört. Kalimba, Mbira und Spieluhr benennen reale Instrumente und sind gegen eine Aufnahme eines solchen zu beurteilen; Kasten, Schnarrer, die hohen Balkenmoden (17,5x, 34,4x) und bleibeschwerte Spieluhrzungen fehlen.",
+    "wie": "ungehört; am Instrument zu prüfen"
+   },
+   "display_name": "plucked tine"
   },
   {
    "key": "cymbal",
