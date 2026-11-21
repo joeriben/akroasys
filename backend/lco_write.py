@@ -232,8 +232,9 @@ def open_entries(named, lib=None):
     """The library pages the author asked for, in `render_library`'s shape.
 
     `named` is what `named_entries` recognised. Everything else stays LISTED but
-    unquoted, so the author can still see what exists and ask for it in a later
-    turn.
+    unquoted, so the author can still see what exists and write that idiom
+    itself. It cannot ask for a page later: entries are opened once, from the
+    consultation reply, and no later turn is read for names.
 
     NO INSTRUMENT recognised means everything is opened. Two different situations
     reach that state — the author named no instrument, or it named instruments
@@ -276,18 +277,34 @@ def open_entries(named, lib=None):
     return sel
 
 
-def _catalogue(out, lib, section, intro):
+_INDEXED_NOTE = "  (THE LIBRARY list above says what each of these is.)"
+
+
+def _catalogue(out, lib, section, intro, indexed=False):
     """The shelf the author did not pull from — listed, so nothing is invisible.
 
-    Redundant with the index in the system prompt and kept anyway: the writing
-    turn is where the author is looking, and an entry it did not think of in the
-    consultation is still nameable — it can write that idiom itself, or ask for
-    it in a repair. The weight of the code stays on the entries it asked for."""
+    The writing turn is where the author is looking, and an entry it did not
+    think of in the consultation is still nameable — it can write that idiom
+    itself. (It cannot have the page opened any more: no repair turn is read for
+    entry names.) The weight of the code stays on the entries it asked for.
+
+    `indexed` says the index (`render_index`) stands in the SAME context, which
+    is the live path: the system prompt carries it. Then the names are listed
+    and pointed at that list, and each entry's description is not printed a
+    second time. That repeat was kept on purpose while it was cheap; it grew
+    with the library to about 14,500 of the author model's tokens per request
+    at 45 instruments (plus about 1,700 for the words and movements), a quarter
+    of a 65,536-token window that the request then overran. Without the index
+    in context the description is the only one the author gets, and it stays."""
     rest = (lib.get("catalogue") or {}).get(section) or []
     if not rest:
         return
     out.append("")
     out.append(intro)
+    if indexed:
+        out.append("  " + ", ".join(e["key"] for e in rest))
+        out.append(_INDEXED_NOTE)
+        return
     for e in rest:
         why = (e.get("why") or "").strip()
         out.append(f"  {e['key']}" + (f" — {why}" if why else ""))
@@ -300,8 +317,14 @@ def render_index(lib=None):
     This is what the author reads before it has decided anything: enough to size
     up the tools ("does this library have something that rubs? something that
     beats? something hollow?") without the weight of every code block in the library.
-    It costs about what the old word-matched excerpt cost (~6k tokens) and shows
-    everything instead of eight entries a word comparison happened to hit.
+    It shows everything instead of eight entries a word comparison happened to hit.
+
+    It is not cheap, and it is paid on EVERY request: measured with the author
+    model's own tokenizer at lexicon version 57 (45 instruments) the index is
+    about 38,000 tokens, most of a 45,000-token system prompt in a 65,536-token
+    window (`pipe_inference._GGUF_N_CTX`). When this was written it was said to
+    cost about 6k. Every `why`, parameter note and anchor gloss added to the
+    lexicon lands here; the pages the author opens come on top.
 
     The parameter lines are the point, not decoration. `string` is not usable
     knowledge; `string` with `bow` running from "picked and let go: bright at the
@@ -338,11 +361,14 @@ def render_index(lib=None):
     return "\n".join(out)
 
 
-def render_library(sel=None):
+def render_library(sel=None, indexed=False):
     """The library as the author reads it: instruments with their real Csound,
     their parameters with measured ranges and named anchors, the anchor value
     shown AS CODE where the generator could emit it, then the sound words and
-    motions the prompt reached, with the lines each word is responsible for."""
+    motions the prompt reached, with the lines each word is responsible for.
+
+    `indexed`: the index stands in the same context (see `_catalogue`), so the
+    entries that were not opened are listed by name only."""
     lib = sel if sel is not None else _load_library()
     out = []
 
@@ -395,7 +421,7 @@ def render_library(sel=None):
 
     _catalogue(out, lib, "instruments",
                "Also in the library, not quoted here. If one of these is what the "
-               "prompt asks for, write it yourself in the same spirit:")
+               "prompt asks for, write it yourself in the same spirit:", indexed)
 
     out.append("")
     out.append("## SOUND WORDS (they belong IN the generation, not after it)")
@@ -409,7 +435,7 @@ def render_library(sel=None):
         out.append(_indent(adj["code"]))
 
     _catalogue(out, lib, "adjectives",
-               "Other words the library knows, without their code:")
+               "Other words the library knows, without their code:", indexed)
 
     out.append("")
     out.append("## MOTION (movement is code: a free-running oscillator driving a parameter)")
@@ -433,7 +459,7 @@ def render_library(sel=None):
             out.append(f"  or, when {alt['when']}:")
             out.append(_indent(alt["code"]))
 
-    _catalogue(out, lib, "motions", "Other movements the library knows:")
+    _catalogue(out, lib, "motions", "Other movements the library knows:", indexed)
     return "\n".join(out)
 
 
@@ -1234,8 +1260,11 @@ def _consult(user_turn, sysp, llm, on_thinking=None):
 
 
 def _writing_turn(sel):
-    """The pages the author asked for, as the turn that asks it to write."""
-    return _WRITING_HEAD + render_library(sel) + _WRITING_TAIL
+    """The pages the author asked for, as the turn that asks it to write.
+
+    `indexed=True`: this turn only ever follows `system_prompt()` without a
+    selection, i.e. the system prompt that carries `render_index()`."""
+    return _WRITING_HEAD + render_library(sel, indexed=True) + _WRITING_TAIL
 
 
 def _continue(base, prev_raw, seen_errors):
