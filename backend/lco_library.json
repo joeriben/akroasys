@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 39
+  "lexicon_version": 40
  },
  "instruments": [
   {
@@ -1305,6 +1305,54 @@
    "why": "hard sync / oscillator sync -- the classic tearing sync lead: a slave saw restarted by the master every cycle, its ratio sweeping 1.5x..3.7x",
    "code": "ivph0   = frac(ivoice * 0.6180339887)   ; per-voice phase\nkvdr0   poscil 0.0007, 0.043 + 0.0037 * ivoice, giSine, ivph0\nkswp0   oscili 1.1, 0.16            ; slave-ratio sweep\nkrat0   = 2.6 + kswp0            ; 1.5 .. 3.7 x master\nazro0   = 0\namst0, asyn0  syncphasor (kfreq * koct1) * (1 + kvdr0), azro0\naslv0, adum0  syncphasor (kfreq * koct1) * krat0, asyn0\nasig    = (aslv0 * 2 - 1) * 0.45  ; hard-synced saw",
    "name": "sync"
+  },
+  {
+   "key": "phase_dist",
+   "why": "A single resonant peak riding on a saw-like or triangle-like body, the Casio CZ's resonance without a filter. Method: a cosine read at r times the period's own phase, restarting every period and multiplied by a window that falls to zero at the period's end, after US 4,658,691 (Ishibashi, Casio, figs. 17-23). dcw = where the peak sits, harmonic 1.6 to 8.6; window = saw window to triangle window. The peak drifts by 0.6 harmonic over 14 s from each note-on. One rms at every setting: dcw is colour, not level. NOT `sync`: no restart step, no tearing edge. At the saw window it is close to a saw through a resonant lowpass, but the peak is a harmonic number, follows the key and never rings; name `analog_osc` and the synth's filter for a sweep in Hz. Limit: the peak is held at or below 18 kHz, so high keys lose the top of dcw (flat from 0.66 at 2637 Hz, from 0.3 at 4186 Hz).",
+   "code": "; FOLLOWS kfreq: yes\nkdcw    = 0.30 ; dcw[0..1]: where the resonant peak sits, harmonic 1.6 to 8.6 (the CZ DCW)\nkwin    = 0.0  ; window[0..1]: window peak position, saw window to triangle window\n; The Casio CZ resonant wave after US 4,658,691 (Ishibashi, Casio), FIGS. 17-23: a cosine\n; read at r times the period's own address, so it starts over every period, multiplied\n; by a window that is zero where the period ends. The patent's FIG. 19 is the same read\n; without the window and jumps at every restart; the window's zero is what removes the\n; jump, so nothing here needs band-limiting machinery to be continuous.\nkdrf0   = 0.6 * sin(6.283185307 * 0.071 * knote)\nkr0     = max(1.6, min(1.6 + 7 * kdcw, 18000 / (kfreq * koct1) - 0.6)) + kdrf0\n                                      ; the peak is held at or below 18 kHz at any rate, so\n                                      ;   a high key loses the top of dcw; never below the\n                                      ;   mapping's own floor 1.6 (r stays >= 1). The drift\n                                      ;   is added AFTER both: a clamp around it would stop\n                                      ;   it there\nks0     = 0.002 + 0.498 * kwin        ; 0 would divide by zero below; 0.002 is still a saw\nkL0     = 1 - ks0\n; Level from the wave's own mathematics, not a meter. With p uniform over one period and\n; x = w(p)(1-cos(a p))/2, w the triangle rising to 1 at s and falling to 0 at 1:\n;   mean = (1/2 - H(a))/2,  E[x^2] = (1/2 - 2 G(a) + G(2a)/2)/4,\n;   H(b) = integral of w cos(b p),  G(b) = integral of w^2 cos(b p),\n; each integral split at s and closed by parts (q = 1-p on the falling side). The terms\n; cancel to ~1e-4 at s = 0.002; in this double-precision Csound the result stays within\n; 3e-12 of a numeric integral over r 1..9.2 and s 0.002..0.5.\nkb1     = 6.283185307 * kr0\nkb2     = 2 * kb1\nkg1     = ((ks0*ks0/kb1)*sin(kb1*ks0) + (2*ks0/(kb1*kb1))*cos(kb1*ks0) - (2/(kb1*kb1*kb1))*sin(kb1*ks0)) / (ks0*ks0)\nkc1     = (kL0*kL0/kb1)*sin(kb1*kL0) + (2*kL0/(kb1*kb1))*cos(kb1*kL0) - (2/(kb1*kb1*kb1))*sin(kb1*kL0)\nksn1    = -(kL0*kL0/kb1)*cos(kb1*kL0) + (2*kL0/(kb1*kb1))*sin(kb1*kL0) + (2/(kb1*kb1*kb1))*cos(kb1*kL0) - 2/(kb1*kb1*kb1)\nkG1     = kg1 + (cos(kb1)*kc1 + sin(kb1)*ksn1) / (kL0*kL0)\nkg2     = ((ks0*ks0/kb2)*sin(kb2*ks0) + (2*ks0/(kb2*kb2))*cos(kb2*ks0) - (2/(kb2*kb2*kb2))*sin(kb2*ks0)) / (ks0*ks0)\nkc2     = (kL0*kL0/kb2)*sin(kb2*kL0) + (2*kL0/(kb2*kb2))*cos(kb2*kL0) - (2/(kb2*kb2*kb2))*sin(kb2*kL0)\nksn2    = -(kL0*kL0/kb2)*cos(kb2*kL0) + (2*kL0/(kb2*kb2))*sin(kb2*kL0) + (2/(kb2*kb2*kb2))*cos(kb2*kL0) - 2/(kb2*kb2*kb2)\nkG2     = kg2 + (cos(kb2)*kc2 + sin(kb2)*ksn2) / (kL0*kL0)\nkh1     = ((ks0/kb1)*sin(kb1*ks0) + (cos(kb1*ks0) - 1)/(kb1*kb1)) / ks0\nkhc     = (kL0/kb1)*sin(kb1*kL0) + (cos(kb1*kL0) - 1)/(kb1*kb1)\nkhs     = -(kL0/kb1)*cos(kb1*kL0) + sin(kb1*kL0)/(kb1*kb1)\nkH1     = kh1 + (cos(kb1)*khc + sin(kb1)*khs) / kL0\nkmu0    = 0.5 * (0.5 - kH1)\nkvar0   = 0.25 * (0.5 - 2*kG1 + 0.5*kG2) - kmu0*kmu0\nkgn0    = 0.177 / sqrt(kvar0)         ; rms 0.177 at every dcw/window: the peak then stays\n                                      ;   near 0.5, the hottest corner at about 0.53\nkdc0    = kmu0 * kgn0                 ; the mean the body takes out, in output units\naph0    phasor min(kfreq * koct1, 0.49 * sr)  ; phasor takes 1 off its phase at most once a\n                                              ;   sample: at sr or above it never wraps and the\n                                              ;   table read runs away, which kfreq times a live\n                                              ;   octave switch can reach; below sr/2 also keeps\n                                              ;   the top note from folding down\n; r, s and the gain are taken only where a period restarts, where the windowed wave is 0\n; whatever they are. Taken mid-period, a step in r is a step in the wave: a fresh strike on\n; a sounding voice resets the drift (r jumps up to 0.6) and the knobs arrive once per host\n; block, and both read as a broadband burst. The mean taken out is NOT 0 there (-mean*gain\n; is -0.16..-0.23), so it is not switched at the restart but travels from its old to its\n; new value across the new period: continuous at both ends, the period's mean off by half\n; the change for that one period.\nkon0    init 1\nadl0    delay1 aph0\nadf0    = adl0 - aph0                 ; positive only on the sample where the phase wrapped\natk0    = 0.5 * (adf0 + abs(adf0)) + kon0     ; kon0: the voice's first k-period takes its\n                                              ;   values at once, not a period late\nakr0    upsamp kr0                    ; upsamp, not a(): a() ramps from the previous k\naks0    upsamp ks0                    ;   value, and the four must come from ONE k-cycle,\nakg0    upsamp kgn0                   ;   or the mean and gain belong to another r\nakd0    upsamp kdc0\nar0     samphold akr0, atk0\nas0     samphold aks0, atk0\nagn0    samphold akg0, atk0\nadn0    samphold akd0, atk0           ; the mean this period travels to\nadp0    delay1 adn0                   ; on the wrap sample: the mean before it changed\nado0    samphold adp0 + kon0 * (adn0 - adp0), atk0    ; the mean it travels from; a voice's\n                                              ;   first period has none before it: its own\nkon0    = 0\nacs0    tablei aph0 * ar0, giCos, 1, 0, 1     ; wrap mode: the address restarts with the period\nawn0    = min(aph0 / as0, (1 - aph0) / (1 - as0))\nasig    = (awn0 * (1 - acs0) * 0.5 * agn0 - (ado0 + (adn0 - ado0) * aph0)) * kvol1\n                                      ; the RAISED cosine is 0 where the window rises, so\n                                      ;   the windowed wave has no step even under the saw\n                                      ;   window's near-vertical rise; the mean is taken out\n                                      ;   exactly, not by a filter",
+   "name": "phase distortion",
+   "params": {
+    "dcw": {
+     "range": [
+      0,
+      1
+     ],
+     "default": 0.3,
+     "note": "where the resonant peak sits, harmonic 1.6 (0) to 8.6 (1): the CZ's DCW. The rms is the same at every setting, so it moves colour, not level. Held at or below 18 kHz: from a 1.96 kHz key up the top of the travel is flat.",
+     "anchors": {
+      "dark": {
+       "value": 0.0,
+       "gloss": "resonance between harmonic 1 and 2.2: near a sine, H2 at -2 to -20 dB over the drift"
+      },
+      "nasal": {
+       "value": 0.3,
+       "gloss": "peak on the 4th harmonic: a narrow band over a soft body"
+      },
+      "resonant": {
+       "value": 0.9,
+       "gloss": "peak on the 8th harmonic, high above the fundamental"
+      }
+     }
+    },
+    "window": {
+     "range": [
+      0,
+      1
+     ],
+     "default": 0,
+     "note": "the window under the resonance: a falling saw (0, the CZ's saw resonance) to a symmetric triangle (1, its triangle resonance). Toward 1 the even harmonics off the peak drop out; the fundamental comes 0.5-2 dB closer.",
+     "anchors": {
+      "saw": {
+       "value": 0.0,
+       "gloss": "saw window: every harmonic present under the peak"
+      },
+      "triangle": {
+       "value": 1.0,
+       "gloss": "triangle window: even harmonics off the peak drop out, by amounts moving with the drift"
+      }
+     }
+    }
+   }
   },
   {
    "key": "harpsichord",
