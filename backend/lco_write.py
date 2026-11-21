@@ -397,25 +397,58 @@ def render_library(sel=None, indexed=False):
         # them all under `next(iter(params))` — the first parameter's name, whether
         # or not the variant belonged to it. `lco_param_audit.py` already read the
         # key this way; the two now agree.
-        base_lines = set((it.get("code") or "").splitlines())
+        #
+        # A line differs when what it RUNS is not in the body above: compared with
+        # the comments off and the spacing folded (`_code_lines`, `_runs`). It used
+        # to be compared as text, comment included, so a variant that only worded a
+        # comment differently, or carried a comment the body does not, was quoted
+        # line by line under "how the code changes" although no code changed.
+        # `analog_osc`'s fifteen variants cost about 10,500 of the author's tokens
+        # that way, 7,300 of them comment lines and lines the body already runs. A
+        # comment that stands alone in a variant is therefore NOT shown here; the
+        # line that moves is, whole, with its own comment.
+        #
+        # Lines end where Csound ends them (`\n`, `\r\n`, a lone `\r`:
+        # Engine/csound_pre.lex NEWLINE), so a variant saved with other line ends
+        # is not read as one long line whose first `;` hides the rest.
+        def running(code):
+            """(the text lines, what each of them runs) of one body."""
+            text = re.sub(r"\r\n?", "\n", code or "")
+            return text.split("\n"), [_runs(r) for r in _code_lines(text)]
+
+        base_seq = [r for r in running(it.get("code"))[1] if r]
+        base_runs = set(base_seq)
         deltas = {}
         for label, code in (it.get("anchor_code") or {}).items():
             axis, _, anchor = label.partition("=")
-            changed = [l for l in code.splitlines() if l not in base_lines]
+            lines, runs = running(code)
+            seq = [r for r in runs if r]
+            changed = [l for l, r in zip(lines, runs) if r and r not in base_runs]
+            # A variant can differ from the body without running one line the
+            # body does not: a line left out or commented out, a line run twice,
+            # the order changed. It then has no new line to quote and is still
+            # not the code above, so it is quoted whole.
+            whole = not changed and seq != base_seq
+            if whole:
+                changed = [l for l, r in zip(lines, runs) if r]
             # An anchor whose value IS the parameter's default has no delta from the
             # quoted body, and dropping it made the anchor vanish from the prompt
             # with nothing to say why — `sax`'s `growl=edge` sat at 0.15, the
             # default, so the author saw clean/growl/roar and no `edge`. Say instead
             # that the quoted code already is that anchor.
             deltas.setdefault(axis.strip(), []).append((anchor.strip() or axis,
-                                                        changed))
+                                                        changed, whole))
         for axis, rows in deltas.items():
             out.append(f"  # how the code changes across `{axis}`:")
-            for anchor, changed in rows:
-                if not changed:
+            for anchor, changed, whole in rows:
+                if whole:
+                    out.append(f"    # {anchor} — no new line, and not the code "
+                               "above; all of it:")
+                elif not changed:
                     out.append(f"    # {anchor} — the code above already is this one")
                     continue
-                out.append(f"    # {anchor}")
+                else:
+                    out.append(f"    # {anchor}")
                 for l in changed:
                     out.append(f"    {l.strip()}")
 
@@ -889,6 +922,22 @@ def _code_lines(code):
     lines = [uncomment(l) for l in (code or "").split("\n")]
     return re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)),
                   "\n".join(lines), flags=re.S).split("\n")
+
+
+def _runs(code_line):
+    """One line of `_code_lines` as what it runs: the column alignment folded to
+    single spaces, outside string literals. Two lines that differ only in how
+    their columns are padded run the same thing. The indentation is KEPT: a line
+    moved under an `if` is the same text and runs something else, and with the
+    indentation folded it vanished from between the `if` and its `endif`. Empty
+    for a line that runs nothing."""
+    rest = code_line.strip()
+    if not rest:
+        return ""
+    lead = code_line[:len(code_line) - len(code_line.lstrip())]
+    return lead + re.sub(r'"[^"]*"|\s+',
+                         lambda m: m.group(0) if m.group(0)[0] == '"' else " ",
+                         rest)
 
 
 # `kwave0 = 0.00`, standing above a `vco2` that was written for one waveform and
