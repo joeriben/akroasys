@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 46
+  "lexicon_version": 47
  },
  "instruments": [
   {
@@ -670,6 +670,80 @@
       "hard": {
        "value": 2.0,
        "gloss": "two octaves up for 6 ms, a hard knock; a chirp on high keys"
+      }
+     }
+    }
+   }
+  },
+  {
+   "key": "analog_snare",
+   "why": "The TR-808 snare as its Service Notes draw it: two bridged-T shell resonators struck by the trigger pulse, the lower on the key and the upper an octave above, and white noise through a 1.8 kHz high-pass under its own 0.2 s envelope, the snares. Shell Qs 17.4/10.7 after K. J. Werner, from a secondary source. The shell follows the key, the snares' colour does not: at 55 Hz a low, tom-like boom under the hiss, at 1760 Hz a 3 ms tick the snares carry. No rimshot, no accent; not an acoustic snare, and for metal use metal_squares. Every strike draws new noise, so at full snappy hits differ by up to 2.4 dB (about 1.4 dB over 30 strikes). It rings only while the synth's voice lives, so a long decay needs a long release. A new strike restarts shell and snares and cuts what still rings. The levels 0.4/0.25 and 3.08 are choices, not part of the model.",
+   "code": "; DECAY: SELF\n; LOUDNESS: snappy\n; FOLLOWS kfreq: yes\n; The TR-808 snare drum as its Service Notes draw it (p. 6): two bridged-T resonators, the\n; shell, struck by the trigger pulse, and white noise through a high-pass under its own\n; envelope, the snares. VR8 (TONE) balances the two shell modes, VR9 (SNAPPY) sets the\n; noise. Shell frequencies (rev. A 249.6 / 499.0 Hz) and Qs (17.4 / 10.7) are K. J.\n; Werner's, quoted in \"808 Snare Mutations\" (norgatronics.blogspot.com, 2021), a SECONDARY\n; source. Here the lower mode sits on the key and the upper an octave above (499.0 / 249.6).\nktone   = 0.50   ; tone[0..1]: level of the upper shell mode against the lower (VR8)\nksnappy = 0.50   ; snappy[0..1]: amplitude of the noise envelope against the shell (VR9)\nkdecay  = 1.00   ; decay[1.0..3.0]: both shell Qs scaled together, 1 = the circuit's own\nkbase   = kfreq * koct1\n; THE NOISE runs free, outside the reinit, so every strike draws a new stretch of it. The\n; seed is a HASH of the voice: Csound's 31-bit `rand` is the multiplicative Park-Miller\n; generator, so seeds that are multiples of one another give voices that copy each other.\n; frac(ivoice * 0.618...) does that (voices 1 and 2 at +0.50 correlation); this one keeps\n; all 120 pairs of the 16 voices under 0.02.\nan      rand 0.5, frac(abs(sin(ivoice * 12.9898)) * 43758.5453), 1\n; THE STRIKE is the host's note-on edge. `mpulse` in the section also fires once when the\n; orchestra is built; `kup` is 0 then, and that pulse has no amplitude.\nkup     timeinsts\n        if changed2(ktrig) == 1 then\n          reinit SNARESTRIKE\n        endif\nSNARESTRIKE:\niamp    = (i(kup) > 0 ? 1.0 : 0)\nacon    mpulse iamp, 0\n; the snares' envelope, restarted by every strike: up in 0.5 ms, down to a tenth in 60 ms,\n; out over 0.2 s. The 0.001 that expsega needs is taken off again below, so the noise is\n; exactly silent between strikes.\nanv     expsega 0.001, 0.0005, iamp+0.001, 0.06, 0.1*iamp+0.001, 0.2, 0.001, 1, 0.001\n; THE SHELL is two `mvmfilter`s, not `mode`: they rotate their state, so a key change under\n; a ring (legato) moves the pitch and not the energy. Frequency and tau are both k-rate; tau =\n; Q / (pi f) is each mode's 1/e time. INSIDE the reinit: every strike starts the shell from\n; rest, as the other struck bodies do (left outside, a roll piled the rings up to asig 12).\n; A mode above 16 kHz is switched off rather than parked below it.\nkf1     limit kbase, 20, 16000\nkf2     limit kbase * 2, 20, 16000\nkg1     = (kbase < 16000 ? 1 : 0)\nkg2     = (kbase * 2 < 16000 ? 1 : 0)\na1      mvmfilter acon, kf1, 17.4 * kdecay / (3.14159 * kf1)\na2      mvmfilter acon, kf2, 10.7 * kdecay / (3.14159 * kf2)\n        rireturn\naenv    = anv - 0.001\n; tone moves level between the modes with their sum held at 1.3, so the strike's first\n; sample, where both rings start together, does not change with tone (below an 8 kHz key;\n; above it the upper mode is off and tone only takes level away).\nash     = a1 * kg1 * (1 - 0.7 * ktone) + a2 * kg2 * (0.3 + 0.7 * ktone)\n; THE SNARES' colour does not follow the key. The circuit has no low-pass: the two 16 kHz\n; ones and sqrt(sr/44100) hold the noise to one band at 44100 and 176400 (rms within 0.4 dB;\n; its sample peak still reads about 1 dB higher at the plugin rate).\nanh     buthp an * aenv, 1800   ; body resonance, FIXED in Hz\nanl     butlp anh, 16000        ; body resonance, FIXED in Hz\nanl     butlp anl, 16000        ; body resonance, FIXED in Hz\n; LEVEL CHOICE, not part of the model: shell 0.4 against snares 0.25, and 3.08 puts one\n; strike at the defaults on an asig peak of 1.60, on its first sample. The host leaves a\n; struck body untrimmed, so this constant is its loudness in the plugin.\nasig    = (ash * 0.4 + anl * sqrt(sr / 44100) * ksnappy * 0.25) * 3.08 * kvol1",
+   "name": "analog snare",
+   "params": {
+    "tone": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "Level of the upper shell mode, an octave above the key, against the lower one on the key (VR8); their sum is held (keys under 8 kHz). The upper mode dies about three times faster, so 1 is brighter and shorter.",
+     "anchors": {
+      "low": {
+       "value": 0.0,
+       "gloss": "the lower mode leads: a round, darker shell on the key"
+      },
+      "even": {
+       "value": 0.5,
+       "gloss": "both modes start equally loud"
+      },
+      "high": {
+       "value": 1.0,
+       "gloss": "the octave leads: a brighter, shorter knock"
+      }
+     }
+    },
+    "snappy": {
+     "range": [
+      0.0,
+      1.0
+     ],
+     "default": 0.5,
+     "note": "Amplitude of the snares' noise against the shell (VR9). It adds hiss and some level. The noise is new with every strike, so at 1 no two hits are quite the same; 0 leaves the bare shell.",
+     "anchors": {
+      "none": {
+       "value": 0.0,
+       "gloss": "no snares: the bare two-mode shell, a tuned knock"
+      },
+      "half": {
+       "value": 0.5,
+       "gloss": "shell and snares together"
+      },
+      "full": {
+       "value": 1.0,
+       "gloss": "the snares lead: a crack of hiss over the shell"
+      }
+     }
+    },
+    "decay": {
+     "range": [
+      1.0,
+      3.0
+     ],
+     "default": 1.0,
+     "note": "Both shell Qs scaled together; 1 is the circuit's own. At 220 Hz the shell falls 60 dB in 0.16 s at 1 and 0.47 s at 3; the snares keep their 0.2 s. Read all the time, so it also reshapes a ring already sounding.",
+     "anchors": {
+      "tight": {
+       "value": 1.0,
+       "gloss": "the circuit's own ring: a short tuned knock under the snares"
+      },
+      "ringing": {
+       "value": 2.0,
+       "gloss": "twice the ring, the shell's pitch clearly heard"
+      },
+      "long": {
+       "value": 3.0,
+       "gloss": "three times the ring: a tuned drum that sings past the snares"
       }
      }
     }
