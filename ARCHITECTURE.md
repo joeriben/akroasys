@@ -431,23 +431,45 @@ else is the host's:
 
 ### The repair loop
 
-`build_csound_response()` (`lco_write.py:1276`) assembles the prompt from
-`select()` + `render_library()` — which library entries the prompt's words
-reached versus a `_STARTER` orientation set when they reach too few
-(`:147`, `:220`) — calls the model, and hands the reply to `sanitize()`
-(`:768`) to split the plain-language reasoning from the fenced `csound`
-body and its `READING:` line. `wrap()` + `syntax_check()` (`:1183`) then
-compile the result through the real Csound compiler — the CLI's
-`--syntax-check-only`, or CsoundLib64 via `ctypes` as a fallback, the same
-compiler `CsoundEngine.cpp` itself runs. A failure does not end the
-attempt: `_continue()` (`:412`) puts the original request, the model's own
-failed reply, and every distinct error seen so far — not only the latest —
-back to the model as a continuation of the same conversation, so a retry
-edits what it wrote rather than re-authoring from nothing. This runs for up
-to `MAX_TRIES` (`T5YNTH_LCO_MAX_TRIES`, default 6) attempts, stopping early
-if a reply repeats with no new error. Exhausting the budget returns
-`{"ok": false, ...}` and the LCO stays silent — never a keyword-matched or
-default orchestra.
+`build_csound_response()` (`backend/lco_write.py`) runs two turns against
+one system prompt. `system_prompt()` is the head, the synth's own parameter
+shelf when the player allowed the author to set it (`render_params()`), and
+`render_index()`: every library entry by key with its description and its
+parameters, no code. That prompt is identical for every turn of a request,
+so the model's prefix cache holds it once.
+
+1. **Consultation.** `_consult()` sends the player's prompt; the author
+   reasons and says which entries it wants to read. `named_entries()`
+   recognises entry keys and surface forms in that REPLY (never in the
+   player's prompt), and `open_entries()` opens them. Python recognises
+   names; it does not choose. A reply that names no instrument opens the
+   whole library.
+2. **Writing.** `_writing_turn()` hands over the opened entries' pages
+   (`render_library()`: code, knob lines, how each anchor changes the code)
+   and names the unopened ones by key. Entries are opened once, from the
+   consultation reply; no later turn is read for names.
+
+The reply goes to `sanitize()`, which splits the plain-language reasoning
+from the fenced `csound` body and its `READING:` line. `wire_controls()` +
+`wrap()` + `syntax_check()` then compile the result through the real Csound
+compiler — the CLI's `--syntax-check-only`, or CsoundLib64 via `ctypes` as a
+fallback, the same compiler `CsoundEngine.cpp` itself runs. A failure does
+not end the attempt: `_continue()` puts the conversation so far, the
+model's own failed reply, and every distinct error seen so far — not only
+the latest — back to the model, so a retry edits what it wrote rather than
+re-authoring from nothing. A body that compiles but hands the player a
+stripped panel (`frozen_controls()`) goes back the same way and is kept as
+a spare. This runs for up to `MAX_TRIES` (`T5YNTH_LCO_MAX_TRIES`, default 6)
+attempts, stopping early if a reply repeats with no new error. Exhausting
+the budget returns `{"ok": false, ...}` and the LCO stays silent — never a
+keyword-matched or default orchestra.
+
+Everything above shares the author's context window (`_GGUF_N_CTX` in
+`backend/pipe_inference.py`, env `T5YNTH_CODER_N_CTX`, default 65,536
+tokens): system prompt, both turns, the answer and each repair. There is no
+overflow handling; a request over the window is a hard error, and an answer
+that fills it is cut silently. So every library entry costs its index text
+on every prompt and its page whenever it is opened.
 
 ### Compiling, swapping and rendering (`CsoundEngine`)
 
