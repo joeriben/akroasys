@@ -37,7 +37,7 @@ The path, end to end:
 `lco_write.wrap()` puts the authored body inside a fixed host. The body's single obligation is to write its output into **`asig`**. Everything else is provided:
 
 - `sr` from the host, `ksmps = 64`, `nchnls = 16` (`== CsoundEngine::kMaxVoices`), `0dbfs = 1`
-- ftables `giSine` (1), `giCos` (2, a **cosine** table — `gbuzz`'s harmonics are cosines), `giCheb` (3, a GEN13 odd-harmonic transfer function), `giImp` (4, a strike impulse for models whose strike argument is a table number), `giWin` (5, a sin² bell, the window `hsboscil` lays over its octave-spaced partials)
+- ftables `giSine` (1), `giCos` (2, a **cosine** table — `gbuzz`'s harmonics are cosines), `giCheb` (3, a GEN13 odd-harmonic transfer function), `giImp` (4, a strike impulse for models whose strike argument is a table number), `giWin` (5, a sin² bell, the window `hsboscil` lays over its octave-spaced partials), `giRis` (6, a half-cosine rise from 0 to 1, the grain envelope `fof` wants), `giVoxHz` / `giVoxDb` / `giVoxBw` (7–9, the sung-vowel formant table of the Csound manual's Appendix D as centre, level and bandwidth; index `(voice * 5 + formant) * 5 + vowel`)
 - one numeric `instr 1` with `ivoice = p4`, sixteen always-on voice instances, per-voice channels `gate/freq/vel/pres/timb/trig`
 - `kfreq limit kfreqraw, 20, 12000`; `koct1/2/3` and `kvol1/2/3` from the player's knobs
 - `knote` — seconds since **this** note, reset on `changed2(ktrig)`, `init 0` (a note already gated high at the first k-cycle gives `changed2` no edge, so any other starting value would freeze)

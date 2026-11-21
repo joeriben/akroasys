@@ -403,8 +403,12 @@ else is the host's:
 - ftables `giSine` (1, sine), `giCos` (2, cosine — `gbuzz`'s harmonics are
   cosines), `giCheb` (3, a GEN13 Chebyshev transfer function), `giImp`
   (4, a strike impulse for models that take their excitation as a table
-  number) and `giWin` (5, a sin² bell — the spectral window `hsboscil`
-  lays over its octave-spaced partials).
+  number), `giWin` (5, a sin² bell — the spectral window `hsboscil`
+  lays over its octave-spaced partials), `giRis` (6, a half-cosine rise
+  from 0 to 1 — the grain envelope `fof` wants) and `giVoxHz` /
+  `giVoxDb` / `giVoxBw` (7–9, the sung-vowel formant table of the Csound
+  manual's Appendix D as centre, level and bandwidth, indexed
+  `(voice * 5 + formant) * 5 + vowel`).
 - one numeric `instr 1` with `ivoice = p4` and sixteen always-on score
   instances (`i 1 0 2000000000 <v>` for v = 1..16, ~63 years) — there is
   no note-off and no per-note score event; every struck idiom in the

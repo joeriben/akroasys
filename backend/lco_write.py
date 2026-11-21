@@ -514,6 +514,10 @@ AVAILABLE IN SCOPE
   giSine (sine table)  giCos (cosine table, for gbuzz/buzz)
   giCheb (Chebyshev transfer table)  giImp (short strike impulse table)
   giWin  (sin^2 bell, zero at both ends: the window `hsboscil` wants)
+  giRis  (1/2 - cos/2 rise from 0 to 1: the grain envelope `fof` wants)
+  giVoxHz giVoxDb giVoxBw  (sung-vowel formants as Hz / dB / bandwidth, Csound manual
+         Appendix D: index (voice * 5 + formant) * 5 + vowel, with voices bass tenor
+         alto soprano, formants F1..F5, vowels u o a e i)
   t5bow  the head's bowed string, a real bow on a waveguide string (Smith 1986):
          `astr t5bow kfreq, kspeed, kslope, kplace, kcut` — kspeed ~0.10 the bow speed,
          kslope 1.0 (leaning in) .. 2.5 (a light bow), kplace 0.10 .. 0.20 of the string
@@ -2031,6 +2035,32 @@ _HEAD = (
     # points because the opcode reads the table truncating — a coarse one steps
     # audibly while the window moves.
     "giWin  ftgen 5, 0, 8192, 19, 1, 0.5, 270, 0.5\n"
+    # The grain envelope `fof` wants (GEN19: 0.5 - 0.5 cos over HALF a period), rising
+    # from 0 to 1 across the table: the opcode reads it forward over the rise and
+    # backward over the decay (`formant_voice`).
+    "giRis  ftgen 6, 0, 1024, 19, 0.5, 0.5, 270, 0.5\n"
+    # Sung-vowel formants, the table of the Csound manual's Appendix D: centre in Hz,
+    # level in dB, bandwidth in Hz. (The Csound list attributes the table to Bennett &
+    # Rodet 1989, "Synthesis of the singing voice"; not checked against the book.)
+    # 100 values each, index (voice * 5 + formant) * 5 + vowel: voices bass, tenor,
+    # alto, soprano (one source line each); formants F1..F5; vowels u o a e i, an
+    # order that lets one index glide through the vowel space. GEN-2 with a
+    # negative number: stored as written, not rescaled.
+    "giVoxHz ftgen 7, 0, 100, -2, "
+    "350, 400, 600, 400, 250, 600, 750, 1040, 1620, 1750, 2400, 2400, 2250, 2400, 2600, 2675, 2600, 2450, 2800, 3050, 2950, 2900, 2750, 3100, 3340, "
+    "350, 400, 650, 400, 290, 600, 800, 1080, 1700, 1870, 2700, 2600, 2650, 2600, 2800, 2900, 2800, 2900, 3200, 3250, 3300, 3000, 3250, 3580, 3540, "
+    "325, 450, 800, 400, 350, 700, 800, 1150, 1600, 1700, 2530, 2830, 2800, 2700, 2700, 3500, 3500, 3500, 3300, 3700, 4950, 4950, 4950, 4950, 4950, "
+    "325, 450, 800, 350, 270, 700, 800, 1150, 2000, 2140, 2700, 2830, 2900, 2800, 2950, 3800, 3800, 3900, 3600, 3900, 4950, 4950, 4950, 4950, 4950\n"
+    "giVoxDb ftgen 8, 0, 100, -2, "
+    "0, 0, 0, 0, 0, -20, -11, -7, -12, -30, -32, -21, -9, -9, -16, -28, -20, -9, -12, -22, -36, -40, -20, -18, -28, "
+    "0, 0, 0, 0, 0, -20, -10, -6, -14, -15, -17, -12, -7, -12, -18, -14, -12, -8, -14, -20, -26, -26, -22, -20, -30, "
+    "0, 0, 0, 0, 0, -12, -9, -4, -24, -20, -30, -16, -20, -30, -30, -40, -28, -36, -35, -36, -64, -55, -60, -60, -60, "
+    "0, 0, 0, 0, 0, -16, -11, -6, -20, -12, -35, -22, -32, -15, -26, -40, -22, -20, -40, -26, -60, -50, -50, -56, -44\n"
+    "giVoxBw ftgen 9, 0, 100, -2, "
+    "40, 40, 60, 40, 60, 80, 80, 70, 80, 90, 100, 100, 110, 100, 100, 120, 120, 120, 120, 120, 120, 120, 130, 120, 120, "
+    "40, 70, 80, 70, 40, 60, 80, 90, 80, 90, 100, 100, 120, 100, 100, 120, 130, 130, 120, 120, 120, 135, 140, 120, 120, "
+    "50, 70, 80, 60, 50, 60, 80, 90, 80, 100, 170, 100, 120, 120, 120, 180, 130, 130, 150, 150, 200, 135, 140, 200, 200, "
+    "50, 40, 80, 60, 60, 60, 80, 90, 100, 90, 170, 100, 120, 120, 100, 180, 120, 130, 150, 120, 200, 120, 140, 200, 120\n"
     + _BOW_UDO +
     # Starting values for the player's mix/octave knobs. The three `oscNvol`
     # channels ARE driven from the plugin — processBlock writes them every
