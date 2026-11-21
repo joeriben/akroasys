@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 40
+  "lexicon_version": 41
  },
  "instruments": [
   {
@@ -17,8 +17,8 @@
   },
   {
    "key": "fm_bell",
-   "why": "bell / church bell / chime / carillon / tubular bell: true inharmonic bell partials (h 2.76/5.4/8.93) written as 2-operator FM at a 1.41 ratio, so the partials sit off the harmonic grid instead of being projected onto it",
-   "code": "ktm0    init 0\nif changed2(ktrig) == 1 then\n  ktm0   = 0\nendif\nktm0    = ktm0 + 1/kr           ; seconds since this strike\nkbmx0   limit (min(sr * 0.45, 20000) / (kfreq * koct1) - 1) / 1.41 - 1, 0, 40 ; sideband room\nkbtp0   min 6.0, kbmx0          ; brightest the band allows\nkbnx0   = kbtp0 * (0.2417 + 0.7583 * (1 - min(ktm0 / 2.5, 1))) ; darkens as it rings\nabl0    foscili 0.4, (kfreq * koct1), 1, 1.41, kbnx0, giSine ; the bell\nabt0    foscili 0.26, (kfreq * koct1) + 1.1, 1, 1.41, kbnx0 * 0.94, giSine ; its doublet\nabs0    = abl0 + abt0       ; the pair beats\nabr0    poscil 0.46, (kfreq * koct1)        ; steady level reference\nasig    balance abs0, abr0, 1 ; loudness held, beat kept",
+   "why": "A two-operator FM bell: a glassy, inharmonic strike whose colour rings down while the note holds. Method: J. Chowning, 'The Synthesis of Complex Audio Spectra by Means of Frequency Modulation', JAES 21(7), 1973 -- a 1:1.41 carrier:modulator ratio puts the sidebands off the harmonic grid, and a large index falling over the note makes the strike dense and the ring simple. Chowning's amplitude envelope is left out: the mean level STANDS and only the COLOUR rings down, to a held floor; a doublet beats the level at a fixed rate in Hz. A new strike restarts carriers and colour: a hit into a sounding note cuts it. The partial at 0.41 f, an octave and a third below the key, is as strong as the key, so the bell sits partly under the note. NOT a cast church bell (no hum/tierce partials), NOT a tubular bell or chime (no struck-tube modes), NOT six-operator DX FM -- that is fm3.",
+   "code": "; FOLLOWS kfreq: yes\n; Two-operator FM bell after J. Chowning, \"The Synthesis of Complex Audio Spectra by Means of\n; Frequency Modulation\", JAES 21(7), 1973, p. 533: a carrier:modulator ratio of 1:1.4 puts the\n; sidebands off the harmonic grid, and a large index that falls over the note makes the\n; spectrum dense at the strike and gradually simple as it rings. Chowning ties the index to\n; the AMPLITUDE envelope; that envelope is left out on purpose -- the player's envelope owns\n; the level -- so the mean level stands (the doublet beats it) and only the COLOUR rings down.\n; The lower sideband at 0.41 f, an octave and a third below the key, is as strong as the key\n; (measured: within 0.1 dB once settled, the strongest group at the strike). Ratio 1.41, index\n; 1..16, the straight fall to a held floor and the doublet are this entry's own numbers.\nkindex  = 0.3333 ; index [0.0..1.0]: the FM index at the strike, 1 at 0 to 16 at 1 -- how many sidebands the bell starts with\nkring   = 0.4444 ; ring [0.0..1.0]: seconds the index takes to fall to its floor, 0.5 at 0 to 5 at 1 -- the colour rings down, the level stays\nkdetune = 0.55   ; detune [0.0..1.0]: the doublet's spacing, 0 to 2 Hz -- the bell on the key, its partner that far above\nkf0     = kfreq * koct1\nkd0     = 2 * kdetune                  ; spacing FIXED in Hz: a beat rate, not a cent detune\nkroom0  limit (min(sr * 0.45, 20000) / kf0 - 1) / 1.41 - 1, 0, 40  ; sideband room: Carson's\n                                       ;   rule, top sideband f*(1 + 1.41*(I+1)) kept in band\nkpk0    min 1 + 15 * kindex, kroom0    ; the index at the strike, as far as the band allows\nkix0    = kpk0 * (0.2417 + 0.7583 * (1 - min(knote / (0.5 + 4.5 * kring), 1)))  ; falls in a\n                                       ;   straight line to a held floor: the colour settles,\n                                       ;   it never thins to a bare sine\n        if changed2(ktrig) == 1 then   ; carriers restart at phase 0 with the note, so the\n          reinit FMBELLON              ;   doublet's beat is the note's own and every strike\n        endif                          ;   begins at the same point of it\nFMBELLON:\nabl0    foscili 0.4, kf0, 1, 1.41, kix0, giSine                    ; the bell, ON the key: the\n                                       ;   stronger of the pair is what a tuner reads. Split\n                                       ;   around the key it read d/2 Hz flat (-16 c at 55 Hz);\n                                       ;   this way the pair's weighted mean is 0.22 d sharp\nabt0    foscili 0.26, kf0 + kd0, 1, 1.41, kix0 * 0.94, giSine      ; its doublet partner, d Hz above\naref0   poscil 0.46, kf0, giSine       ; the level the pair is held at. A sine from phase 0\n                                       ;   and not a constant: it starts the way the carriers\n                                       ;   start, so the fresh follower's first k-cycle reads\n                                       ;   the right ratio (a constant put a 1.7x spike on\n                                       ;   bass notes at 176400)\nabal0   balance abl0 + abt0, aref0, 0.1  ; NOT removable: at detune 0 the two carriers add in\n                                       ;   phase and stand 2.8 dB above the beating pair's\n                                       ;   mean. The 0.1 Hz follower holds that mean and lets\n                                       ;   the beat through; inside the reinit so its history\n                                       ;   starts with the note, not with the plugin\n        rireturn\nasig    = abal0 * kvol1",
    "name": "bell",
    "params": {
     "index": {
@@ -27,27 +27,23 @@
       1.0
      ],
      "default": 0.3333,
-     "note": "the peak FM index: how many sidebands the tone carries -- how bright and rich it is. As it rises the spectrum brightens steeply while the loudness stays constant (a balance stage holds the level), so only the colour moves, never the volume.",
+     "note": "Peak FM index at the strike, 1 at 0 to 16 at 1. At 220 Hz the strike centroid runs 214 -> 903 -> 2882 Hz (0 / .27 / 1). Sideband room caps it high up: above .89 at 880 Hz, above .35 at 1760 Hz it does nothing.",
      "anchors": {
       "mellow": {
        "value": 0.13,
-       "gloss": "few sidebands, close to a pure sine -- soft and round"
+       "gloss": "soft strike (centroid 2.4 f) settling near the key's own sine: a round bell"
       },
       "warm": {
        "value": 0.27,
-       "gloss": "a warm, contained brightness"
+       "gloss": "strike centroid 4.1 f settling to 1.3 f: the plain FM bell, clang then hum"
       },
       "bright": {
        "value": 0.6,
-       "gloss": "a full, singing brightness with rich sidebands"
+       "gloss": "strike centroid 8.3 f, settled 2.1 f: a glassy clang that stays bright"
       },
       "harsh": {
        "value": 0.82,
-       "gloss": "hard and edgy, the sidebands crowding the top"
-      },
-      "screaming": {
-       "value": 1.0,
-       "gloss": "the brightest, most aggressive FM -- sidebands to the ceiling"
+       "gloss": "strike centroid 11 f, settled 2.9 f: a hard metallic clang, dense to the top"
       }
      }
     },
@@ -57,19 +53,19 @@
       1.0
      ],
      "default": 0.4444,
-     "note": "how long the bright attack rings before the tone darkens. Every FM note begins bright and loses its highs as it is held -- never its loudness. Low collapses to a dark body almost at once; high stays bright deep into the note.",
+     "note": "Seconds the index falls in a straight line to its floor, 0.5 at 0 to 5 at 1. Only the colour rings down, the level stays. Colour 90 % settled at 0.5 / 2.0 / 4.15 s for 0 / .44 / 1.",
      "anchors": {
       "quick": {
        "value": 0.11,
-       "gloss": "the brightness collapses almost at once, leaving a dark body"
+       "gloss": "colour 90 % down by 1.0 s: a short clang, then the settled tone"
       },
       "medium": {
        "value": 0.44,
-       "gloss": "the bright attack settles into a darker sustain"
+       "gloss": "colour 90 % down by 2.0 s: the clang fades over a couple of seconds"
       },
       "long": {
        "value": 0.89,
-       "gloss": "stays bright well into the note before it darkens"
+       "gloss": "colour 90 % down by 3.9 s: the strike's brightness lingers deep into the note"
       }
      }
     },
@@ -79,29 +75,22 @@
       1.0
      ],
      "default": 0.55,
-     "note": "a second voice offset a fixed few Hz above the first, so the two drift against each other and the tone undulates. At 0 it stands perfectly still (the static escape); higher is a wider, more present movement. The offset is fixed in HERTZ, so it is the same at every pitch -- not a cent detune that scales with the note, and not pitch vibrato, which belongs to the synth.",
+     "note": "Doublet spacing d = 0..2 Hz, fixed in Hz: the bell sits on the key, its partner d Hz above. Partial k beats at |1 + k*1.41|*d Hz. 0 stands still. A tuner reads the key; the pair's weighted mean is 0.22*d Hz sharp.",
      "anchors": {
       "pure": {
        "value": 0.0,
-       "gloss": "a single still tone, the two voices locked together"
+       "gloss": "no doublet: one still tone, the level stands once the colour has settled"
       },
       "gentle": {
        "value": 0.4,
-       "gloss": "a slow gentle drift between the two voices"
+       "gloss": "0.8 Hz spacing: key beats 0.8 Hz, the 0.41 f partial 0.33 Hz -- a slow sway"
       },
       "wide": {
        "value": 0.85,
-       "gloss": "a wide, clearly audible drift"
+       "gloss": "1.7 Hz spacing: key 1.7 Hz, 2.41 f 4.1 Hz -- a quick, plainly audible warble"
       }
      }
     }
-   },
-   "anchor_code": {
-    "index=0.13  (mellow: few sidebands, close to a pure sine -- soft and round)": "ktm0    init 0\nif changed2(ktrig) == 1 then\n  ktm0   = 0\nendif\nktm0    = ktm0 + 1/kr           ; seconds since this strike\nkbmx0   limit (min(sr * 0.45, 20000) / (kfreq * koct1) - 1) / 1.41 - 1, 0, 40 ; sideband room\nkbtp0   min 3.0, kbmx0          ; brightest the band allows\nkbnx0   = kbtp0 * (0.2417 + 0.7583 * (1 - min(ktm0 / 2.5, 1))) ; darkens as it rings\nabl0    foscili 0.4, (kfreq * koct1), 1, 1.41, kbnx0, giSine ; the bell\nabt0    foscili 0.26, (kfreq * koct1) + 1.1, 1, 1.41, kbnx0 * 0.94, giSine ; its doublet\nabs0    = abl0 + abt0       ; the pair beats\nabr0    poscil 0.46, (kfreq * koct1)        ; steady level reference\nasig    balance abs0, abr0, 1 ; loudness held, beat kept",
-    "index=0.27  (warm: a warm, contained brightness)": "ktm0    init 0\nif changed2(ktrig) == 1 then\n  ktm0   = 0\nendif\nktm0    = ktm0 + 1/kr           ; seconds since this strike\nkbmx0   limit (min(sr * 0.45, 20000) / (kfreq * koct1) - 1) / 1.41 - 1, 0, 40 ; sideband room\nkbtp0   min 5.1, kbmx0          ; brightest the band allows\nkbnx0   = kbtp0 * (0.2417 + 0.7583 * (1 - min(ktm0 / 2.5, 1))) ; darkens as it rings\nabl0    foscili 0.4, (kfreq * koct1), 1, 1.41, kbnx0, giSine ; the bell\nabt0    foscili 0.26, (kfreq * koct1) + 1.1, 1, 1.41, kbnx0 * 0.94, giSine ; its doublet\nabs0    = abl0 + abt0       ; the pair beats\nabr0    poscil 0.46, (kfreq * koct1)        ; steady level reference\nasig    balance abs0, abr0, 1 ; loudness held, beat kept",
-    "index=0.6  (bright: a full, singing brightness with rich sidebands)": "ktm0    init 0\nif changed2(ktrig) == 1 then\n  ktm0   = 0\nendif\nktm0    = ktm0 + 1/kr           ; seconds since this strike\nkbmx0   limit (min(sr * 0.45, 20000) / (kfreq * koct1) - 1) / 1.41 - 1, 0, 40 ; sideband room\nkbtp0   min 10.0, kbmx0          ; brightest the band allows\nkbnx0   = kbtp0 * (0.2417 + 0.7583 * (1 - min(ktm0 / 2.5, 1))) ; darkens as it rings\nabl0    foscili 0.4, (kfreq * koct1), 1, 1.41, kbnx0, giSine ; the bell\nabt0    foscili 0.26, (kfreq * koct1) + 1.1, 1, 1.41, kbnx0 * 0.94, giSine ; its doublet\nabs0    = abl0 + abt0       ; the pair beats\nabr0    poscil 0.46, (kfreq * koct1)        ; steady level reference\nasig    balance abs0, abr0, 1 ; loudness held, beat kept",
-    "index=0.82  (harsh: hard and edgy, the sidebands crowding the top)": "ktm0    init 0\nif changed2(ktrig) == 1 then\n  ktm0   = 0\nendif\nktm0    = ktm0 + 1/kr           ; seconds since this strike\nkbmx0   limit (min(sr * 0.45, 20000) / (kfreq * koct1) - 1) / 1.41 - 1, 0, 40 ; sideband room\nkbtp0   min 13.3, kbmx0          ; brightest the band allows\nkbnx0   = kbtp0 * (0.2417 + 0.7583 * (1 - min(ktm0 / 2.5, 1))) ; darkens as it rings\nabl0    foscili 0.4, (kfreq * koct1), 1, 1.41, kbnx0, giSine ; the bell\nabt0    foscili 0.26, (kfreq * koct1) + 1.1, 1, 1.41, kbnx0 * 0.94, giSine ; its doublet\nabs0    = abl0 + abt0       ; the pair beats\nabr0    poscil 0.46, (kfreq * koct1)        ; steady level reference\nasig    balance abs0, abr0, 1 ; loudness held, beat kept",
-    "index=1.0  (screaming: the brightest, most aggressive FM -- sidebands to the ceiling)": "ktm0    init 0\nif changed2(ktrig) == 1 then\n  ktm0   = 0\nendif\nktm0    = ktm0 + 1/kr           ; seconds since this strike\nkbmx0   limit (min(sr * 0.45, 20000) / (kfreq * koct1) - 1) / 1.41 - 1, 0, 40 ; sideband room\nkbtp0   min 16.0, kbmx0          ; brightest the band allows\nkbnx0   = kbtp0 * (0.2417 + 0.7583 * (1 - min(ktm0 / 2.5, 1))) ; darkens as it rings\nabl0    foscili 0.4, (kfreq * koct1), 1, 1.41, kbnx0, giSine ; the bell\nabt0    foscili 0.26, (kfreq * koct1) + 1.1, 1, 1.41, kbnx0 * 0.94, giSine ; its doublet\nabs0    = abl0 + abt0       ; the pair beats\nabr0    poscil 0.46, (kfreq * koct1)        ; steady level reference\nasig    balance abs0, abr0, 1 ; loudness held, beat kept"
    }
   },
   {
