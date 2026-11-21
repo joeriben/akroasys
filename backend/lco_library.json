@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 38
+  "lexicon_version": 39
  },
  "instruments": [
   {
@@ -563,6 +563,58 @@
     "pitched=0.0  (tom: no clear note, just a low woody thump)": "aexq0   rand 0.07, 0.5, 1          ; continuous exciter -- the skin is driven, a held note stands (31-bit: no 1.365 s loop)\nk0qf0   limit (kfreq * koct1) * 1.0000, 20, 15000\nk0qg0   = ((kfreq * koct1) * 1.0000 < 15000 ? 0.071 : 0)\na0q0   mode aexq0, k0qf0, 20.0      ; mode 1 @ x1.00, Q 20\nk0qf1   limit (kfreq * koct1) * 1.5940, 20, 15000\nk0qg1   = ((kfreq * koct1) * 1.5940 < 15000 ? 0.101 : 0)\na0q1   mode aexq0, k0qf1, 18.1      ; mode 2 @ x1.59, Q 18\nk0qf2   limit (kfreq * koct1) * 2.1360, 20, 15000\nk0qg2   = ((kfreq * koct1) * 2.1360 < 15000 ? 0.085 : 0)\na0q2   mode aexq0, k0qf2, 16.2      ; mode 3 @ x2.14, Q 16\nk0qf3   limit (kfreq * koct1) * 2.2960, 20, 15000\nk0qg3   = ((kfreq * koct1) * 2.2960 < 15000 ? 0.088 : 0)\na0q3   mode aexq0, k0qf3, 14.4      ; mode 4 @ x2.30, Q 14\nk0qf4   limit (kfreq * koct1) * 2.6530, 20, 15000\nk0qg4   = ((kfreq * koct1) * 2.6530 < 15000 ? 0.081 : 0)\na0q4   mode aexq0, k0qf4, 12.5      ; mode 5 @ x2.65, Q 13\nk0qf5   limit (kfreq * koct1) * 2.9180, 20, 15000\nk0qg5   = ((kfreq * koct1) * 2.9180 < 15000 ? 0.083 : 0)\na0q5   mode aexq0, k0qf5, 10.7      ; mode 6 @ x2.92, Q 11\nk0qf6   limit (kfreq * koct1) * 3.1560, 20, 15000\nk0qg6   = ((kfreq * koct1) * 3.1560 < 15000 ? 0.087 : 0)\na0q6   mode aexq0, k0qf6, 8.8      ; mode 7 @ x3.16, Q 9\nk0qf7   limit (kfreq * koct1) * 3.5010, 20, 15000\nk0qg7   = ((kfreq * koct1) * 3.5010 < 15000 ? 0.091 : 0)\na0q7   mode aexq0, k0qf7, 7.0      ; mode 8 @ x3.50, Q 7\nasig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2 + a0q3 * k0qg3 + a0q4 * k0qg4 + a0q5 * k0qg5 + a0q6 * k0qg6 + a0q7 * k0qg7) * 3.500",
     "pitched=0.5  (mixed: a note starts to emerge from the thump)": "aexq0   rand 0.07, 0.5, 1          ; continuous exciter -- the skin is driven, a held note stands (31-bit: no 1.365 s loop)\nk0qf0   limit (kfreq * koct1) * 1.0000, 20, 15000\nk0qg0   = ((kfreq * koct1) * 1.0000 < 15000 ? 0.110 : 0)\na0q0   mode aexq0, k0qf0, 20.0      ; mode 1 @ x1.00, Q 20\nk0qf1   limit (kfreq * koct1) * 1.5470, 20, 15000\nk0qg1   = ((kfreq * koct1) * 1.5470 < 15000 ? 0.094 : 0)\na0q1   mode aexq0, k0qf1, 18.1      ; mode 2 @ x1.55, Q 18\nk0qf2   limit (kfreq * koct1) * 2.0630, 20, 15000\nk0qg2   = ((kfreq * koct1) * 2.0630 < 15000 ? 0.079 : 0)\na0q2   mode aexq0, k0qf2, 16.2      ; mode 3 @ x2.06, Q 16\nk0qf3   limit (kfreq * koct1) * 2.3680, 20, 15000\nk0qg3   = ((kfreq * koct1) * 2.3680 < 15000 ? 0.078 : 0)\na0q3   mode aexq0, k0qf3, 14.4      ; mode 4 @ x2.37, Q 14\nk0qf4   limit (kfreq * koct1) * 2.7715, 20, 15000\nk0qg4   = ((kfreq * koct1) * 2.7715 < 15000 ? 0.075 : 0)\na0q4   mode aexq0, k0qf4, 12.5      ; mode 5 @ x2.77, Q 13\nk0qf5   limit (kfreq * koct1) * 3.1240, 20, 15000\nk0qg5   = ((kfreq * koct1) * 3.1240 < 15000 ? 0.077 : 0)\na0q5   mode aexq0, k0qf5, 10.7      ; mode 6 @ x3.12, Q 11\nk0qf6   limit (kfreq * koct1) * 3.4630, 20, 15000\nk0qg6   = ((kfreq * koct1) * 3.4630 < 15000 ? 0.080 : 0)\na0q6   mode aexq0, k0qf6, 8.8      ; mode 7 @ x3.46, Q 9\nk0qf7   limit (kfreq * koct1) * 3.8555, 20, 15000\nk0qg7   = ((kfreq * koct1) * 3.8555 < 15000 ? 0.084 : 0)\na0q7   mode aexq0, k0qf7, 7.0      ; mode 8 @ x3.86, Q 7\nasig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2 + a0q3 * k0qg3 + a0q4 * k0qg4 + a0q5 * k0qg5 + a0q6 * k0qg6 + a0q7 * k0qg7) * 3.500",
     "pitched=1.0  (timpani: a real singing pitch, a tuned kettledrum)": "aexq0   rand 0.07, 0.5, 1          ; continuous exciter -- the skin is driven, a held note stands (31-bit: no 1.365 s loop)\nk0qf0   limit (kfreq * koct1) * 1.0000, 20, 15000\nk0qg0   = ((kfreq * koct1) * 1.0000 < 15000 ? 0.133 : 0)\na0q0   mode aexq0, k0qf0, 20.0      ; mode 1 @ x1.00, Q 20\nk0qf1   limit (kfreq * koct1) * 1.5000, 20, 15000\nk0qg1   = ((kfreq * koct1) * 1.5000 < 15000 ? 0.083 : 0)\na0q1   mode aexq0, k0qf1, 18.1      ; mode 2 @ x1.50, Q 18\nk0qf2   limit (kfreq * koct1) * 1.9900, 20, 15000\nk0qg2   = ((kfreq * koct1) * 1.9900 < 15000 ? 0.070 : 0)\na0q2   mode aexq0, k0qf2, 16.2      ; mode 3 @ x1.99, Q 16\nk0qf3   limit (kfreq * koct1) * 2.4400, 20, 15000\nk0qg3   = ((kfreq * koct1) * 2.4400 < 15000 ? 0.066 : 0)\na0q3   mode aexq0, k0qf3, 14.4      ; mode 4 @ x2.44, Q 14\nk0qf4   limit (kfreq * koct1) * 2.8900, 20, 15000\nk0qg4   = ((kfreq * koct1) * 2.8900 < 15000 ? 0.066 : 0)\na0q4   mode aexq0, k0qf4, 12.5      ; mode 5 @ x2.89, Q 13\nk0qf5   limit (kfreq * koct1) * 3.3300, 20, 15000\nk0qg5   = ((kfreq * koct1) * 3.3300 < 15000 ? 0.068 : 0)\na0q5   mode aexq0, k0qf5, 10.7      ; mode 6 @ x3.33, Q 11\nk0qf6   limit (kfreq * koct1) * 3.7700, 20, 15000\nk0qg6   = ((kfreq * koct1) * 3.7700 < 15000 ? 0.071 : 0)\na0q6   mode aexq0, k0qf6, 8.8      ; mode 7 @ x3.77, Q 9\nk0qf7   limit (kfreq * koct1) * 4.2100, 20, 15000\nk0qg7   = ((kfreq * koct1) * 4.2100 < 15000 ? 0.074 : 0)\na0q7   mode aexq0, k0qf7, 7.0      ; mode 8 @ x4.21, Q 7\nasig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2 + a0q3 * k0qg3 + a0q4 * k0qg4 + a0q5 * k0qg5 + a0q6 * k0qg6 + a0q7 * k0qg7) * 3.500"
+   }
+  },
+  {
+   "key": "analog_kick",
+   "why": "The TR-808 bass drum after Werner, Abel & Smith (DAFx-14): a barely damped bridged-T resonator struck by the trigger pulse, its ring thrown up while the 6 ms pulse is on, then the 'sigh', about two semitones settling over 0.2 s. One mode, no separate click, tone or drive; not a 909 or an acoustic kick. It follows the key, so a long decay on a low note is also the long 808 bass. The 6 ms throw is fixed in time, not in periods: at 55 Hz a soft knock, at 880 Hz an audible chirp. After 0.2 s it is a pure decaying sine at the key. It rings only while the synth's voice lives, so a long decay needs a long release. A new strike restarts the resonator: every hit has the same level, and a hit into a ring cuts that ring. The scale 1.6 is a level choice, not part of the model.",
+   "code": "; DECAY: SELF\n; FOLLOWS kfreq: yes\n; The TR-808 bass drum as Werner, Abel & Smith model its circuit (DAFx-14, \"A Physically-\n; Informed, Circuit-Bendable, Digital Model of the Roland TR-808 Bass Drum Circuit\"): a\n; bridged-T resonator, barely damped, struck by the trigger pulse. While the pulse is on\n; it loads the network and throws the ring's frequency up by more than an octave for about\n; 6 ms; afterwards a slow leak (R161) lets the ring settle about two semitones down over\n; some 0.2 s, the \"sigh\". The output stage is linear: no drive, no separate click or tone.\nkdecay  = 0.30   ; decay[0.08..1.0]: seconds for the ring to fall to 1/e, about -8.7 dB\nksweep  = 1.20   ; sweep[0..2]: octaves the ring is thrown up while the 6 ms trigger pulse is on\nkbase   = kfreq * koct1\n; THE RESONATOR IS `mvmfilter`, NOT `mode`: it rotates its state, so a frequency change\n; under a ring moves the pitch and not the energy (`mode` gains up to +18 dB when its\n; frequency falls while it rings). Frequency and tau are BOTH k-rate -- an a-rate\n; frequency with a k-rate tau does not ring at all. It sits INSIDE the reinit section,\n; so every strike restarts it from rest: each hit has the same level, and a hit into a\n; ring cuts that ring (a one-sample step, as large as the ring was at that moment).\n; THE STRIKE is the host's note-on edge. `mpulse` in the section also fires once when the\n; orchestra is built; `kup` is 0 then, and that pulse has no amplitude.\nkup     timeinsts\n        if changed2(ktrig) == 1 then\n          reinit KICK\n        endif\nKICK:\niamp    = (i(kup) > 0 ? 1.0 : 0)\nacon    mpulse iamp, 0\n; the throw: full for 5 ms, back over 1 ms -- FIXED IN TIME, not in periods of the note\nkatk    linseg 1, 0.005, 1, 0.001, 0, 1, 0\n; the sigh: 1.13 -> 1.0 over 0.18 s, read off the paper's Fig. 11 by eye\nksig    expseg 1.13, 0.18, 1, 1, 1\nkf      limit kbase * 2^(ksweep * katk) * ksig, 20, 12000\nares    mvmfilter acon, kf, kdecay\n        rireturn\n; LEVEL CHOICE, not a correction of the model. An impulse of 1 into mvmfilter peaks at\n; exactly 1 at every frequency, decay and rate; the host leaves a trig-struck body\n; untrimmed, so this constant IS its loudness in the plugin (about 0.5 delivered, where\n; the trimmed standing bodies peak).\nasig    = ares * 1.6 * kvol1",
+   "name": "analog kick",
+   "params": {
+    "decay": {
+     "range": [
+      0.08,
+      1.0
+     ],
+     "default": 0.3,
+     "note": "Seconds for the ring to fall to 1/e: 0.08 is down 60 dB in about 0.55 s, 1.0 in about 7 s. Read all the time, so turning it also shortens or lengthens a ring already sounding.",
+     "anchors": {
+      "short": {
+       "value": 0.08,
+       "gloss": "a short thud, down 60 dB in about half a second"
+      },
+      "default": {
+       "value": 0.3,
+       "gloss": "a boom that falls 60 dB in about 2 s"
+      },
+      "long": {
+       "value": 1.0,
+       "gloss": "the long boom that is also a bass note, about 7 s to -60 dB"
+      }
+     }
+    },
+    "sweep": {
+     "range": [
+      0.0,
+      2.0
+     ],
+     "default": 1.2,
+     "note": "Octaves the ring is thrown up while the 6 ms trigger pulse is on. It leaves the sigh and the ring after it as they are, and acts only in those 6 ms, so a change is heard from the next strike.",
+     "anchors": {
+      "none": {
+       "value": 0.0,
+       "gloss": "no throw: the strike starts on the sigh, a round soft onset"
+      },
+      "default": {
+       "value": 1.2,
+       "gloss": "about 1.2 octaves up for 6 ms, a knock on the front"
+      },
+      "hard": {
+       "value": 2.0,
+       "gloss": "two octaves up for 6 ms, a hard knock; a chirp on high keys"
+      }
+     }
+    }
    }
   },
   {
@@ -1274,7 +1326,7 @@
   },
   {
    "key": "sub_sine",
-   "why": "sub bass -- the 808-style low pair: a pure fundamental with a divider octave beneath it",
+   "why": "sub bass -- the low pair under a bass (the 808 bass drum and its long tuned boom is analog_kick): a pure fundamental with a divider octave beneath it",
    "code": "ksbw0   poscil 0.0006, 0.067         ; divider drift\nasb0    gbuzz 0.28, (kfreq * koct1) * 0.5 * (1 + ksbw0), 2, 1, 0.55, giCos ; sub octave (divider)\nafn0    poscil 0.50, (kfreq * koct1)          ; fundamental\nasig    = afn0 + asb0",
    "name": "sub bass"
   },

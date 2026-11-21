@@ -1,5 +1,5 @@
 {
- "lexicon_version": 38,
+ "lexicon_version": 39,
  "techniques": [
   {
    "key": "sine",
@@ -822,6 +822,76 @@
      "strikepos": "von BJ nicht getestet"
     }
    }
+  },
+  {
+   "key": "analog_kick",
+   "surface_forms": [
+    "kick",
+    "kick drum",
+    "kickdrum",
+    "bass drum",
+    "bassdrum",
+    "bd",
+    "808 kick",
+    "boom",
+    "808"
+   ],
+   "priority": 10,
+   "why": "The TR-808 bass drum after Werner, Abel & Smith (DAFx-14): a barely damped bridged-T resonator struck by the trigger pulse, its ring thrown up while the 6 ms pulse is on, then the 'sigh', about two semitones settling over 0.2 s. One mode, no separate click, tone or drive; not a 909 or an acoustic kick. It follows the key, so a long decay on a low note is also the long 808 bass. The 6 ms throw is fixed in time, not in periods: at 55 Hz a soft knock, at 880 Hz an audible chirp. After 0.2 s it is a pure decaying sine at the key. It rings only while the synth's voice lives, so a long decay needs a long release. A new strike restarts the resonator: every hit has the same level, and a hit into a ring cuts that ring. The scale 1.6 is a level choice, not part of the model.",
+   "code": "; DECAY: SELF\n; FOLLOWS kfreq: yes\n; The TR-808 bass drum as Werner, Abel & Smith model its circuit (DAFx-14, \"A Physically-\n; Informed, Circuit-Bendable, Digital Model of the Roland TR-808 Bass Drum Circuit\"): a\n; bridged-T resonator, barely damped, struck by the trigger pulse. While the pulse is on\n; it loads the network and throws the ring's frequency up by more than an octave for about\n; 6 ms; afterwards a slow leak (R161) lets the ring settle about two semitones down over\n; some 0.2 s, the \"sigh\". The output stage is linear: no drive, no separate click or tone.\nkdecay  = 0.30   ; decay[0.08..1.0]: seconds for the ring to fall to 1/e, about -8.7 dB\nksweep  = 1.20   ; sweep[0..2]: octaves the ring is thrown up while the 6 ms trigger pulse is on\nkbase   = kfreq * koct1\n; THE RESONATOR IS `mvmfilter`, NOT `mode`: it rotates its state, so a frequency change\n; under a ring moves the pitch and not the energy (`mode` gains up to +18 dB when its\n; frequency falls while it rings). Frequency and tau are BOTH k-rate -- an a-rate\n; frequency with a k-rate tau does not ring at all. It sits INSIDE the reinit section,\n; so every strike restarts it from rest: each hit has the same level, and a hit into a\n; ring cuts that ring (a one-sample step, as large as the ring was at that moment).\n; THE STRIKE is the host's note-on edge. `mpulse` in the section also fires once when the\n; orchestra is built; `kup` is 0 then, and that pulse has no amplitude.\nkup     timeinsts\n        if changed2(ktrig) == 1 then\n          reinit KICK\n        endif\nKICK:\niamp    = (i(kup) > 0 ? 1.0 : 0)\nacon    mpulse iamp, 0\n; the throw: full for 5 ms, back over 1 ms -- FIXED IN TIME, not in periods of the note\nkatk    linseg 1, 0.005, 1, 0.001, 0, 1, 0\n; the sigh: 1.13 -> 1.0 over 0.18 s, read off the paper's Fig. 11 by eye\nksig    expseg 1.13, 0.18, 1, 1, 1\nkf      limit kbase * 2^(ksweep * katk) * ksig, 20, 12000\nares    mvmfilter acon, kf, kdecay\n        rireturn\n; LEVEL CHOICE, not a correction of the model. An impulse of 1 into mvmfilter peaks at\n; exactly 1 at every frequency, decay and rate; the host leaves a trig-struck body\n; untrimmed, so this constant IS its loudness in the plugin (about 0.5 delivered, where\n; the trimmed standing bodies peak).\nasig    = ares * 1.6 * kvol1",
+   "params": {
+    "decay": {
+     "range": [
+      0.08,
+      1.0
+     ],
+     "default": 0.3,
+     "note": "Seconds for the ring to fall to 1/e: 0.08 is down 60 dB in about 0.55 s, 1.0 in about 7 s. Read all the time, so turning it also shortens or lengthens a ring already sounding.",
+     "anchors": {
+      "short": {
+       "value": 0.08,
+       "gloss": "a short thud, down 60 dB in about half a second"
+      },
+      "default": {
+       "value": 0.3,
+       "gloss": "a boom that falls 60 dB in about 2 s"
+      },
+      "long": {
+       "value": 1.0,
+       "gloss": "the long boom that is also a bass note, about 7 s to -60 dB"
+      }
+     }
+    },
+    "sweep": {
+     "range": [
+      0.0,
+      2.0
+     ],
+     "default": 1.2,
+     "note": "Octaves the ring is thrown up while the 6 ms trigger pulse is on. It leaves the sigh and the ring after it as they are, and acts only in those 6 ms, so a change is heard from the next strike.",
+     "anchors": {
+      "none": {
+       "value": 0.0,
+       "gloss": "no throw: the strike starts on the sigh, a round soft onset"
+      },
+      "default": {
+       "value": 1.2,
+       "gloss": "about 1.2 octaves up for 6 ms, a knock on the front"
+      },
+      "hard": {
+       "value": 2.0,
+       "gloss": "two octaves up for 6 ms, a hard knock; a chirp on high keys"
+      }
+     }
+    }
+   },
+   "heard": {
+    "status": "offen",
+    "datum": "2026-11-20",
+    "hinweis": "Ungehört. Der Vergleich mit einer Aufnahme einer echten TR-808-Bassdrum steht aus; der Eintrag trägt den Namen dieses Instruments.",
+    "wie": "ungehört; am Instrument zu prüfen"
+   },
+   "display_name": "analog kick"
   },
   {
    "key": "metallic_fm",
@@ -2934,7 +3004,6 @@
     "sub bass",
     "subbass",
     "sub",
-    "808",
     "sine bass",
     "sub oscillator",
     "subosc",
@@ -2966,7 +3035,7 @@
     "motion_rate_hz": 0.25
    },
    "priority": 10,
-   "why": "sub bass -- the 808-style low pair: a pure fundamental with a divider octave beneath it",
+   "why": "sub bass -- the low pair under a bass (the 808 bass drum and its long tuned boom is analog_kick): a pure fundamental with a divider octave beneath it",
    "mandatory_flags": [
     "'sub' is a register/mix role, not a distinct spectrum; approximated as a pure sine"
    ],
