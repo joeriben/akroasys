@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 43
+  "lexicon_version": 44
  },
  "instruments": [
   {
@@ -1336,8 +1336,8 @@
   },
   {
    "key": "sub_sine",
-   "why": "sub bass -- the low pair under a bass (the 808 bass drum and its long tuned boom is analog_kick): a pure fundamental with a divider octave beneath it",
-   "code": "ksbw0   poscil 0.0006, 0.067         ; divider drift\nasb0    gbuzz 0.28, (kfreq * koct1) * 0.5 * (1 + ksbw0), 2, 1, 0.55, giCos ; sub octave (divider)\nafn0    poscil 0.50, (kfreq * koct1)          ; fundamental\nasig    = afn0 + asb0",
+   "why": "sub bass: a sine fundamental with its divider octave beneath it, the octave 9 dB under the fundamental. The octave's level breathes +-2 dB over a 4-second cycle that restarts with every note, so the low end swells and recedes slowly while the fundamental stays still. The fundamental is the key you play; the octave runs at exactly half its frequency and is never reset, so the two stay phase-locked through glides and from note to note, and the waveform never drifts; its peak moves only with the octave's breath. Material for a clean low register under other layers or alone: no attack, no strike, nothing above the fundamental. The waveform repeats every two periods of the key, which a pitch probe flags as period doubling; that is the octave, by design. The 808 bass drum is analog_kick, not this.",
+   "code": "; FOLLOWS kfreq: yes -- the fundamental is kfreq * koct1, the divider octave exactly half of it\n; A sine fundamental and its divider octave beneath it. The octave sits 9 dB under the\n; fundamental and its level breathes +-2 dB over a 4-s cycle that restarts at every note\n; (keyed to knote, never a free LFO: 16 always-on voices would otherwise start each note\n; wherever the LFO happened to stand). The fundamental itself never moves.\n; PHASE LOCK: both poscil run free from the orchestra's start and are never reinit'd; the\n; octave's frequency is the fundamental's times 0.5, which is exact in binary floating point,\n; so the two phase increments are exactly 2:1 on every sample, through a glide and across\n; every note of a reused voice. The waveform cannot drift; its peak moves only with the\n; octave's breath (0.60 to 0.66). Do not\n; reinit either oscillator, give one a phase, or detune the octave: a sub that drifts\n; against its input is not a divider.\nafn0    poscil 0.50, kfreq * koct1, giSine                  ; fundamental\nksb0    = 0.50 * ampdb(-9 + 2 * sin(6.283185307 * 0.25 * knote))\nasb0    poscil a(ksb0), kfreq * koct1 * 0.5, giSine         ; divider octave, phase-locked; its level\n;   reaches the oscillator at audio rate: the breath restarts at note-on, and a k-rate level\n;   would land that restart as one step (up to -23 dB re peak) instead of a 64-sample ramp\nasig    = (afn0 + asb0) * kvol1",
    "name": "sub bass"
   },
   {
