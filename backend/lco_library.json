@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 52
+  "lexicon_version": 53
  },
  "instruments": [
   {
@@ -744,6 +744,36 @@
       "long": {
        "value": 3.0,
        "gloss": "three times the ring: a tuned drum that sings past the snares"
+      }
+     }
+    }
+   }
+  },
+  {
+   "key": "cowbell",
+   "why": "The TR-808 cowbell: a circuit model from the component values on p.13 of the TR-808 Service Notes -- two Schmitt-trigger squares (540 and 800 Hz) through two gates driven by ONE envelope (an 8.8 ms punch, then a 143 ms tail), the IC2 band-pass and the output coupling; every coefficient comes from the parts. The whole circuit is transposed, so the 800 Hz square plays the key: the factory cowbell is the key 800 Hz (G5 +35 cents). The colour is static, as in the 808; the only motion is a beat at key/40 Hz. Ring length follows the key (tail tau 0.52 s at 220 Hz, 2.1 s at 55), so low keys ring long and the amp release decides how much is heard. A strike into the ring is not a fresh strike: -2.3..+3.4 dB, rolls up to +4.6 dB and legato upward jumps reach asig 2.65-2.69, into the host's soft clip. The 808's cymbal and hats are metal_squares.",
+   "code": "ktone   = 2.2    ; tone[1.8..2.7]: R24 in kilohm, the band-pass centre; 2.2 is the stock 808, lower is brighter\n; DECAY: SELF\n; LOUDNESS: tone\n; FOLLOWS kfreq: yes\n; THE TR-808 COWBELL, a direct circuit model of the voice from the component values on p.13\n; (voicing board) of the Roland TR-808 Service Notes: two Schmitt-trigger squares (540 and\n; 800 Hz, duty 0.4798), two exclusive-gate VCAs (Q14, Q15) driven by ONE envelope network,\n; C9 || (R82 + C34), the IC2 multiple-feedback band-pass (R24 R25 C28 C29, loaded by the arm\n; caps C30 C31) and the output coupling C76 / R117. Every coefficient below is computed from\n; those parts in closed form; nothing is fitted to the output. 1.384 at the end is a level\n; choice (one strike at the defaults, 220 Hz, peaks at asig 1.6 at 176400), not the model.\n; TRANSPOSED AS A WHOLE: every capacitor is divided by r = key/800, so every corner and every\n; time constant scales by r and the 800 Hz square plays the key -- varispeed, the 808 cowbell\n; sample pitched down (Archer, 2009). The factory cowbell is the key 800 Hz. Ring length\n; follows: the tail's tau is 143 ms * 800/key (measured on the output at both rates:\n; 142.8 ms at 800 Hz, 0.52 s at 220, 2.08 s at 55).\n; AT 44100, above 1760 Hz the top keys lose level against 176400 (tone 1.8: -0.8 dB at 4186,\n; -4.3 at 8000, -6.0 at 12000) and alias (off-grid energy -25 dB at 4186, tone 1.8).\n; THE COLOUR IS STATIC, as in the 808: one envelope drives both gates. The only motion inside\n; a note is the two-stage decay and the 20*r Hz beat of the 27:40 pair (2*f2 against 3*f1).\n; DECLARED DEVIATIONS from the circuit: both oscillators restart at fixed phases (0 / 0.37)\n; at every strike, where the 808's run free, so every hit FROM SILENCE is the same; the\n; envelope restarts at a fresh strike's values, where the 808 keeps C34's charge. The arm caps,\n; the band-pass and the output HP keep their state, so a strike into the ring lands -2.3 ..\n; +3.4 dB against a fresh one (peak up to 2.65 at asig), a roll up to +4.6 dB (2.69: tone 2.0,\n; 35 Hz, 20/s), and an upward key change without a strike up to 2.67, at both rates: above\n; the host's transparent 2.52, under its 2.75.\n; the whole circuit transposed (every capacitor / r): the 800 Hz square plays the key\nktp = kfreq*koct1/800\n; TR-808 Service Notes p.13, voicing board, cowbell\niR25 = 470000\niR26 = 10000\niR28 = 100000\niR82 = 33000\niC28 = 10e-9\niC29 = 3.3e-9\niC30 = 2.2e-9\niC9  = 0.47e-6\niC34 = 1e-6\niRs  = 100\nid   = 0.4798\nif1  = 540\nif2  = 800\nitoff = (iR28+iR26)*iC30\nkup timeinsts\nif changed2(ktrig) == 1 then\n  reinit CB\nendif\nCB:\n; no strike at orchestra build: the section runs once there with kup = 0\niamp = (i(kup) > 0 ? 1.0 : 0)\n; i(ktp) reads 0 on the build pass: the guard keeps the time scale finite\nir   = limit(i(ktp), 0.01, 16)\n; envelope: C9 || (R82 + C34), drained by the two VCAs (on-time through R28/R29 plus the\n; arm caps' charge per cycle, 12.4 uS). Two real poles, closed form: 8.8 ms and 143 ms at\n; r = 1, weights 0.76 / 0.24; time-scaled by r with the rest.\n; Rs (the trigger source, 100 ohm) is assumed; it only sets how fully C9 charges in the\n; 1 ms trigger pulse, to exp(-21).\niGd = 2*id/iR28 + if1*iC30*(1-exp(-(1-id)/(if1*itoff))) + if2*iC30*(1-exp(-(1-id)/(if2*itoff)))\nim11 = -(1/iR82 + iGd)/iC9\nim12 = 1/(iR82*iC9)\nim21 = 1/(iR82*iC34)\nim22 = -im21\nidisc = sqrt((im11+im22)*(im11+im22)/4 - (im11*im22 - im12*im21))\nil1 = (im11+im22)/2 - idisc\nil2 = (im11+im22)/2 + idisc\niw0 = 1 - exp(-0.001/(iR82*iC34))\nic1 = (im11 + im12*iw0 - il2)/(il1 - il2)\nic2 = 1 - ic1\nipul = 0.001/ir\naR  expsega 1, ipul, exp(-0.001/(iRs*iC9))\naD1 expsega 1, ipul, 1, -20/(il1*ir), exp(-20)\naD2 expsega 1, ipul, 1, -20/(il2*ir), exp(-20)\naE = iamp*(1-aR)*(ic1*aD1 + ic2*aD2)\n; the squares restart at fixed phases with the strike (a declared deviation, see above)\nas1 vco2 1, if1*ktp, 2, id, 0\nas2 vco2 1, if2*ktp, 2, id, 0.37\nrireturn\n; THE FILTERS STAY OUTSIDE the reinit section: inside it every reinit restarts a(0)/a(1)\n; (interp from 0), biquada starts at a0 = 1/64 and diverges (peak 5e15); reset at the strike\n; with constant coefficients instead, the state jump clicks (step 1.5 at asig).\n; the two VCAs: each arm cap follows E through R28+R26 while its transistor is off and\n; is emptied through R26 while it is on; the arm current is C30 dV/dt\nasw1 = limit((as1+1)*0.5, 0, 1)\nasw2 = limit((as2+1)*0.5, 0, 1)\nkaon  = exp(-ktp/(iR26*iC30*sr))\nkaoff = exp(-ktp/(itoff*sr))\nay1 biquada aE, (1-asw1)*(1-kaoff), a(0), a(0), a(1), -(asw1*kaon + (1-asw1)*kaoff), a(0)\nay2 biquada aE, (1-asw2)*(1-kaoff), a(0), a(0), a(1), -(asw2*kaon + (1-asw2)*kaoff), a(0)\n; IC2 multiple-feedback band-pass, driven by the arm currents, X loaded by both arms:\n; O = -s^2 C30 C28 R25 / (s^2 C28 C29 R25 + s (C28+C29+2 C30) + 1/R24) * (y1+y2)\n;   = -(C30/C29) * s^2/(s^2 + s w0/Q + w0^2), realised as a TPT state-variable high-pass\n;   (bilinear, prewarped at w0): its integrator state survives a retune, as the capacitors do.\n;   NOT a direct-form biquad: its past-sample state, read through retuned coefficients,\n;   bursts on a fast downward note change (measured asig 5.93 at 176400, 1760 -> 55 Hz).\nka2 = iC28*iC29*iR25/(ktp*ktp)\nka1 = (iC28+iC29+2*iC30)/ktp\nka0 = 1/(ktone*1000)\nkw0 = sqrt(ka0/ka2)\nao zdf_2pole ay1+ay2, min(kw0/(2*3.14159265358979), 0.45*sr), sqrt(ka0*ka2)/ka1, 1\nao = -ao*iC30/iC29\n; output coupling C76 / R117\nkT  = 22000*0.022e-6/ktp\nkK2 = 2*sr\nahp biquad ao, kT*kK2, -kT*kK2, 0, kT*kK2+1, 1-kT*kK2, 0\nasig = ahp*1.384*kvol1",
+   "name": "808 cowbell",
+   "params": {
+    "tone": {
+     "range": [
+      1.8,
+      2.7
+     ],
+     "default": 2.2,
+     "note": "R24, the band-pass resistor, in kilohm (Archer: \"easily tunable by varying R24\"): the band centre goes with 1/sqrt(R24) and the level moves with it, declared. A setting: the colour inside a note stays put.",
+     "anchors": {
+      "bright": {
+       "value": 1.8,
+       "gloss": "R24 1.8k: band peak 962 Hz at key 800 (1.20 x key); -3.6 dB rms, -0.4 dB peak"
+      },
+      "stock": {
+       "value": 2.2,
+       "gloss": "the 808 as built: band peak 872 Hz at key 800 (1.09 x key); the level reference"
+      },
+      "dark": {
+       "value": 2.7,
+       "gloss": "R24 2.7k: band peak 790 Hz at key 800 (0.99 x key); +1.4 dB rms, +1.8..2.0 dB peak"
       }
      }
     }
