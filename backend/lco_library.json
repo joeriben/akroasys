@@ -1,6 +1,6 @@
 {
  "generated_from": {
-  "lexicon_version": 54
+  "lexicon_version": 55
  },
  "instruments": [
   {
@@ -1919,6 +1919,58 @@
    "why": "theremin / ondes martenot / musical saw -- the breathing, near-vocal purity of a swept heterodyne tone: an almost pure tone whose odd harmonics waver slowly under a heterodyne nonlinearity",
    "code": "kwv0    poscil 0.5, 0.9              ; slow timbre waver\nkndx0   = 0.42 + 0.34 * kwv0       ; heterodyne mix depth\nasig    foscili 0.55, (kfreq * koct1), 1, 2, kndx0, giSine ; heterodyne nonlinearity\nasig    = asig * kvol1",
    "name": "theremin"
+  },
+  {
+   "key": "formant_voice",
+   "why": "a sung vowel: five formants, each a stream of decaying sine grains fired once per period (FOF, the CHANT method, Rodet 1984), with the sung-vowel formant table of the Csound manual (Appendix D). The key sets the grain rate, the formants stay fixed in Hz, so a vowel keeps its identity across the keyboard until the harmonics grow too sparse to draw it (above about 1.5 kHz). Above F1 the first formant is raised to the fundamental, as sopranos do (Sundberg). A vowel, not a singer: no text, no vibrato, no breath, no choir. The vowel drifts slowly by itself. vowel = which vowel, u o a e i in order; voice = whose formants, bass to soprano: it moves the upper formants (the singer's band near 3 kHz) more than the brightness.",
+   "code": "kvowel  = 2.0    ; vowel [0..4]: the sung vowel, u o a e i in that order, gliding through the ones between\nkvoice  = 1.0    ; voice [0..3]: whose vowel it is: bass, tenor, alto, soprano, gliding between neighbours\n; FOLLOWS kfreq: yes\n; the key sets the grain rate (the pitch); the five formants stay where the tables put them\n; body resonance, FIXED in Hz\n; formants from the head tables giVoxHz / giVoxDb / giVoxBw (Csound manual, Appendix D);\n; index = (voice * 5 + formant) * 5 + vowel\n; LOUDNESS: vowel\n; LOUDNESS: voice\nkf0     limit kfreq * koct1, 20, 12000\n; kgateraw, not kgate: kgate is smoothed and only approaches 0, so the grains would run\n; (and cost CPU) after the note. With xfund 0 fof starts no new grain.\nkfund   = (kgateraw > 0 ? kf0 : 0)\n; idle: 50 ms after the gate falls every grain has ended (kdur <= 20 ms), so the bank is\n; skipped until the next note (an idle voice then costs 0.04 % of a core at 176400)\nkidle   init 1\n; a note that starts when every grain has ended (kdur <= kcap <= 20 ms) restarts fof's grain\n; clock: a reinit with iskip 0 sets fundphs to a wrap (ugens7.c fofset0, iphs 0), so the\n; first grain is at the note-on and not up to a period later, at the phase the last note\n; froze. One k-cycle later a second pass with iskip 1 touches no grain and puts the opcode\n; back where its lifetime test is bypassed (see the fof lines), so a held note never runs out.\nkon     = (kgateraw > 0 && kidle > 0.021 ? 1 : 0)\nkidle   = (kgateraw > 0 ? 0 : kidle + ksmps / sr)\nkleg    init 0\nif kon == 1 || kleg == 1 then\n  reinit VOXFOF\nendif\nkleg    = kon\nasig    = 0\n        if kidle > 0.05 kgoto VOXIDLE\n; movement keyed to the note: the vowel drifts by up to a third of a vowel (two rates of\n; opposite sign, this entry's own constants, so it crosses the set vowel both ways within\n; the first 3 s), reflected at u and i so that it does not stop at either end\nkdrift  = 0.2 * sin(6.283185307 * 0.13 * knote) - 0.12 * sin(6.283185307 * 0.31 * knote)\nkvr     = kvowel + kdrift\nkvw     = (kvr < 0 ? -kvr : (kvr > 4 ? 8 - kvr : kvr))\nkvc     limit kvoice, 0, 3\nkv0     = int(kvc)\nkv1     = min(kv0 + 1, 3)\nkvf     = kvc - kv0\nkF1a    tablei (kv0 * 5 + 0) * 5 + kvw, giVoxHz\nkF1b    tablei (kv1 * 5 + 0) * 5 + kvw, giVoxHz\nkF1     = kF1a + (kF1b - kF1a) * kvf\nkA1a    tablei (kv0 * 5 + 0) * 5 + kvw, giVoxDb\nkA1b    tablei (kv1 * 5 + 0) * 5 + kvw, giVoxDb\nkA1     = kA1a + (kA1b - kA1a) * kvf\nkB1a    tablei (kv0 * 5 + 0) * 5 + kvw, giVoxBw\nkB1b    tablei (kv1 * 5 + 0) * 5 + kvw, giVoxBw\nkB1     = kB1a + (kB1b - kB1a) * kvf\nkF2a    tablei (kv0 * 5 + 1) * 5 + kvw, giVoxHz\nkF2b    tablei (kv1 * 5 + 1) * 5 + kvw, giVoxHz\nkF2     = kF2a + (kF2b - kF2a) * kvf\nkA2a    tablei (kv0 * 5 + 1) * 5 + kvw, giVoxDb\nkA2b    tablei (kv1 * 5 + 1) * 5 + kvw, giVoxDb\nkA2     = kA2a + (kA2b - kA2a) * kvf\nkB2a    tablei (kv0 * 5 + 1) * 5 + kvw, giVoxBw\nkB2b    tablei (kv1 * 5 + 1) * 5 + kvw, giVoxBw\nkB2     = kB2a + (kB2b - kB2a) * kvf\nkF3a    tablei (kv0 * 5 + 2) * 5 + kvw, giVoxHz\nkF3b    tablei (kv1 * 5 + 2) * 5 + kvw, giVoxHz\nkF3     = kF3a + (kF3b - kF3a) * kvf\nkA3a    tablei (kv0 * 5 + 2) * 5 + kvw, giVoxDb\nkA3b    tablei (kv1 * 5 + 2) * 5 + kvw, giVoxDb\nkA3     = kA3a + (kA3b - kA3a) * kvf\nkB3a    tablei (kv0 * 5 + 2) * 5 + kvw, giVoxBw\nkB3b    tablei (kv1 * 5 + 2) * 5 + kvw, giVoxBw\nkB3     = kB3a + (kB3b - kB3a) * kvf\nkF4a    tablei (kv0 * 5 + 3) * 5 + kvw, giVoxHz\nkF4b    tablei (kv1 * 5 + 3) * 5 + kvw, giVoxHz\nkF4     = kF4a + (kF4b - kF4a) * kvf\nkA4a    tablei (kv0 * 5 + 3) * 5 + kvw, giVoxDb\nkA4b    tablei (kv1 * 5 + 3) * 5 + kvw, giVoxDb\nkA4     = kA4a + (kA4b - kA4a) * kvf\nkB4a    tablei (kv0 * 5 + 3) * 5 + kvw, giVoxBw\nkB4b    tablei (kv1 * 5 + 3) * 5 + kvw, giVoxBw\nkB4     = kB4a + (kB4b - kB4a) * kvf\nkF5a    tablei (kv0 * 5 + 4) * 5 + kvw, giVoxHz\nkF5b    tablei (kv1 * 5 + 4) * 5 + kvw, giVoxHz\nkF5     = kF5a + (kF5b - kF5a) * kvf\nkA5a    tablei (kv0 * 5 + 4) * 5 + kvw, giVoxDb\nkA5b    tablei (kv1 * 5 + 4) * 5 + kvw, giVoxDb\nkA5     = kA5a + (kA5b - kA5a) * kvf\nkB5a    tablei (kv0 * 5 + 4) * 5 + kvw, giVoxBw\nkB5b    tablei (kv1 * 5 + 4) * 5 + kvw, giVoxBw\nkB5     = kB5a + (kB5b - kB5a) * kvf\n; F1 tuning (Sundberg): above F1 a singer raises F1 to the fundamental; untuned, the first\n; formant falls below H1 and the note loses its body (measured: -44 dB at 2 kHz, tenor a)\nkF1t    = max(kF1, kf0)\n; grain length: a grain lasts until its own decay is 20 dB down where the end fade starts\n; (0.65 kdur): kdur = ln(10) / (pi * 0.65 * B) = 1.13 / B, per formant. fof's CPU grows with\n; the grains alive, so the length is also capped at 20 ms and at 10 periods (uncapped,\n; 16 voices at 1760 Hz = 95 % of a core); a B narrower than the cap allows is widened to\n; 1.13 / cap, so it is heard as the B it gets, not cut. The decay fade is 0.35 kdur.\nkcap    = min(0.02, 10 / kf0)\nkbf     = 1.13 / kcap\n; the rise (giRis, 1/2 - cos/2) lasts 3 ms, or 0.65 kdur where the grain is shorter (high\n; keys), so that it ends where the decay fade begins and never outlasts the grain\n; level: a periodic train of damped sinusoids (rate f0, formant F, bandwidth B, amplitude a)\n; has power a^2/(8 pi) * (f0/b) * S, b = B/2, S = sinh(2 pi y)/(cosh(2 pi y) - cos(2 pi x)),\n; x = F/f0, y = b/f0 (Fourier series of the train + the closed-form Lorentzian comb sum).\n; S is 1 on average and peaks where a harmonic sits on a formant. fof starts each grain at\n; a * exp(pi B Tr) (ugens7.c newpulse: preamp = expamp^-rismps), so that it reaches a at\n; the end of the rise Tr; its energy is then R times the plain decay's: with q = 2 pi B Tr,\n; the rise (integral of rise^2 * exp(q (1 - s)), closed form) gives 3/8 (e^q - 1)\n; - 1/2 q^2 (e^q + 1)/(q^2 + pi^2) + 1/8 q^2 (e^q - 1)/(q^2 + 4 pi^2), the decay after it\n; 1 - e^(q - 2 pi B kdur) = 1 - e^q e^-7.1 (+1.2 dB at B 40 Hz, +7 dB at 200 Hz, +9 dB where\n; Tr = 0.65 kdur). Input gain only, from the opcode's own envelope.\nkBe1    = max(kB1, kbf)\nkdur1   = 1.13 / kBe1\nkris1   = min(0.003, 0.65 * kdur1)\nky1     = 0.5 * kBe1 / kf0\nkS1     = sinh(6.2832 * ky1) / (cosh(6.2832 * ky1) - cos(6.2832 * kF1t / kf0))\nkq1     = 6.2832 * kBe1 * kris1\nkE1     = exp(kq1)\nkqq1    = kq1 * kq1\nkR1     = 0.375 * (kE1 - 1) - 0.5 * kqq1 * (kE1 + 1) / (kqq1 + 9.8696) + 0.125 * kqq1 * (kE1 - 1) / (kqq1 + 39.478) + 1 - 0.000825 * kE1\nkBe2    = max(kB2, kbf)\nkdur2   = 1.13 / kBe2\nkris2   = min(0.003, 0.65 * kdur2)\nky2     = 0.5 * kBe2 / kf0\nkS2     = sinh(6.2832 * ky2) / (cosh(6.2832 * ky2) - cos(6.2832 * kF2 / kf0))\nkq2     = 6.2832 * kBe2 * kris2\nkE2     = exp(kq2)\nkqq2    = kq2 * kq2\nkR2     = 0.375 * (kE2 - 1) - 0.5 * kqq2 * (kE2 + 1) / (kqq2 + 9.8696) + 0.125 * kqq2 * (kE2 - 1) / (kqq2 + 39.478) + 1 - 0.000825 * kE2\nkBe3    = max(kB3, kbf)\nkdur3   = 1.13 / kBe3\nkris3   = min(0.003, 0.65 * kdur3)\nky3     = 0.5 * kBe3 / kf0\nkS3     = sinh(6.2832 * ky3) / (cosh(6.2832 * ky3) - cos(6.2832 * kF3 / kf0))\nkq3     = 6.2832 * kBe3 * kris3\nkE3     = exp(kq3)\nkqq3    = kq3 * kq3\nkR3     = 0.375 * (kE3 - 1) - 0.5 * kqq3 * (kE3 + 1) / (kqq3 + 9.8696) + 0.125 * kqq3 * (kE3 - 1) / (kqq3 + 39.478) + 1 - 0.000825 * kE3\nkBe4    = max(kB4, kbf)\nkdur4   = 1.13 / kBe4\nkris4   = min(0.003, 0.65 * kdur4)\nky4     = 0.5 * kBe4 / kf0\nkS4     = sinh(6.2832 * ky4) / (cosh(6.2832 * ky4) - cos(6.2832 * kF4 / kf0))\nkq4     = 6.2832 * kBe4 * kris4\nkE4     = exp(kq4)\nkqq4    = kq4 * kq4\nkR4     = 0.375 * (kE4 - 1) - 0.5 * kqq4 * (kE4 + 1) / (kqq4 + 9.8696) + 0.125 * kqq4 * (kE4 - 1) / (kqq4 + 39.478) + 1 - 0.000825 * kE4\nkBe5    = max(kB5, kbf)\nkdur5   = 1.13 / kBe5\nkris5   = min(0.003, 0.65 * kdur5)\nky5     = 0.5 * kBe5 / kf0\nkS5     = sinh(6.2832 * ky5) / (cosh(6.2832 * ky5) - cos(6.2832 * kF5 / kf0))\nkq5     = 6.2832 * kBe5 * kris5\nkE5     = exp(kq5)\nkqq5    = kq5 * kq5\nkR5     = 0.375 * (kE5 - 1) - 0.5 * kqq5 * (kE5 + 1) / (kqq5 + 9.8696) + 0.125 * kqq5 * (kE5 - 1) / (kqq5 + 39.478) + 1 - 0.000825 * kE5\nkP      = ampdb(2 * kA1) * kS1 / ky1 * kR1 + ampdb(2 * kA2) * kS2 / ky2 * kR2 + ampdb(2 * kA3) * kS3 / ky3 * kR3 + ampdb(2 * kA4) * kS4 / ky4 * kR4 + ampdb(2 * kA5) * kS5 / ky5 * kR5\n; 0.61: rms 0.12 at the defaults, 220 Hz (a level choice; the engine trims a standing body)\nknorm   = 0.61 / sqrt(kP)\n; iolaps 64 = 10 grains of the new note + 10 of the old after a jump, with margin; too few\n; is a PerfError that kills the voice. itotdur 1 with iskip 1: iskip bypasses fof's\n; lifetime test, so the grains never stop (the host's p3 of 2e9 s would overflow int32).\n; iskp is 0 only on the pass a rested note-on asks for; i(kon) reads 0 on the build pass,\n; where fof initialises fully anyway because nothing is allocated yet.\nVOXFOF:\niskp    = (i(kon) == 1 ? 0 : 1)\naf1     fof ampdb(kA1) * knorm, kfund, kF1t, 0, kBe1, kris1, kdur1, 0.35 * kdur1, 64, giSine, giRis, 1, 0, 0, iskp\naf2     fof ampdb(kA2) * knorm, kfund, kF2, 0, kBe2, kris2, kdur2, 0.35 * kdur2, 64, giSine, giRis, 1, 0, 0, iskp\naf3     fof ampdb(kA3) * knorm, kfund, kF3, 0, kBe3, kris3, kdur3, 0.35 * kdur3, 64, giSine, giRis, 1, 0, 0, iskp\naf4     fof ampdb(kA4) * knorm, kfund, kF4, 0, kBe4, kris4, kdur4, 0.35 * kdur4, 64, giSine, giRis, 1, 0, 0, iskp\naf5     fof ampdb(kA5) * knorm, kfund, kF5, 0, kBe5, kris5, kdur5, 0.35 * kdur5, 64, giSine, giRis, 1, 0, 0, iskp\nasig    = af1 + af2 + af3 + af4 + af5\n; a damped sine that starts at phase 0 has a mean that is not zero, so the grain train\n; carries DC; a 5 Hz high-pass takes it out. It sits inside the idle skip, so its state\n; freezes with the bank; istor = iskp clears that frozen state on the pass a rested\n; note-on asks for and keeps it on every other pass\nasig    atone asig, 5, iskp\nrireturn\nVOXIDLE:\nasig    = asig * kvol1",
+   "name": "formant voice",
+   "params": {
+    "vowel": {
+     "range": [
+      0.0,
+      4.0
+     ],
+     "default": 2.0,
+     "note": "the vowel, u o a e i in order, gliding through those between: F1 and F2 move. Power-weighted centroid at 220 Hz, drift held: u 618, o 566, a 965, e 649, i 426 Hz; level within 1.7 dB (declared).",
+     "anchors": {
+      "u": {
+       "value": 0.0,
+       "gloss": "closed and dark: F1 and F2 both low"
+      },
+      "a": {
+       "value": 2.0,
+       "gloss": "open: F1 at its highest, the power centroid near 1 kHz"
+      },
+      "i": {
+       "value": 4.0,
+       "gloss": "closed: F1 at its lowest, F2 near 2 kHz, a wide gap between them"
+      }
+     }
+    },
+    "voice": {
+     "range": [
+      0.0,
+      3.0
+     ],
+     "default": 1.0,
+     "note": "whose formants: bass, tenor, alto, soprano. Moves the upper formants: the 2-4 kHz band goes from -8 dB (bass) to -20 dB (alto, soprano) of the whole; the centroid barely moves.",
+     "anchors": {
+      "bass": {
+       "value": 0.0,
+       "gloss": "the lowest formants, a strong band at 2.2-2.8 kHz"
+      },
+      "tenor": {
+       "value": 1.0,
+       "gloss": "the middle male voice"
+      },
+      "soprano": {
+       "value": 3.0,
+       "gloss": "high formants, the band near 3 kHz 12 dB weaker"
+      }
+     }
+    }
+   }
   },
   {
    "key": "sub_sine",
