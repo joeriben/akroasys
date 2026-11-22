@@ -96,9 +96,12 @@ public:
                                                    juce::Colours::transparentBlack);
         content_.owner_ = this;
         pulse_.owner_   = this;
+        wait_.owner_    = this;
         blink_.owner_   = this;
         content_.addAndMakeVisible(pulse_);
         pulse_.setVisible(false);
+        content_.addAndMakeVisible(wait_);
+        wait_.setVisible(false);
         // Takes its own mouse, exactly as the text box it replaced did: the
         // scrollbar needs drags, and the card flip lands here.
         setInterceptsMouseClicks(true, true);
@@ -176,11 +179,13 @@ public:
      *  an attempt that failed, and leaving it up would let it read as current.
      *  (This mirrors what the text box it replaced did.) */
     /** @param busy  something is RUNNING and the user is waiting for it. The
-     *               line gets a pulsing dot, so "nothing has happened yet" and
-     *               "nothing is going to happen" stop looking alike — which for
-     *               an authoring that takes a 12B generation is most of the
-     *               time the panel is on screen. Terminal states (an empty
-     *               prompt, a failure) pass false and stay still. */
+     *               line gets a pulsing dot, and under it "please wait" with
+     *               counting dots until the first code arrives, so "nothing
+     *               has happened yet" and "nothing is going to happen" stop
+     *               looking alike — which for an authoring that takes a 12B
+     *               generation is most of the time the panel is on screen.
+     *               Terminal states (an empty prompt, a failure) pass false
+     *               and stay still. */
     void setStatus(const juce::String& text, bool busy = false)
     {
         busy_ = busy;
@@ -323,7 +328,7 @@ public:
             return;
         busy_ = false;
         blink_.stopTimer();
-        layoutPulse();
+        layoutBusy();
         relayout();
     }
 
@@ -633,6 +638,20 @@ private:
     static juce::Colour ground() { return kSurface.brighter(0.08f); }
     // Centre of the status line's pulsing dot, in content coordinates.
     float pulseCentreY() const { return 7.0f + bodyFont() * 0.62f; }
+    // The monospace the code is set in, on the back and while it is written.
+    juce::Font codeFont() const
+    {
+        // Braces, not parens: `Font f(FontOptions(x))` is a function declaration.
+        return juce::Font { juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
+                                              juce::jmax(9.5f, base_ * 0.86f),
+                                              juce::Font::plain) };
+    }
+    // The wait line: shown while something runs and no code has been written
+    // yet — the consultation and the writing turn's prompt evaluation, in which
+    // nothing else on the card moves.
+    static constexpr const char* kWaitText = "please wait";
+    bool  waitWanted() const { return busy_ && ! trace_.valid && liveBody_.isEmpty(); }
+    float waitRowH()   const { return std::round(codeFont().getHeight() * 1.30f); }
 
     // Small-caps station label with manual tracking — JUCE has no letter-spacing,
     // and the spacing is what makes these read as rubrics rather than as text.
@@ -751,9 +770,7 @@ private:
                                                     fb, kDim, x, top, wrapW) + 7.0f);
         }
 
-        const juce::Font f { juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
-                                               juce::jmax(9.5f, base_ * 0.86f),
-                                               juce::Font::plain) };
+        const juce::Font f = codeFont();
         const float lineH = std::round(f.getHeight() * 1.30f);
         float y = top, widest = 0.0f;
         juce::StringArray lines;
@@ -805,10 +822,7 @@ private:
         lines.addLines(liveBody_);
         const int from = juce::jmax(0, lines.size() - kTail);
         const float x = static_cast<float>(textX());
-        // Braces, not parens: `Font f(FontOptions(x))` is a function declaration.
-        const juce::Font f { juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
-                                               juce::jmax(9.5f, base_ * 0.86f),
-                                               juce::Font::plain) };
+        const juce::Font f = codeFont();
         const float lineH = std::round(f.getHeight() * 1.30f);
         float y = y0;
         if (from > 0)
@@ -878,7 +892,7 @@ private:
     /** Walks every station. g == nullptr measures, g != nullptr draws — one
      *  traversal for both so the scroll height can never disagree with the
      *  content. Returns the total height. */
-    int render(juce::Graphics* g, int width) const
+    int render(juce::Graphics* g, int width, float* waitY = nullptr) const
     {
         // Right inset clears the viewport's own scrollbar (7px) plus a margin:
         // the content width is asked for BEFORE the scrollbar's visibility is
@@ -953,7 +967,18 @@ private:
                     {
                         return liveCode(g, y, ww);
                     });
-                return juce::roundToInt(y - static_cast<float>(stationGap()) + 7.0f);
+                y -= static_cast<float>(stationGap());   // the last station's trailing gap
+            }
+            // The wait line, where the author's output will appear: under the
+            // status line, or under the reasoning while it streams. Its row is
+            // reserved HERE so the scroll height, the drawing and wait_'s
+            // position come from one traversal; wait_ draws it (see Wait).
+            if (waitWanted())
+            {
+                y += static_cast<float>(stationGap());
+                if (waitY != nullptr)
+                    *waitY = y;
+                y += waitRowH();
             }
             return juce::roundToInt(y + 7.0f);
         }
@@ -1159,8 +1184,10 @@ private:
         // compile error on the back would be laid out to the scrolled width and
         // run off the side of the viewport it is meant to be read in.
         wrapW_ = w;
+        float waitY = -1.0f;                                 // stays negative: no wait row
         const int h = showBack_ ? renderBody(nullptr, w)   // widens w to the longest line
-                                : render(nullptr, w);
+                                : render(nullptr, w, &waitY);
+        waitY_ = waitY;
         // Subtract the bar thickness OURSELVES rather than asking the viewport:
         // getMaximumVisibleHeight() still reports the previous content's bar
         // state at this point, so on the flip itself it answers the full height,
@@ -1170,7 +1197,7 @@ private:
         const int floorH = viewport_.getHeight()
                          - (showBack_ ? viewport_.getScrollBarThickness() : 0);
         content_.setSize(w, juce::jmax(floorH, h));
-        layoutPulse();
+        layoutBusy();
         content_.repaint();
     }
 
@@ -1184,8 +1211,12 @@ private:
      *  an opaque child covers the whole rectangle (clipChildComponent). So the
      *  dot fills the card's ground behind itself, and its box is cut tight
      *  around the dot: from content x 1, clear of the card's rounded corner
-     *  when the status line is scrolled up under it. */
-    void layoutPulse()
+     *  when the status line is scrolled up under it.
+     *
+     *  The wait line (wait_) follows the same rule for the same reason. Its
+     *  row is the one render() reserved (waitY_); its box is as wide as its
+     *  longest frame, "please wait...", and no wider. */
+    void layoutBusy()
     {
         const bool wanted = busy_ && ! trace_.valid && ! showBack_;
         pulse_.setVisible(wanted);
@@ -1194,14 +1225,59 @@ private:
             const int top = static_cast<int>(std::floor(pulseCentreY())) - dotR() - 1;
             pulse_.setBounds(railX() - dotR(), top, 2 * dotR() + 1, 2 * dotR() + 3);
         }
+        // waitY_ is negative whenever the last layout reserved no row — and
+        // stale only between stopBusy's call here and its relayout, which
+        // waitWanted() already covers.
+        const bool waiting = wanted && waitWanted() && waitY_ >= 0.0f;
+        wait_.setVisible(waiting);
+        if (waiting)
+        {
+            const auto longest = juce::String(kWaitText) + "...";
+            const int  w = static_cast<int>(std::ceil(
+                juce::GlyphArrangement::getStringWidth(codeFont(), longest))) + 2;
+            wait_.setBounds(textX(), juce::roundToInt(waitY_), w, juce::roundToInt(waitRowH()));
+        }
     }
+
+    /** "please wait" and a count of dots, terminal-style: none, one, two,
+     *  three, then none again, one step every 400 ms. Shown from the moment
+     *  an authoring (or a re-prompt) starts until its first line of code
+     *  arrives — the consultation and the writing turn's prompt evaluation
+     *  can take minutes in which nothing else on the card moves, and the dot
+     *  on the status line alone did not read as waiting (BJ 2026-11-22).
+     *  Opaque, like Pulse: see layoutBusy. */
+    struct Wait : public juce::Component
+    {
+        Wait()
+        {
+            setInterceptsMouseClicks(false, false);   // the flip lands behind it
+            setOpaque(true);
+        }
+        static int step()
+        {
+            return static_cast<int>((juce::Time::getMillisecondCounter() / 400u) % 4u);
+        }
+        void paint(juce::Graphics& g) override
+        {
+            g.fillAll(ground());
+            if (owner_ == nullptr)
+                return;
+            shown_ = step();
+            g.setColour(kTextSecondary);
+            g.setFont(owner_->codeFont());
+            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", shown_),
+                       getLocalBounds().toFloat(), juce::Justification::centredLeft, false);
+        }
+        int shown_ = -1;                 // the step on screen; Blink repaints on a change only
+        LcoTraceView* owner_ = nullptr;
+    };
 
     struct Pulse : public juce::Component
     {
         Pulse()
         {
             setInterceptsMouseClicks(false, false);   // the flip lands behind it
-            setOpaque(true);                          // see layoutPulse
+            setOpaque(true);                          // see layoutBusy
         }
         void paint(juce::Graphics& g) override
         {
@@ -1259,19 +1335,30 @@ private:
     bool         showBack_ = false;
     bool         busy_ = false;
 
-    /** Repaints the status dot, and nothing else in the view: pulse_ is its own
-     *  component, so this cannot reach Content::paint. Runs strictly between a
-     *  busy status and the state that ends it — and PromptPanel's existing 10 Hz
-     *  tick calls stopBusy() whenever nothing is actually running, so a path
-     *  that arms it and returns without a terminating status cannot leave it
-     *  spinning at idle. */
+    /** Repaints the status dot and the wait line, and nothing else in the view:
+     *  both are opaque components of their own, so this cannot reach
+     *  Content::paint. Runs strictly between a busy status and the state that
+     *  ends it — and PromptPanel's existing 10 Hz tick calls stopBusy() whenever
+     *  nothing is actually running, so a path that arms it and returns without
+     *  a terminating status cannot leave it spinning at idle. */
     struct Blink : public juce::Timer
     {
         ~Blink() override { stopTimer(); }
-        void timerCallback() override { if (owner_ != nullptr) owner_->pulse_.repaint(); }
+        void timerCallback() override
+        {
+            if (owner_ == nullptr)
+                return;
+            owner_->pulse_.repaint();
+            // The dots step every 400 ms, not every tick: repaint on a step.
+            auto& wait = owner_->wait_;
+            if (wait.isVisible() && Wait::step() != wait.shown_)
+                wait.repaint();
+        }
         LcoTraceView* owner_ = nullptr;
     };
     Pulse pulse_;
+    Wait  wait_;
+    float waitY_ = -1.0f;   // the wait row render() reserved; negative = none
     Blink blink_;
     int   wrapW_ = 0;
     CompileState compile_ = CompileState::Unknown;
