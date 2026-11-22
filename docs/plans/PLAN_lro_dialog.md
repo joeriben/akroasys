@@ -41,7 +41,7 @@ placeholder "Was soll sich ändern?". The design:
 What it is NOT: not the self-check. The automatic compare-and-correct loop stays deprecated
 (`T5YNTH_LCO_SELFCHECK=0`, `docs/plans/HANDOVER_lco_selfcorrect.md`). Here only the player
 asks, and only the author answers. No instrument code-lock either: the author may rebuild
-anything; the player sees on the card what was kept.
+anything; the player sees in the LRO window what was kept.
 
 ## 2. The backend turn
 
