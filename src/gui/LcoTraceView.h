@@ -97,7 +97,6 @@ public:
         content_.owner_ = this;
         pulse_.owner_   = this;
         wait_.owner_    = this;
-        blink_.owner_   = this;
         content_.addAndMakeVisible(pulse_);
         pulse_.setVisible(false);
         content_.addAndMakeVisible(wait_);
@@ -109,8 +108,10 @@ public:
 
     /** Rule 1 of the project's JUCE safety list: stop the timer BEFORE any
      *  member is destroyed. This one is only ever running mid-press, so the
-     *  window is small — which is exactly the kind that gets missed. */
-    ~LcoTraceView() override { stopTimer(); blink_.stopTimer(); }
+     *  window is small — which is exactly the kind that gets missed. The
+     *  busy animation's vblank attachment goes first for the same reason:
+     *  its callback reaches into pulse_ and wait_. */
+    ~LcoTraceView() override { stopTimer(); vblank_.reset(); }
 
     /** The panel's responsive base font — same unit every other LCO widget uses. */
     void setBaseFont(float f)
@@ -134,7 +135,6 @@ public:
         trace_.valid = true;
         status_.clear();
         busy_ = false;
-        blink_.stopTimer();
         // What streamed came from whichever attempt was running; the trace
         // carries the one that compiled. Keeping both would show the reasoning
         // twice, once out of date.
@@ -189,8 +189,6 @@ public:
     void setStatus(const juce::String& text, bool busy = false)
     {
         busy_ = busy;
-        if (busy) blink_.startTimerHz(24);   // two turns: the dot still at 12 Hz (Blink)
-        else      blink_.stopTimer();
         status_ = text;
         trace_ = {};
         live_.clear();
@@ -327,7 +325,6 @@ public:
         if (! busy_)
             return;
         busy_ = false;
-        blink_.stopTimer();
         layoutBusy();
         relayout();
     }
@@ -1232,7 +1229,7 @@ private:
      *  fractional scale — Windows at 125/150/175 % — a box that repaints its
      *  own bounds leaves a sliver of up to a device pixel uncovered, and
      *  every parent paints again under it. So each box carries a rim of
-     *  kBusyRim logical pixels with nothing in it, and Blink repaints only
+     *  kBusyRim logical pixels with nothing in it, and animateFrame repaints only
      *  what lies inside: for any scale s >= 1, floor((x+1)s) >= ceil(xs) and
      *  ceil((r-1)s) <= floor(rs), so the rounded-out inside always lies
      *  within the rounded-in box and the parents' clip is empty. The dot's
@@ -1245,6 +1242,12 @@ private:
     void layoutBusy()
     {
         const bool wanted = busy_ && ! trace_.valid && ! showBack_;
+        // The animation exists exactly while the dot is shown: nothing runs
+        // at idle, nor while the back is up.
+        if (! wanted)
+            vblank_.reset();
+        else if (vblank_ == nullptr)
+            vblank_ = std::make_unique<juce::VBlankAttachment>(this, [this] { animateFrame(); });
         pulse_.setVisible(wanted);
         if (wanted)
         {
@@ -1301,11 +1304,15 @@ private:
                 return;
             }
             owner_->paintCardBehind(g, *this);
+            drawn_ = step();
+            asked_ = false;
             g.setColour(kTextSecondary);
             g.setFont(owner_->codeFont());
-            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", step()),
+            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", drawn_),
                        insideRim(*this).toFloat(), juce::Justification::centredLeft, false);
         }
+        int  drawn_ = -1;      // the step on screen: recorded here, wherever the paint came from
+        bool asked_ = false;   // animateFrame asked for a repaint that has not painted yet
         LcoTraceView* owner_ = nullptr;
     };
 
@@ -1375,56 +1382,67 @@ private:
     bool         showBack_ = false;
     bool         busy_ = false;
 
-    /** Repaints the status dot and the wait line, and nothing else in the view:
-     *  both are opaque components of their own (see layoutBusy).
+    /** One vblank of the busy animation: repaints the wait line or the status
+     *  dot, never both, and nothing else in the view — both are opaque
+     *  components of their own (see layoutBusy).
      *
-     *  They take turns, one tick each, never both in one tick. macOS draws
-     *  everything dirtied in one frame as ONE rectangle, the bounding box
-     *  (NSViewComponentPeer::drawRect; JUCE's comment there — we do not set
+     *  Never both in one vblank, because macOS draws everything dirtied in
+     *  one frame as ONE rectangle, the bounding box (NSViewComponentPeer::
+     *  drawRect; JUCE's comment there — we do not set
      *  JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS), and the box
      *  spanning the dot and the wait row covers the status line and the
-     *  reasoning, which no opaque child covers: Content::paint would run
-     *  after all. A tick apart (~42 ms) they fall in different frames. A
-     *  repaint elsewhere in the window that lands in the same frame merges
-     *  the same way; that is not something this view can prevent.
+     *  reasoning, which no opaque child covers: Content::paint would run after
+     *  all. NSViewComponentPeer::onVBlank calls this and then hands that
+     *  vblank's repaints to the view, in one go, so one child per vblank is one
+     *  child per frame — as long as the main thread keeps up with the display
+     *  (two vblanks served in one run-loop pass would merge again, as would a
+     *  repaint elsewhere in the window in the same frame; neither is something
+     *  this view can prevent). The live-resize throttle that holds repaints
+     *  back is no exception: the whole window repaints then anyway. Windows
+     *  and Linux clip to the list of dirty rectangles, not their bounding box.
      *
-     *  Runs strictly between a busy status and the state that ends it — and
-     *  PromptPanel's existing 10 Hz tick calls stopBusy() whenever nothing is
-     *  actually running, so a path that arms it and returns without a
-     *  terminating status cannot leave it spinning at idle. */
-    struct Blink : public juce::Timer
+     *  On the vblank and not a juce::Timer: a timer that fires late fires the
+     *  next time early (juce_Timer.cpp counts the period from the callback),
+     *  so two "alternating" ticks can land in the same frame.
+     *
+     *  The wait line repaints only when its dots have stepped since they were
+     *  last DRAWN, and not again while that repaint is outstanding. Both are
+     *  recorded by Wait::paint, the only place that knows what is on screen:
+     *  a paint from anywhere else (scroll, a parent) counts, and a row
+     *  scrolled out of view asks once and then waits for the scroll that
+     *  paints it. The dot pulses at ~12 Hz on the frames the wait line leaves
+     *  free.
+     *
+     *  Runs only while vblank_ exists, i.e. while the dot is shown
+     *  (layoutBusy) — and PromptPanel's existing 10 Hz tick calls stopBusy()
+     *  whenever nothing is actually running, so a path that sets busy and
+     *  returns without a terminating status cannot leave it running at idle. */
+    void animateFrame()
     {
-        ~Blink() override { stopTimer(); }
-        void timerCallback() override
+        // Inside the rim only, or a fractional scale lets the parents paint
+        // after all (layoutBusy).
+        if (wait_.isVisible() && ! wait_.asked_ && Wait::step() != wait_.drawn_)
         {
-            if (owner_ == nullptr)
-                return;
-            dotTurn_ = ! dotTurn_;
-            // Inside the rim only, or a fractional scale lets the parents
-            // paint after all (layoutBusy).
-            if (dotTurn_)
-            {
-                owner_->pulse_.repaint(insideRim(owner_->pulse_));
-                return;
-            }
-            // The dots step every 400 ms, not every turn: repaint on a step.
-            // The step is tracked HERE, not by Wait::paint, which does not run
-            // while the row is scrolled out of view.
-            const int step = Wait::step();
-            if (owner_->wait_.isVisible() && step != waitStep_)
-            {
-                waitStep_ = step;
-                owner_->wait_.repaint(insideRim(owner_->wait_));
-            }
+            wait_.asked_ = true;
+            wait_.repaint(insideRim(wait_));
+            return;
         }
-        LcoTraceView* owner_ = nullptr;
-        bool dotTurn_  = false;
-        int  waitStep_ = -1;   // the step last asked for
-    };
+        const juce::uint32 now = juce::Time::getMillisecondCounter();
+        if (now - dotAt_ >= kDotMs)
+        {
+            dotAt_ = now;
+            pulse_.repaint(insideRim(pulse_));
+        }
+    }
+    static constexpr juce::uint32 kDotMs = 83;   // the dot's repaint interval, ~12 Hz
+
     Pulse pulse_;
     Wait  wait_;
     float waitY_ = -1.0f;   // the wait row render() reserved; negative = none
-    Blink blink_;
+    juce::uint32 dotAt_ = 0;   // when animateFrame last repainted the dot
+    // After pulse_ and wait_, which its callback reaches: destroyed before them
+    // (and reset explicitly in the destructor first of all).
+    std::unique_ptr<juce::VBlankAttachment> vblank_;
     int   wrapW_ = 0;
     CompileState compile_ = CompileState::Unknown;
     float   base_ = 13.0f;
