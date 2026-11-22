@@ -189,7 +189,7 @@ public:
     void setStatus(const juce::String& text, bool busy = false)
     {
         busy_ = busy;
-        if (busy) blink_.startTimerHz(12);
+        if (busy) blink_.startTimerHz(24);   // two turns: the dot still at 12 Hz (Blink)
         else      blink_.stopTimer();
         status_ = text;
         trace_ = {};
@@ -1262,13 +1262,11 @@ private:
             g.fillAll(ground());
             if (owner_ == nullptr)
                 return;
-            shown_ = step();
             g.setColour(kTextSecondary);
             g.setFont(owner_->codeFont());
-            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", shown_),
+            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", step()),
                        getLocalBounds().toFloat(), juce::Justification::centredLeft, false);
         }
-        int shown_ = -1;                 // the step on screen; Blink repaints on a change only
         LcoTraceView* owner_ = nullptr;
     };
 
@@ -1336,11 +1334,22 @@ private:
     bool         busy_ = false;
 
     /** Repaints the status dot and the wait line, and nothing else in the view:
-     *  both are opaque components of their own, so this cannot reach
-     *  Content::paint. Runs strictly between a busy status and the state that
-     *  ends it — and PromptPanel's existing 10 Hz tick calls stopBusy() whenever
-     *  nothing is actually running, so a path that arms it and returns without
-     *  a terminating status cannot leave it spinning at idle. */
+     *  both are opaque components of their own (see layoutBusy).
+     *
+     *  They take turns, one tick each, never both in one tick. macOS draws
+     *  everything dirtied in one frame as ONE rectangle, the bounding box
+     *  (NSViewComponentPeer::drawRect; JUCE's comment there — we do not set
+     *  JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS), and the box
+     *  spanning the dot and the wait row covers the status line and the
+     *  reasoning, which no opaque child covers: Content::paint would run
+     *  after all. A tick apart (~42 ms) they fall in different frames. A
+     *  repaint elsewhere in the window that lands in the same frame merges
+     *  the same way; that is not something this view can prevent.
+     *
+     *  Runs strictly between a busy status and the state that ends it — and
+     *  PromptPanel's existing 10 Hz tick calls stopBusy() whenever nothing is
+     *  actually running, so a path that arms it and returns without a
+     *  terminating status cannot leave it spinning at idle. */
     struct Blink : public juce::Timer
     {
         ~Blink() override { stopTimer(); }
@@ -1348,13 +1357,25 @@ private:
         {
             if (owner_ == nullptr)
                 return;
-            owner_->pulse_.repaint();
-            // The dots step every 400 ms, not every tick: repaint on a step.
-            auto& wait = owner_->wait_;
-            if (wait.isVisible() && Wait::step() != wait.shown_)
-                wait.repaint();
+            dotTurn_ = ! dotTurn_;
+            if (dotTurn_)
+            {
+                owner_->pulse_.repaint();
+                return;
+            }
+            // The dots step every 400 ms, not every turn: repaint on a step.
+            // The step is tracked HERE, not by Wait::paint, which does not run
+            // while the row is scrolled out of view.
+            const int step = Wait::step();
+            if (owner_->wait_.isVisible() && step != waitStep_)
+            {
+                waitStep_ = step;
+                owner_->wait_.repaint();
+            }
         }
         LcoTraceView* owner_ = nullptr;
+        bool dotTurn_  = false;
+        int  waitStep_ = -1;   // the step last asked for
     };
     Pulse pulse_;
     Wait  wait_;
