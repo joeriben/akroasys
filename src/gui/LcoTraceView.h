@@ -1304,15 +1304,16 @@ private:
                 return;
             }
             owner_->paintCardBehind(g, *this);
-            drawn_ = step();
-            asked_ = false;
             g.setColour(kTextSecondary);
             g.setFont(owner_->codeFont());
-            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", drawn_),
+            g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", shown_),
                        insideRim(*this).toFloat(), juce::Justification::centredLeft, false);
         }
-        int  drawn_ = -1;      // the step on screen: recorded here, wherever the paint came from
-        bool asked_ = false;   // animateFrame asked for a repaint that has not painted yet
+        // The dots on screen. Set by animateFrame only, together with a repaint
+        // of the whole row, and drawn as it stands: a paint clipped to part of
+        // the row (another component's dirty rectangle) draws the same line as
+        // the pixels around it, never a newer count torn against an older one.
+        int shown_ = 0;
         LcoTraceView* owner_ = nullptr;
     };
 
@@ -1405,13 +1406,11 @@ private:
      *  next time early (juce_Timer.cpp counts the period from the callback),
      *  so two "alternating" ticks can land in the same frame.
      *
-     *  The wait line repaints only when its dots have stepped since they were
-     *  last DRAWN, and not again while that repaint is outstanding. Both are
-     *  recorded by Wait::paint, the only place that knows what is on screen:
-     *  a paint from anywhere else (scroll, a parent) counts, and a row
-     *  scrolled out of view asks once and then waits for the scroll that
-     *  paints it. The dot pulses at ~12 Hz on the frames the wait line leaves
-     *  free.
+     *  The wait line repaints when the clock's step differs from the one it
+     *  shows (Wait::shown_, which only this sets): once per step, ~2.5 Hz.
+     *  While the row is scrolled out of view that request is clipped away in
+     *  Component::internalRepaint and never reaches the window. The dot pulses
+     *  at ~12 Hz on the frames the wait line leaves free.
      *
      *  Runs only while vblank_ exists, i.e. while the dot is shown
      *  (layoutBusy) — and PromptPanel's existing 10 Hz tick calls stopBusy()
@@ -1421,9 +1420,10 @@ private:
     {
         // Inside the rim only, or a fractional scale lets the parents paint
         // after all (layoutBusy).
-        if (wait_.isVisible() && ! wait_.asked_ && Wait::step() != wait_.drawn_)
+        const int step = Wait::step();
+        if (wait_.isVisible() && step != wait_.shown_)
         {
-            wait_.asked_ = true;
+            wait_.shown_ = step;
             wait_.repaint(insideRim(wait_));
             return;
         }
