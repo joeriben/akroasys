@@ -1242,6 +1242,15 @@ private:
      *  box therefore starts at content x 0, under the card's rounded corner
      *  when the status line is scrolled up — which paintCardBehind draws.
      *
+     *  One case the rim does not cover: a box straddling the viewport's top or
+     *  bottom edge at a fractional scale. The request is cut at that integer
+     *  edge and rounded out; above the viewport the child's exclusion is cut
+     *  at the same edge and rounded in, and one device row stays uncovered.
+     *  This card's paintCard and the panels above it fill that row; Content
+     *  (whose exclusion uses the child's full bounds) still does not paint.
+     *  Repainting only what lies a rim inside the visible area would close it
+     *  at the price of a stale one-pixel strip of the dot at the edge.
+     *
      *  The wait line (wait_) follows the same rules for the same reasons. Its
      *  row is the one render() reserved (waitY_); inside its rim it is as
      *  wide as its longest frame, "please wait...", and no wider. */
@@ -1421,8 +1430,8 @@ private:
      *  Component::internalRepaint and never reaches the window. The dot pulses
      *  at ~12 Hz on the frames the wait line leaves free.
      *
-     *  Runs only while vblank_ exists, i.e. while the dot is shown
-     *  (layoutBusy) — and PromptPanel's existing 10 Hz tick calls stopBusy()
+     *  Runs only while vblank_ exists, i.e. while the card shows the dot and
+     *  is itself visible (layoutBusy) — and PromptPanel's existing 10 Hz tick calls stopBusy()
      *  whenever nothing is actually running, so a path that sets busy and
      *  returns without a terminating status cannot leave it running at idle. */
     void animateFrame()
