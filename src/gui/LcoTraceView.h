@@ -392,7 +392,7 @@ public:
     void paint(juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat();
-        g.setColour(kSurface.brighter(0.08f));
+        g.setColour(ground());
         g.fillRoundedRectangle(b, 3.0f);
         g.setColour(kBorder);
         g.drawRoundedRectangle(b.reduced(0.5f), 3.0f, 1.0f);
@@ -628,6 +628,11 @@ private:
     int   railX()     const { return 4; }            // centre of the dot column
     int   textX()     const { return railX() + 12; }
     int   stationGap() const { return juce::roundToInt(bodyFont() * 0.85f); }
+    // The card's ground: what paint() fills and what an opaque child must fill
+    // with to stand in for it.
+    static juce::Colour ground() { return kSurface.brighter(0.08f); }
+    // Centre of the status line's pulsing dot, in content coordinates.
+    float pulseCentreY() const { return 7.0f + bodyFont() * 0.62f; }
 
     // Small-caps station label with manual tracking — JUCE has no letter-spacing,
     // and the spacing is what makes these read as rubrics rather than as text.
@@ -1169,34 +1174,49 @@ private:
         content_.repaint();
     }
 
-    /** The pulsing dot is its OWN component, and that is the whole point: a
-     *  repaint of a rectangle inside content_ still runs Content::paint, which
-     *  ignores the clip region and re-shapes every paragraph in the view —
-     *  including the author's uncapped streamed reasoning, twelve times a
-     *  second, for the length of a 12B generation. A separate child repaints
-     *  alone. */
+    /** The pulsing dot is its OWN component, and OPAQUE, and both are needed:
+     *  Content::paint ignores the clip region and re-shapes every paragraph in
+     *  the view — including the author's uncapped streamed reasoning — so it
+     *  must not run twelve times a second for the length of a 12B generation.
+     *  A child of its own is not enough by itself: JUCE paints a component's
+     *  parents under any repainted rectangle they show through
+     *  (Component::paintComponentAndChildren), and skips a parent only where
+     *  an opaque child covers the whole rectangle (clipChildComponent). So the
+     *  dot fills the card's ground behind itself, and its box is cut tight
+     *  around the dot: from content x 1, clear of the card's rounded corner
+     *  when the status line is scrolled up under it. */
     void layoutPulse()
     {
         const bool wanted = busy_ && ! trace_.valid && ! showBack_;
         pulse_.setVisible(wanted);
         if (wanted)
-            pulse_.setBounds(0, 0, textX(), juce::roundToInt(bodyFont() * 1.6f));
+        {
+            const int top = static_cast<int>(std::floor(pulseCentreY())) - dotR() - 1;
+            pulse_.setBounds(railX() - dotR(), top, 2 * dotR() + 1, 2 * dotR() + 3);
+        }
     }
 
     struct Pulse : public juce::Component
     {
-        Pulse() { setInterceptsMouseClicks(false, false); }   // the flip lands behind it
+        Pulse()
+        {
+            setInterceptsMouseClicks(false, false);   // the flip lands behind it
+            setOpaque(true);                          // see layoutPulse
+        }
         void paint(juce::Graphics& g) override
         {
+            g.fillAll(ground());
             if (owner_ == nullptr)
                 return;
             const float phase = std::sin(static_cast<float>(juce::Time::getMillisecondCounter() % 1200)
                                          / 1200.0f * juce::MathConstants<float>::twoPi);
-            const float cy = 7.0f + owner_->bodyFont() * 0.62f;
-            const int   r  = owner_->dotR();
+            // The same dot as before, at the same place in the content — only
+            // expressed in this box's own coordinates.
+            const float cx = static_cast<float>(owner_->railX() - getX());
+            const float cy = owner_->pulseCentreY() - static_cast<float>(getY());
+            const float r  = static_cast<float>(owner_->dotR());
             g.setColour(kWarning.withAlpha(0.45f + 0.55f * (0.5f + 0.5f * phase)));
-            g.fillEllipse(static_cast<float>(owner_->railX() - r), cy - static_cast<float>(r),
-                          static_cast<float>(r * 2), static_cast<float>(r * 2));
+            g.fillEllipse(cx - r, cy - r, 2.0f * r, 2.0f * r);
         }
         LcoTraceView* owner_ = nullptr;
     };
