@@ -32,8 +32,10 @@
 //    the condition movement-by-default has to answer for, and hiding it would
 //    hide the interesting case.
 //
-// Idle-cheap: paints only when something is set. No animation, and the only
-// timer runs between a mouse-down and the flip it may become — never at idle.
+// Idle-cheap: paints only when something is set. The one animation, the busy
+// dot and wait line (animateFrame), exists only while something is running;
+// the one timer runs between a mouse-down and the flip it may become — never
+// at idle.
 //
 // TWO SIDES (BJ 2026-07-24, step 2). The front is the trace above. The back is
 // the Csound the author actually wrote, and ONLY that — not the host scaffold

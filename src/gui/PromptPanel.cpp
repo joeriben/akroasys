@@ -2742,7 +2742,7 @@ void PromptPanel::triggerDcoBake()
 
     if (dcoBaking_)
         return;
-    // Mirrors triggerDcoReprompt's own gate on dcoBaking_ (line ~3243): the
+    // Mirrors triggerDcoReprompt's own gate on dcoBaking_: the
     // Return-key and Launch Control XL paths both bypass the disabled
     // on-screen GENERATE button, so without this check a bake could launch
     // while a reprompt is still in flight — two detached threads racing the
@@ -3358,8 +3358,11 @@ void PromptPanel::triggerDcoReprompt()
     // in between then moves the epoch, and the result is dropped.
     const auto askedAtLoad = lroLoadEpoch();
     // Message-thread gates, mirroring triggerDcoBake's gate order/shape. Every
-    // early-out reports through dcoStatusLabel so the user always sees WHY a
-    // click did nothing (house pattern: triggerDcoBake, triggerGeneration).
+    // early-out says on the card WHY a click did nothing (house pattern:
+    // triggerDcoBake, triggerGeneration) — through setLcoStatus, or through
+    // setStatusLine where a run is still going and a full status write would
+    // end it. setStatusLine writes nothing over a trace, so with a recalled
+    // card on screen those presses stay silent.
     if (dcoRepromptBusy_)
     {
         // Words only, NOT setLcoStatus — same reason as the dcoBaking_ case
