@@ -394,13 +394,27 @@ public:
         content_.setTooltip(t);
     }
 
-    void paint(juce::Graphics& g) override
+    void paint(juce::Graphics& g) override { paintCard(g); }
+
+    /** The card: ground and border. */
+    void paintCard(juce::Graphics& g) const
     {
         auto b = getLocalBounds().toFloat();
         g.setColour(ground());
         g.fillRoundedRectangle(b, 3.0f);
         g.setColour(kBorder);
         g.drawRoundedRectangle(b.reduced(0.5f), 3.0f, 1.0f);
+    }
+
+    /** The card as it shows behind `child`, in the child's own coordinates.
+     *  What the opaque busy children paint first (see layoutBusy): the dot's
+     *  box can be scrolled up under the card's rounded corner, and painting
+     *  the card there, rather than a flat ground, keeps the corner whole. */
+    void paintCardBehind(juce::Graphics& g, const juce::Component& child) const
+    {
+        juce::Graphics::ScopedSaveState keep(g);
+        g.setOrigin(-getLocalPoint(&child, juce::Point<int>()));
+        paintCard(g);
     }
 
     void resized() override
@@ -1209,13 +1223,25 @@ private:
      *  parents under any repainted rectangle they show through
      *  (Component::paintComponentAndChildren), and skips a parent only where
      *  an opaque child covers the whole rectangle (clipChildComponent). So the
-     *  dot fills the card's ground behind itself, and its box is cut tight
-     *  around the dot: from content x 1, clear of the card's rounded corner
-     *  when the status line is scrolled up under it.
+     *  dot paints the card behind itself (paintCardBehind).
      *
-     *  The wait line (wait_) follows the same rule for the same reason. Its
-     *  row is the one render() reserved (waitY_); its box is as wide as its
-     *  longest frame, "please wait...", and no wider. */
+     *  "Covers" is decided in DEVICE pixels, after rounding: the repainted
+     *  rectangle is rounded OUT (HWNDComponentPeer::repaint, the Linux
+     *  peer's Rectangle<int> * scale), the opaque child's exclusion rounded
+     *  IN (excludeClipRectangle, Direct2D and software renderer alike). At a
+     *  fractional scale — Windows at 125/150/175 % — a box that repaints its
+     *  own bounds leaves a sliver of up to a device pixel uncovered, and
+     *  every parent paints again under it. So each box carries a rim of
+     *  kBusyRim logical pixels with nothing in it, and Blink repaints only
+     *  what lies inside: for any scale s >= 1, floor((x+1)s) >= ceil(xs) and
+     *  ceil((r-1)s) <= floor(rs), so the rounded-out inside always lies
+     *  within the rounded-in box and the parents' clip is empty. The dot's
+     *  box therefore starts at content x 0, under the card's rounded corner
+     *  when the status line is scrolled up — which paintCardBehind draws.
+     *
+     *  The wait line (wait_) follows the same rules for the same reasons. Its
+     *  row is the one render() reserved (waitY_); inside its rim it is as
+     *  wide as its longest frame, "please wait...", and no wider. */
     void layoutBusy()
     {
         const bool wanted = busy_ && ! trace_.valid && ! showBack_;
@@ -1223,7 +1249,8 @@ private:
         if (wanted)
         {
             const int top = static_cast<int>(std::floor(pulseCentreY())) - dotR() - 1;
-            pulse_.setBounds(railX() - dotR(), top, 2 * dotR() + 1, 2 * dotR() + 3);
+            pulse_.setBounds(juce::Rectangle<int>(railX() - dotR(), top, 2 * dotR() + 1, 2 * dotR() + 3)
+                                 .expanded(kBusyRim));
         }
         // waitY_ is negative whenever the last layout reserved no row — and
         // stale only between stopBusy's call here and its relayout, which
@@ -1235,8 +1262,17 @@ private:
             const auto longest = juce::String(kWaitText) + "...";
             const int  w = static_cast<int>(std::ceil(
                 juce::GlyphArrangement::getStringWidth(codeFont(), longest))) + 2;
-            wait_.setBounds(textX(), juce::roundToInt(waitY_), w, juce::roundToInt(waitRowH()));
+            wait_.setBounds(juce::Rectangle<int>(textX(), juce::roundToInt(waitY_), w,
+                                                 juce::roundToInt(waitRowH()))
+                                .expanded(kBusyRim));
         }
+    }
+
+    /** The empty rim around each busy child, in logical pixels: see layoutBusy. */
+    static constexpr int kBusyRim = 1;
+    static juce::Rectangle<int> insideRim(const juce::Component& c)
+    {
+        return c.getLocalBounds().reduced(kBusyRim);
     }
 
     /** "please wait" and a count of dots, terminal-style: none, one, two,
@@ -1259,13 +1295,16 @@ private:
         }
         void paint(juce::Graphics& g) override
         {
-            g.fillAll(ground());
             if (owner_ == nullptr)
+            {
+                g.fillAll(ground());
                 return;
+            }
+            owner_->paintCardBehind(g, *this);
             g.setColour(kTextSecondary);
             g.setFont(owner_->codeFont());
             g.drawText(juce::String(kWaitText) + juce::String::repeatedString(".", step()),
-                       getLocalBounds().toFloat(), juce::Justification::centredLeft, false);
+                       insideRim(*this).toFloat(), juce::Justification::centredLeft, false);
         }
         LcoTraceView* owner_ = nullptr;
     };
@@ -1279,9 +1318,12 @@ private:
         }
         void paint(juce::Graphics& g) override
         {
-            g.fillAll(ground());
             if (owner_ == nullptr)
+            {
+                g.fillAll(ground());
                 return;
+            }
+            owner_->paintCardBehind(g, *this);
             const float phase = std::sin(static_cast<float>(juce::Time::getMillisecondCounter() % 1200)
                                          / 1200.0f * juce::MathConstants<float>::twoPi);
             // The same dot as before, at the same place in the content — only
@@ -1358,9 +1400,11 @@ private:
             if (owner_ == nullptr)
                 return;
             dotTurn_ = ! dotTurn_;
+            // Inside the rim only, or a fractional scale lets the parents
+            // paint after all (layoutBusy).
             if (dotTurn_)
             {
-                owner_->pulse_.repaint();
+                owner_->pulse_.repaint(insideRim(owner_->pulse_));
                 return;
             }
             // The dots step every 400 ms, not every turn: repaint on a step.
@@ -1370,7 +1414,7 @@ private:
             if (owner_->wait_.isVisible() && step != waitStep_)
             {
                 waitStep_ = step;
-                owner_->wait_.repaint();
+                owner_->wait_.repaint(insideRim(owner_->wait_));
             }
         }
         LcoTraceView* owner_ = nullptr;
