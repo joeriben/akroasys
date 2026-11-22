@@ -20,9 +20,9 @@ placeholder "Was soll sich ändern?". The design:
   to craft"). What the player types there is not prescribed: a rewritten description, a few
   added words, or an instruction all work. The field keeps the player's text.
 - **No new position, no mode.** With an orchestra running and Re-Prompt Off, GENERATE hands the
-  author the running body together with the field text. The author decides from the text whether
-  to change the code or rebuild it. A different description is a rebuild, a few added words or
-  an instruction are a change, and Python does not classify either. Unchanged text is a re-roll
+  author the running body together with the field text. The author decides whether the text asks
+  for a NEW sound or refers to the running one (§2); Python does not classify either. A new sound
+  goes the fresh path and never sees the old code. Unchanged text is a re-roll
   (§3). With no orchestra running (first press, or after a failed authoring) GENERATE authors
   fresh, as today. Machine stances (Transcribe … Opposite) keep their own path.
 - **A dialogue step happens only on a manual press**, never on the REGENERATE cadence
@@ -46,17 +46,37 @@ anything; the player sees in the LRO window what was kept.
 ## 2. The backend turn
 
 A new field `revise` on mode `csound` (the deprecated `correction`/`previous` pair, which only
-quotes the old READING, is left untouched). The conversation:
+quotes the old READING, is left untouched). The author works from the CODE, not from the
+history (BJ 2026-11-22). The original prompt and earlier instructions are not sent: after a few
+changes they no longer describe the sound, and they would compete with the code that does.
+
+The body still carries language. Every body ends with its READING line, which the author wrote
+with that code (`READING: <a short plain-language description of what you built, 5-12 words>`,
+`backend/lco_write.py:608`). It is rewritten with every version, so it describes the sound being
+heard, never an earlier one. It goes back to the author with the body. Whether the original
+prompt adds anything beyond it is measured in the probe (§6), not assumed. The conversation:
 
 1. system — the same system prompt as a fresh authoring (full library index + knob shelf).
-2. user — the original prompt and the earlier instructions of this history.
-3. assistant — the running body, with the CURRENT knob values written back into its library
-   lines (`kbowl = 0.50 ; bowl[...]`). This needs a new inverse of `read_controls`; without it
-   the author would edit the body it wrote, not the instrument the player is hearing.
-4. user — the new field text.
+2. user — the running body with its READING line and with the CURRENT knob values written back
+   into its library lines (`kbowl = 0.50 ; bowl[...]`), then the field text. The write-back
+   needs a new inverse of `read_controls`; without it the author would work on the body it
+   wrote, not the instrument the player is hearing.
 
-Then `_consult` and `_writing_turn` as today. The pages opened are those the author names,
-as in a fresh authoring. The body's own entries are not opened automatically. Their code is
+**The decision is made in the consult turn**, which already exists and is already the author
+reasoning about what the sound is. For a dialogue step it also asks: does this text ask for a
+new sound, or does it refer to the running one? The reply carries the answer as a marker line
+(`NEW` / `CHANGE`) next to the entries it names, read like the entry names are read today
+(`named_entries`).
+
+- `NEW` → the step is a fresh authoring of the text: the conversation is rebuilt without the
+  body, exactly as GENERATE with no orchestra running. The old code cannot pull the new sound
+  toward itself because it is no longer in the context.
+- `CHANGE` → `_writing_turn` as today, with the body in the conversation.
+
+A reply without a marker is counted by the probe (§6); how the live path treats it is set from
+that rate, not guessed now.
+
+The pages opened are those the author names, as in a fresh authoring. The body's own entries are not opened automatically. Their code is
 already in turn 3, and the author can name them if it wants their pages. (The draft agreed in
 chat opened them automatically; this is the change, and it keeps Python out of the choice.)
 "Names nothing → whole library" stays the rule if the window allows it. At 65,536 it cannot
@@ -114,8 +134,8 @@ under sampling; the probe in §6 measures it. Seed 44 failed on the window, not 
 **What a re-roll is based on.** It reruns the last step: same parent version, same text, new seed.
 The result is an alternative to that step, not a step on top of it. Each version records
 `(parent, text, seed)`. Version marks stay one row (v1, v2, v3 …). If v3 is a re-roll of v2, both
-have parent v1, and the next edit's conversation follows the parent chain (v1 → v3), so a
-discarded alternative never enters the dialogue. If the last step was a fresh authoring, the
+have parent v1. The next step works on the version that is running (v3), so a discarded
+alternative never enters it. If the last step was a fresh authoring, the
 re-roll is a fresh authoring with a new seed. With no orchestra running, the same rule ends
 today's identical copies (above); that goes in its own commit.
 
@@ -220,11 +240,20 @@ parts added/removed against the instruction, knob names kept. For the movement i
 `lco_measure` signature: centroid travel before vs after. Whether the edit SOUNDS like what was
 asked is BJ's ear, from an A/B folder (`parent.wav`, `edited.wav`, same pitch, length, loudness).
 
-**Anchoring.** Because the field carries both instructions and new descriptions (§1), the probe
-also sends unrelated texts against a running body (the flute, then "a dry snare drum"). Measured:
-library entries named and code lines shared with the parent, against a fresh authoring of the
-same text. If the running body measurably pulls an unrelated text toward itself, the window
-needs a way to start without it. That is decided on these numbers, not before.
+**The NEW / CHANGE decision** (§2). Texts sent against running bodies, labelled beforehand:
+clear new requests (the flute, then "a dry snare drum"), clear changes ("darker", "let it
+breathe slower", "remove the noise"), and borderline texts (a rewritten description of nearly
+the same sound). Measured: marker present, and agreement with the label on the clear cases. For
+the borderline texts either reading is defensible; they are reported, not scored. A clear new
+request answered `CHANGE` is the case that anchors. Its result is compared with a fresh
+authoring of the same text (entries named, code lines shared with the parent).
+
+**With or without the original prompt.** Every pair runs twice: body + READING (the design in
+§2), and body + READING + the original prompt. Measured for both: the decision above, and
+reverts. A revert is a part that an instruction removed and that comes back at the next step,
+over chains of 3 steps such as "remove the noise" → "slower" → "brighter". The original prompt
+helps if it improves the decision. It hurts if it brings removed parts back. The design keeps
+whichever variant measures better.
 
 Scripts used for §3–4 (scratch, not committed): `same_input_twice.py`, `reroll_sampled.py`,
 `consult_44.py`, `ctx_config_probe.py`, `ctx_reuse_probe.py`, `ctx_reuse_posmin.py`,
