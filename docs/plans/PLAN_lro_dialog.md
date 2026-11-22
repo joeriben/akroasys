@@ -1,6 +1,9 @@
 # LRO dialogue: the author edits its own orchestra on instruction
 
 Status: plan, 2026-11-14. Design agreed with BJ in principle; nothing implemented.
+Revised 2026-11-22: no new Re-Prompt position. The prompt field is the dialogue (BJ: "Wozu ein
+neues Feld?"). "The LRO window" below is the panel that shows HEARD / OPENED / WROTE / KNOBS /
+RUNNING and turns to the Csound code on click-and-hold (`src/gui/LcoTraceView.h`).
 Measurements in §3–4 were run today on the Fedora dev machine (RTX PRO 6000, llama-cpp-python
 0.3.36 built with CUDA, the shipped `gemma-4-12b-it-qat-q4_0.gguf`). None were run on a Mac.
 
@@ -16,21 +19,22 @@ placeholder "Was soll sich ändern?". The design:
 - **One input: the existing `dcoPromptEditor`**, placeholder unchanged ("Describe the oscillator
   to craft"). What the player types there is not prescribed: a rewritten description, a few
   added words, or an instruction all work. The field keeps the player's text.
-- **One new position on the LRO Re-Prompt bar: "Edit"** (working title; name and glyph are BJ's).
-  Appended at the END of the LRO bar so the stored indices of old presets keep their meaning.
-  The LRO bar therefore gets its own entry count and glyph list instead of sharing
-  `RepromptStance::kEntries`/`kCount` with the neural bar.
-  - Off: fresh authoring, as today.
-  - Machine stances (Transcribe … Opposite): unchanged.
-  - Edit: GENERATE hands the author the running body and the field text, and the author edits
-    the code.
-- **Edit steps only on a manual press**, never on the REGENERATE cadence
+- **No new position, no mode.** With an orchestra running and Re-Prompt Off, GENERATE hands the
+  author the running body together with the field text. The author decides from the text whether
+  to change the code or rebuild it. A different description is a rebuild, a few added words or
+  an instruction are a change, and Python does not classify either. Unchanged text is a re-roll
+  (§3). With no orchestra running (first press, or after a failed authoring) GENERATE authors
+  fresh, as today. Machine stances (Transcribe … Opposite) keep their own path.
+- **A dialogue step happens only on a manual press**, never on the REGENERATE cadence
   (`pollLcoRepromptCadence`). An instruction is a human act; the cadence belongs to the machine
   stances.
-- **The trace card records the dialogue.** Per step it adds a station (e.g. ASKED — the text;
+- **One line of help, under "compiled"** in the RUNNING station: *"Use the prompt field to talk
+  to the AI if you want to add or change something."* It ships with step 4, not before: until
+  then a new prompt authors from scratch and the line would be false.
+- **The LRO window records the dialogue.** Per step it adds a station (e.g. ASKED — the text;
   CHANGED — lines kept, parts added/removed; RUNNING) and a version mark (v1, v2, …). A short
-  click on a mark restores that version (body + knob values). Click-and-hold still flips the card
-  (`kHoldMs` 400), so the short click is free.
+  click on a mark restores that version (body + knob values). Click-and-hold still turns the
+  window to the code (`kHoldMs` 400), so the short click is free.
 - **Presets store the history as text** (the instructions and the version bodies), not as a new
   binary block in the orchestra path.
 
@@ -112,8 +116,8 @@ The result is an alternative to that step, not a step on top of it. Each version
 `(parent, text, seed)`. Version marks stay one row (v1, v2, v3 …). If v3 is a re-roll of v2, both
 have parent v1, and the next edit's conversation follows the parent chain (v1 → v3), so a
 discarded alternative never enters the dialogue. If the last step was a fresh authoring, the
-re-roll is a fresh authoring with a new seed. The same rule fixes Off; that goes in its own
-commit.
+re-roll is a fresh authoring with a new seed. With no orchestra running, the same rule ends
+today's identical copies (above); that goes in its own commit.
 
 ## 4. Precondition: the context window
 
@@ -129,9 +133,9 @@ Measured token counts (the model's own tokenizer):
 Fresh authoring of the flute prompt already sends 60,300–61,518 tokens to the writing turn, and
 one of four sampled runs overflowed. `docs/plans/LRO_BOWED_STRING_ANALYSIS.md:71` records the
 same failure on "a solo violin, bowed, singing". The "names nothing → whole library" fallback
-cannot fit at all: 35k + 86k is beyond 65,536. An Edit turn adds the body (~2.1k), the history,
-and a second consult. With a comparable page set it lands at ~67k, so **Edit cannot run reliably
-in the current window.** This has to be solved first, as its own concern.
+cannot fit at all: 35k + 86k is beyond 65,536. A dialogue step adds the body (~2.1k), the
+history, and a second consult. With a comparable page set it lands at ~67k, so **the dialogue
+cannot run reliably in the current window.** This has to be solved first, as its own concern.
 
 The model supports 262,144 tokens (`gemma4.context_length`); `_GGUF_N_CTX` 65,536 is our
 setting. What a bigger window costs, as llama.cpp reports it at load:
@@ -182,9 +186,9 @@ change for every prompt. That is a behaviour change of the shipped author and ne
 run of `tools/lco_author_offline.py --measure` before and after.
 
 **The API author** (`backend/author_api.py`) has windows well beyond this on Anthropic and
-on most OpenAI-compatible models, so Edit works there without step 1. It sends no prompt-caching
-markers today, so every Edit call re-sends the ~35k-token system prompt and its pages at full
-price. Anthropic has no `seed` parameter. A re-roll there samples without a reproducible seed,
+on most OpenAI-compatible models, so the dialogue works there without step 1. It sends no
+prompt-caching markers today, so every dialogue step re-sends the ~35k-token system prompt and its
+pages at full price. Anthropic has no `seed` parameter. A re-roll there samples without a reproducible seed,
 and the version keeps its body, which is what restore needs anyway.
 
 ## 5. Order of work
@@ -194,12 +198,16 @@ Each step is its own commit (or series), each with its verification.
 1. **Window** (§4): loader to n_ctx 131,072, `swa_full=False`, `flash_attn=True`, checkpoint
    restored per authoring; corpus run before/after; Mac numbers from BJ.
 2. **Seed**: sampling with the GGUF's own settings plus a per-authoring seed for a re-roll. This
-   covers Off with unchanged prompt as well as Edit with unchanged text. The seed travels in the
-   result, the trace and the preset.
+   covers unchanged text with and without an orchestra running. The seed travels in the result,
+   the trace and the preset.
 3. **Backend `revise`** (§2), with the inverse of `read_controls`, then the probe (§6).
-4. **UI**: the Edit position (LRO bar's own count and glyphs), routing in `triggerLcoGenerate`
-   (Edit is a manual press, never cadence), card stations and version marks, restore on short
-   click, preset persistence.
+4. **UI**: routing in `triggerLcoGenerate` (orchestra running + Re-Prompt Off + manual press →
+   dialogue step; the cadence never), the help line under "compiled", stations and version marks
+   in the LRO window, restore on short click, preset persistence.
+
+Done separately, 2026-11-22: the LRO window shows "please wait" with counting dots from the
+start of an authoring until its first code line (`98fab277`; BJ asked for it in the same
+review).
 
 ## 6. Probe (backend only, before any UI)
 
@@ -211,6 +219,12 @@ Measured objectively per run: compiled, attempts, code lines kept from the paren
 parts added/removed against the instruction, knob names kept. For the movement instructions, the
 `lco_measure` signature: centroid travel before vs after. Whether the edit SOUNDS like what was
 asked is BJ's ear, from an A/B folder (`parent.wav`, `edited.wav`, same pitch, length, loudness).
+
+**Anchoring.** Because the field carries both instructions and new descriptions (§1), the probe
+also sends unrelated texts against a running body (the flute, then "a dry snare drum"). Measured:
+library entries named and code lines shared with the parent, against a fresh authoring of the
+same text. If the running body measurably pulls an unrelated text toward itself, the window
+needs a way to start without it. That is decided on these numbers, not before.
 
 Scripts used for §3–4 (scratch, not committed): `same_input_twice.py`, `reroll_sampled.py`,
 `consult_44.py`, `ctx_config_probe.py`, `ctx_reuse_probe.py`, `ctx_reuse_posmin.py`,
