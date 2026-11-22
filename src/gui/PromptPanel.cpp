@@ -2751,7 +2751,10 @@ void PromptPanel::triggerDcoBake()
     // review finding).
     if (dcoRepromptBusy_)
     {
-        setLcoStatus("Still rewriting the prompt");
+        // Words only, NOT setLcoStatus: a full status write is a state change —
+        // it ends the busy state the running re-prompt set (the dot and the
+        // wait line go out for the rest of it) and clears the card.
+        dcoTraceView.setStatusLine("Still rewriting the prompt");
         return;
     }
     // The pipe is one serialized channel (recursive stateMutex_): authoring
@@ -3359,7 +3362,10 @@ void PromptPanel::triggerDcoReprompt()
     // click did nothing (house pattern: triggerDcoBake, triggerGeneration).
     if (dcoRepromptBusy_)
     {
-        setLcoStatus("Still rewriting the prompt");
+        // Words only, NOT setLcoStatus — same reason as the dcoBaking_ case
+        // below: a full status write would end the busy state of the re-prompt
+        // that is still running.
+        dcoTraceView.setStatusLine("Still rewriting the prompt");
         return;
     }
     if (dcoBaking_)
