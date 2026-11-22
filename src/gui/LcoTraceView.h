@@ -420,6 +420,10 @@ public:
         relayout();
     }
 
+    /** Easy mode hides the card while an authoring may still be running; the
+     *  busy animation stops with it and resumes on show (layoutBusy). */
+    void visibilityChanged() override { layoutBusy(); }
+
     // ── Click and hold turns the card over ───────────────────────────────────
     // A press, not a click: a click belongs to the scrollbar and to whatever
     // selection the back grows next, and taking it here would make the card
@@ -1243,8 +1247,11 @@ private:
     {
         const bool wanted = busy_ && ! trace_.valid && ! showBack_;
         // The animation exists exactly while the dot is shown: nothing runs
-        // at idle, nor while the back is up.
-        if (! wanted)
+        // at idle, nor while the back is up, nor while the card itself is
+        // hidden (visibilityChanged). The view's own flag, not isShowing():
+        // a card set busy before its editor is on screen must still start —
+        // and no message arrives when that, or an ancestor's hiding, changes.
+        if (! wanted || ! isVisible())
             vblank_.reset();
         else if (vblank_ == nullptr)
             vblank_ = std::make_unique<juce::VBlankAttachment>(this, [this] { animateFrame(); });
