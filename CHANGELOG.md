@@ -99,10 +99,12 @@ each entry is marked open in the library.
   whatever it opens: 11,282 tokens, which it never managed. The bank is now
   one resonator definition and fifteen calls (1,597 tokens), the same samples
   as before. `drum_head` is folded the same way (10,865 to 3,353 tokens, same
-  samples, about 5 % more CPU). `cast_bell` and `tubular_bell` also had a line
+  samples, about 5 % more CPU), and so is `struck_drum` (2,836 to 1,503, same
+  samples), which "timpani" opens. `cast_bell` and `tubular_bell` also had a line
   layout in their strike block that the author copied with one `endif` too
   many; both are laid out unambiguously now. "Church bell", "tubular bells,
-  soft hammer" and "a bell with a major third, heavy clapper" give a sound;
+  soft hammer", "a bell with a major third, heavy clapper", "timpani" and
+  "kettledrum roll" give a sound;
   a bell together with a second large instrument, and the drum skin with
   anything added after it, often still do not.
 
