@@ -1,5 +1,5 @@
 {
- "lexicon_version": 61,
+ "lexicon_version": 62,
  "techniques": [
   {
    "key": "sine",
@@ -2293,6 +2293,59 @@
     "hinweis": "kein Beleg für eine Abnahme durch BJ gefunden. NICHT als abgenommen behandeln und nicht aus Herkunft, Commit-Text oder „ear-approved“ in docs/ erschließen — genau das war der Fehler (2026-07-30).",
     "massstab": "Abgenommen ist ein Instrument erst über eine HTML-Abhörseite, auf der die PARAMETERKOMBINATION sichtbar und von BJ wählbar ist — nicht über einen Ordner mit vorgerenderten Dateien. Generator: tools/lco_param_page.py (Kombination frei wählbar, jede Achse an ihren deklarierten Ankern). Daneben: tools/lco_listening_test.py (blinde Wort-Klang-Zuordnung, docs/LCO_TEST_POLICY.md) und tools/lco_abx_test.py."
    }
+  },
+  {
+   "key": "wavefolder",
+   "surface_forms": [
+    "wavefolder",
+    "wave folder",
+    "wavefolding",
+    "west coast",
+    "buchla",
+    "buchla 259",
+    "timbre circuit",
+    "folded sine",
+    "wave folding",
+    "wellenfalter"
+   ],
+   "priority": 10,
+   "why": "a sine folded by the Buchla 259 timbre circuit (Esqueda, Pontynen, Valimaki & Parker, DAFx 2017): five parallel cells fold the wave back each time it crosses one of their thresholds, so a plain sine grows odd harmonics whose strongest partial climbs and falls back. The west-coast way: fold a simple wave instead of filtering a rich one (analog_osc and bass_saw filter a saw). fold is NOT a brightness knob: the cells enter at 0.6, 1.8, 3.0, 4.1 and 5.5 V; it is round at 1 V, brightest near 5 V and again near 8 V, dull again at 10. The fold drifts a few percent by itself: the colour moves slowly, the loudness stays put. Odd harmonics like cheby, but many more of them, and moving. At the plugin's rate aliases stay 52 dB down at 1760 Hz, 29 at 4186; at 44100 high keys at a bright fold alias. In the top octave a bright fold grows quieter: its strongest partials lie above hearing.",
+   "code": "; FOLLOWS kfreq: yes\n; Buchla 259 timbre circuit, Esqueda/Pontynen/Valimaki/Parker DAFx-17 eqs 13-21, with first-order ADAA (Parker/Zavalishin/Le Bivic DAFx-16 eqs 9-10)\n; WFOLDM(X): eq 18 over the five cells of eqs 13-17, written as s*x + sum w*a/2*(|x-t| - |x+t|). WFOLDF(X): its antiderivative, F(0) = 0 (DAFx-16 sec. 2.3)\nkfold   = 3.5 ; fold[1..10]: peak volts into the cells; NOT a brightness knob: cells enter at 0.6/1.8/3.0/4.1/5.5 V, brightest near 5 and 8 V\n#define WFOLDM(X) #-1.673453*($X) - 4.9998*(abs(($X)-0.6) - abs(($X)+0.6)) - 5.233187*(abs(($X)-2.994) - abs(($X)+2.994)) - 3.030991*(abs(($X)-5.46) - abs(($X)+5.46)) + 5.067336*(abs(($X)-1.8) - abs(($X)+1.8)) + 4.859915*(abs(($X)-4.08) - abs(($X)+4.08))#\n#define WFOLDF(X) #-41.75083826 - 0.8367265*($X)*($X) - 2.4999*((($X)-0.6)*abs(($X)-0.6) - (($X)+0.6)*abs(($X)+0.6)) - 2.6165935*((($X)-2.994)*abs(($X)-2.994) - (($X)+2.994)*abs(($X)+2.994)) - 1.5154955*((($X)-5.46)*abs(($X)-5.46) - (($X)+5.46)*abs(($X)+5.46)) + 2.533668*((($X)-1.8)*abs(($X)-1.8) - (($X)+1.8)*abs(($X)+1.8)) + 2.4299575*((($X)-4.08)*abs(($X)-4.08) - (($X)+4.08)*abs(($X)+4.08))#\n; level law, built once for all voices: 1/rms of one period of the cells through the keyed one-pole, for 0..12.75 V. Input scaling, not a meter: fold alone moves the level 5.6 dB\ngiWfold ftgenonce 0, 0, 256, -2, 0\nif tab_i(255, giWfold) == 0 then\nitn     = tan(3.14159265 * 1326.29 / 110 / 256)\nii      = 1\nwhile ii < 256 do\niz      = 0\nivp     = 0\niss     = 0\nip      = 0\nwhile ip < 256 do\nix      = ii * 0.05 * sin(6.283185307 * ip / 256)\niv      = $WFOLDM(ix)\niz      = (itn * (iv + ivp) - (itn - 1) * iz) / (1 + itn)\nivp     = iv\niss     = iss + (ip < 128 ? 0 : iz * iz)\nip      += 1\nod\ntabw_i  1 / sqrt(iss), ii, giWfold\nii      += 1\nod\ntabw_i  tab_i(1, giWfold), 0, giWfold\nendif\n; fold drifts +-8 % at 0.07 Hz from the note-on, this entry's own: the fold is not monotonic, so the colour travels, not the level\nkfd     = kfold * (1 + 0.08 * sin(6.283185307 * 0.07 * knote))\nkcps    = kfreq * koct1\nknrm    tablei kfd * 20, giWfold\nafx     poscil kfd, kcps\nax0     delay1 afx\naF1     = $WFOLDF(afx)\naF0     delay1 aF1\nadx     = afx - ax0\namid    = (afx + ax0) * 0.5\naym     = $WFOLDM(amid)\n; eq 9; where |dx| < 1e-7 (the sine's peaks) the map at the midpoint, eq 10. aw is 0 or 1: Csound has no a-rate ternary\naw      limit (abs(adx) - 1e-7) * 1e30, 0, 1\nay      = aw * (aF1 - aF0) / (adx + (1 - aw)) + (1 - aw) * aym\n; the circuit's output one-pole (eq 19) sits FIXED at 1326 Hz; keyed to the note here, 1326 Hz at 110 Hz, so every key has the same colour\nkfc     limit 1326.29 * kcps / 110, 20, 0.45 * sr\nktn     = tan(3.14159265358979 * kfc / sr)\naout    biquad ay, ktn / (1 + ktn), ktn / (1 + ktn), 0, 1, (ktn - 1) / (ktn + 1), 0\naout    atone aout, 5\nasig    = aout * knrm / tab_i(20, giWfold) * -0.25 * kvol1",
+   "params": {
+    "fold": {
+     "range": [
+      1,
+      10
+     ],
+     "default": 3.5,
+     "note": "peak volts into the cells. Not monotonic: the strongest partial runs #1, #3, #5, #7, #9, #11 up to 5 V, is #1 again over 5.4-7.6, #5 near 8, #3 from 8.3. The level holds, but in the top octave a bright fold is quieter.",
+     "anchors": {
+      "round": {
+       "value": 1,
+       "gloss": "lightly folded: the 3rd harmonic 5 dB under the fundamental, seven partials"
+      },
+      "brightest": {
+       "value": 5,
+       "gloss": "the strongest partial is the 11th: the brightest fold"
+      },
+      "second fold": {
+       "value": 8,
+       "gloss": "bright again after a darker stretch at 5.5-7 V"
+      },
+      "dull": {
+       "value": 10,
+       "gloss": "past the bright folds: round, the 3rd strongest"
+      }
+     }
+    }
+   },
+   "heard": {
+    "status": "offen",
+    "datum": "2026-11-28",
+    "hinweis": "Neuer Körper, nur gemessen, nicht gehört. fold ist nicht monoton: rund bei 1 V, am hellsten bei etwa 5 und 8 V, bei 10 V wieder dumpf. Die Faltung driftet ab dem Notenbeginn um +-8 % mit 0,07 Hz: die Farbe wandert, der Pegel bleibt (-7,1 dB rms bei jedem fold-Wert, beide Raten). Bei 176400 (Plugin-Rate) liegt das Aliasing bei 1760 Hz mindestens 52 dB unter dem stärksten hörbaren Teilton, bei 4186 Hz mindestens 29 dB; bei 44100 aliasen hohe Lagen mit heller Faltung deutlich (bis -9 dB bei 1760 Hz). Der Ausgangs-Tiefpass folgt der Taste, statt wie in der Schaltung fest bei 1326 Hz zu liegen. In der obersten Oktave wird eine helle Faltung leiser, weil ihre stärksten Teiltöne über 20 kHz liegen (4186 Hz, fold 5: -25,5 dB unter 20 kHz statt -7,1 dB).",
+    "wie": "ungehört; am Instrument zu prüfen"
+   },
+   "display_name": "wavefolder"
   },
   {
    "key": "organ",
