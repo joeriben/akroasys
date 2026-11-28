@@ -64,6 +64,59 @@ each entry is marked open in the library.
   lead to it. `sub_sine` is a phase-locked octave under the note whose level
   no longer depends on when the note starts.
 
+- **A wavefolder.** "Wavefolder", "west coast", "buchla", "folded sine" open
+  `wavefolder`, a sine through the five folding cells of the Buchla 259 timbre
+  circuit. Fold is not a brightness knob: round at 1, brightest near 5 and
+  again near 8, dull at 10. The fold drifts slowly by itself.
+
+- **The author's memory.** The language model that writes the sound loads its
+  65,536-token window in 13.5 GB of graphics memory instead of 33.6, which a
+  32 GB card refused. `T5YNTH_CODER_SWA_FULL=1` restores the old behaviour.
+  Not yet measured on a Mac.
+
+- **Prompts that asked for too much of the library.** A prompt whose
+  instruments did not fit the author's window ("church bell", "timpani", "an
+  angry insect") ended in `Requested tokens exceed context window` and no
+  sound. The author is now told what each page costs and chooses again; if it
+  still does not fit, the message says so and what to do. On 24 test prompts,
+  22 now give a sound instead of 18. The author's second choice is often the
+  small page rather than the instrument the prompt names ("church bell"
+  without `cast_bell`). A larger window does not cure that: the author has to
+  write out again every page it opens, and above roughly 3,000 tokens of
+  instrument it starts reciting instead of writing.
+
+- **Repairs that repair.** When the first draft does not compile, the author
+  is shown the line the compiler means. For an undefined variable it used to
+  be shown the line above, for a wrong argument list no line at all, and for a
+  bracket error a fragment of the line. A variable named without a rate
+  letter (`r2`, `m1`) is now called that, where Csound only reports a type
+  mismatch, an `endif` too many is called that, with the line it follows, and
+  an `i` variable given a k-rate value gets the sentence about `i()`. A line
+  that begins with an opcode's name is told what is missing.
+
+- **Bells and a drum skin the author can write.** `cast_bell` listed its 29
+  resonators one after the other, and the author has to write out again
+  whatever it opens: 11,282 tokens, which it never managed. The bank is now
+  one resonator definition and fifteen calls (1,597 tokens), the same samples
+  as before. `drum_head` is folded the same way (10,865 to 3,353 tokens, same
+  samples, about 5 % more CPU). `cast_bell` and `tubular_bell` also had a line
+  layout in their strike block that the author copied with one `endif` too
+  many; both are laid out unambiguously now. "Church bell", "tubular bells,
+  soft hammer" and "a bell with a major third, heavy clapper" give a sound;
+  a bell together with a second large instrument, and the drum skin with
+  anything added after it, often still do not.
+
+- **The page's parameter list no longer ends up in the code.** The author
+  sometimes copied the parameter record that follows an instrument's code on
+  its page into its answer, and the orchestra did not compile. Those lines are
+  dropped when the answer is read.
+
+- **Room for the answer grows with what was opened.** The author's window
+  kept a fixed 4,096 tokens free for the answer, less than some pages take to
+  write out again; such an answer was cut off mid-line and reported as a
+  bracket error. The room now grows with the bodies opened, so the author is
+  asked to choose fewer pages more often.
+
 - **A Level fader for seventeen more instruments.** The panel draws a layer's
   Level fader only for a body that reads its level; seventeen bodies did not,
   among them the struck bar, cymbal, organ, flute, brass, strings and supersaw.
