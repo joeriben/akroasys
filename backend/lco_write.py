@@ -3386,6 +3386,53 @@ def _undefined_macro(src, csd_lines):
     return ""
 
 
+_MACRO_CALL_ARGS = re.compile(r"\$([A-Za-z_]\w*)\(")
+
+
+def _macro_arity(src, csd_lines):
+    """A `$NAME(...)` call with another number of arguments than its `#define`.
+
+    Compiled 2026-11-28: `$CBELL2(0'1'kc*.4996'6923'.001175)`, five arguments
+    for a macro defined with six, gives the same `unexpected ERROR_TOKEN
+    (token "$")` as a macro that is not defined at all. Arguments are counted
+    the way Csound's preprocessor counts them (csound_pre.lex): at a `'` or a
+    `#` outside any inner bracket. The definition is the last `#define
+    NAME(...)` above the quoted line. Says the two numbers, not which
+    argument is missing: that is on the page. Not reached: too many arguments
+    (Csound folds them into the last one and quotes the expanded text) and a
+    short call that is not the first on its line."""
+    squeeze = lambda t: re.sub(r"\s+", "", t)
+    want_line = squeeze(src)
+    line_of = next((i for i, line in enumerate(csd_lines)
+                    if want_line and want_line in squeeze(line)), len(csd_lines))
+    params = {}
+    for line in csd_lines[:line_of]:
+        d = _MACRO_DEF.match(line)
+        if d and d.group(2) is not None:
+            params[d.group(1)] = [a for a in re.split(r"['#]", d.group(2))
+                                  if a.strip()]
+    code = _code_part(src)
+    for m in _MACRO_CALL_ARGS.finditer(code):
+        want = params.get(m.group(1))
+        if not want:
+            continue
+        depth, seps, end = 1, 0, None
+        for i in range(m.end(), len(code)):
+            depth += (code[i] == "(") - (code[i] == ")")
+            if depth == 0:
+                end = i
+                break
+            if depth == 1 and code[i] in "'#":
+                seps += 1
+        if end is None:
+            continue
+        got = seps + 1 if code[m.end():end].strip() else 0
+        if got != len(want):
+            return (f" — `${m.group(1)}` is defined with {len(want)} "
+                    f"arguments and this call gives {got}")
+    return ""
+
+
 _TWO_POINTS = re.compile(r"(?<![\w.])\d*\.\d+\.\d*")
 _I_EXPR_MSG = re.compile(r"Use of i\(\) with expression not permitted on line (\d+)")
 _I_OF_EXPR = re.compile(r"(?<![\w$])i\s*\((?!\s*\w+\s*\))")
@@ -3543,7 +3590,8 @@ def _explain(log, orchestra):
             full = csd_lines[at - 1].strip() if _BODY_OFFSET < at <= len(csd_lines) else ""
             if full and squeeze(src) in squeeze(full):
                 src = full
-            hint = (_undefined_macro(src, csd_lines) or _two_points(src)
+            hint = (_undefined_macro(src, csd_lines)
+                    or _macro_arity(src, csd_lines) or _two_points(src)
                     or _mechanical_hint(src) or _bracket_hint(src)
                     or _opcode_first(msgs[-1] if msgs else "", src))
             if msgs and _STRAY_ENDIF.search(msgs[-1]):
