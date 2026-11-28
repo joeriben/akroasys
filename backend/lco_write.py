@@ -2346,14 +2346,64 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _ERR_LINE = re.compile(r"\berror:", re.IGNORECASE)
 # Csound points at the offending source two ways: a bare "Line N" for semantic
-# errors, and a ">>> <the line> <<<" echo for parse errors. Read both.
-_LINE_NO = re.compile(r"^\s*Line\s+(\d+)\s*$", re.IGNORECASE)
+# errors, and a ">>> <the line> <<<" echo for parse errors. Read both. The bare
+# form comes with and without a colon: `Line 116` under "used before defined",
+# `Line: 117` under "Unable to find opcode entry". Only the first was read, so
+# a wrong argument list went back to the author with no line at all.
+_LINE_NO = re.compile(r"^\s*Line:?\s+(\d+)\s*$", re.IGNORECASE)
+# Under "Unable to find opcode entry ... with matching argument types:" Csound
+# says which types it was GIVEN (`Found: a moogladder a`). That is the half of
+# the message the author can act on.
+_FOUND = re.compile(r"^\s*Found:\s*(.+?)\s*$")
+# The variable an undefined-variable error names. Csound's own `Line N` for
+# this error is the line ABOVE the one that reads it (Csound 6.18: body line 2
+# reads `kdepth`, reported `Line 116`, the read is on 117), so the line is
+# found by the name instead.
+_UNDEFINED = re.compile(r"Variable '(\w+)' used before defined")
+# Where a parse error is: `from file <path> (1), line 118:` on the line before
+# the echo. For parse errors this number is right, and it is needed, because
+# the echo is NOT the line: it is the stretch the parser had open when it gave
+# up. Of `kdirt = limit(((min(kfreq * 6.5 ...` Csound echoed
+# `kfreq * 6.5 * (...) * 2.2, sr * 0.45, 20000) / k_dirty_f0 - 1) / 1.41 - 1, 0, 40`
+# — more closing brackets than opening ones, and no sign of the three that were
+# opened before it. The author was sent that three times and returned the same
+# line three times (corpus 2026-11-28, "a bright bell that slowly gets dirty").
+_AT_LINE = re.compile(r",\s*line\s+(\d+):\s*$", re.IGNORECASE)
+
+
+def _code_part(line):
+    """One line without what Csound does not read as code: strings, `;` and
+    `//` comments, and a `/* */` that opens and closes on the line."""
+    code = re.sub(r'"[^"]*"', '""', line or "")
+    code = re.sub(r"/\*.*?\*/", " ", code)
+    return re.split(r";|//", code, 1)[0]
+
+
+def _bracket_hint(line):
+    """A count, where the brackets of a quoted line do not balance.
+
+    Csound says `unexpected NEWLINE, expecting ',' or ')'` and leaves it to the
+    reader to find which bracket; on a line with eight of them the author does
+    not. The count is a fact about the line it wrote, not a correction."""
+    code = _code_part(line).rstrip()
+    opened, closed = code.count("("), code.count(")")
+    # Only the case that is certainly wrong. A line that ends on an operator or
+    # a comma is continued on the next one, legally (`kx = limit((kfreq *` and
+    # `2), 0, 40)` compile), and the continuation closes more than it opens.
+    if opened <= closed or code[-1:] in "+-*/%^,&|<>=?:\\":
+        return ""
+    return (f" — this line opens {opened} round brackets and closes {closed}, "
+            f"and nothing continues it: {opened - closed} "
+            f"{'is' if opened - closed == 1 else 'are'} never closed.")
 _ECHO = re.compile(r">>>\s*(.*?)\s*<<<")
 # Where the authored body starts inside the wrapped CSD, so a line number in
 # Csound's message can be mapped back to a line the AUTHOR actually wrote. The
 # model never sees the wrapper; telling it "line 49" of a file it did not write
 # is worse than telling it nothing.
 _BODY_OFFSET = _HEAD.count("\n")
+# How many lines of a wrapped orchestra come after the body: the host's tail
+# and the score. A search for the author's line stops before them.
+_AFTER_BODY = len(("x" + _TAIL + _SCORE).splitlines()) - 1
 
 
 # Where the compiler actually lives.
@@ -3053,20 +3103,52 @@ def _explain(log, orchestra):
     """
     msgs, quoted = [], []
     csd_lines = orchestra.splitlines()
+    undefined = None            # the variable the error just read names
+    at = 0                      # the line a parse error says it is on
+    squeeze = lambda t: re.sub(r"\s+", "", t)
     for ln in _CTRL.sub("", _ANSI.sub("", log)).splitlines():
         if _ERR_LINE.search(ln):
             # drop Csound's "from file /tmp/....csd (1)," prefix: a temp path is
             # noise in the repair turn, and the author cannot act on it.
             msgs.append(re.sub(r"^.*?from file .*?,\s*", "", ln.strip()))
+            u = _UNDEFINED.search(ln)
+            undefined = u.group(1) if u else None
+            continue
+        f = _FOUND.match(ln)
+        if f and msgs:
+            msgs[-1] = f"{msgs[-1]} you wrote {f.group(1)}"
             continue
         e = _ECHO.search(ln)
         if e and e.group(1).strip():
             src = e.group(1).strip()
-            quoted.append(f"your line: {src}{_mechanical_hint(src)}")
+            # The whole line instead of the echoed stretch of it — where the
+            # numbered line really contains the echo. After a `$MACRO` call
+            # Csound's counter is off, and then the echo is all there is.
+            full = csd_lines[at - 1].strip() if _BODY_OFFSET < at <= len(csd_lines) else ""
+            if full and squeeze(src) in squeeze(full):
+                src = full
+            quoted.append(f"your line: {src}"
+                          f"{_mechanical_hint(src) or _bracket_hint(src)}")
+            continue
+        a = _AT_LINE.search(ln)
+        if a:
+            at = int(a.group(1))
             continue
         m = _LINE_NO.match(ln)
         if m:
             n = int(m.group(1))
+            if undefined:
+                # The first body line that READS the name is the one that used
+                # it before it was defined. Body lines only: a body that never
+                # writes `asig` is first read by the host's own output line,
+                # and then Csound's number, one line early or not, is the
+                # nearest thing to the author's line there is.
+                token = re.compile(rf"(?<![\w$]){re.escape(undefined)}(?!\w)")
+                for i in range(_BODY_OFFSET, len(csd_lines) - _AFTER_BODY):
+                    if token.search(_code_part(csd_lines[i])):
+                        n = i + 1
+                        break
+                undefined = None
             src = csd_lines[n - 1].strip() if 0 < n <= len(csd_lines) else ""
             if src and n > _BODY_OFFSET:
                 quoted.append(f'your line: {src}{_mechanical_hint(src)}')
