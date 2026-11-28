@@ -3206,9 +3206,10 @@ def _render_command():
 # Detection is syntactic and needs no opcode list: after `=`, an identifier
 # followed by SPACE and then something that is not an operator is an opcode
 # statement, never arithmetic. `= a + b` (operator follows), `= foo(x)` and
-# `= poscil:k(...)` (no space before the bracket) are all left alone.
+# `= poscil:k(...)` (no space before the bracket) are all left alone, and so
+# is `= kc ; a comment`.
 _ASSIGNED_OPCODE = re.compile(
-    r"^\s*([A-Za-z]\w*)\s*=\s*([A-Za-z]\w*)\s+(?![-+*/%,)=<>&|?:])\S")
+    r"^\s*([A-Za-z]\w*)\s*=\s*([A-Za-z]\w*)\s+(?![-+*/%,)=<>&|?:;])\S")
 
 
 # `vco2 kamp, kcps, 1` — the author's second mechanical slip, and the one the
@@ -3331,7 +3332,20 @@ def _opcode_first(msg, src):
             f"If `{name}` was meant as a name, rename it wherever it stands.")
 
 
-_K_NAME = re.compile(r"(?<![\w$])g?k\w+")
+_K_NAME = re.compile(r"(?<![\w$])(?!(?:kr|ksmps)\b)g?k\w+(?!\w*\s*[(\[])")
+_I_OF_K = re.compile(r"\bi\(\s*g?k\w+\s*\)")
+
+
+def _k_names(src):
+    """The k-named variables right of a line's `=`, quoted, in order, once each.
+
+    Which names are k-rate is what the author needs pointed at: told only the
+    rule, it sent `ikc = (kc < 20 ? 220 : kc)` again unchanged (2026-11-28).
+    A name followed by `(` is a call, not a variable; `kr` and `ksmps` are
+    i-rate; an array element and a name already inside `i(` are left out."""
+    rhs = _I_OF_K.sub(" ", _code_part(src).split("=", 1)[1])
+    names = list(dict.fromkeys(_K_NAME.findall(rhs)))
+    return ", ".join(f"`{n}`" for n in names)
 
 
 def _stray_endif(csd_lines, at):
@@ -3444,7 +3458,7 @@ def _explain(log, orchestra):
                     hint = f" — {_rate_fact(lhs.group(1))}."
                 elif (found and found.split() == ["i", "=", "k"] and not hint
                         and lhs and lhs.group(1).lstrip("g")[:1] == "i"
-                        and _K_NAME.search(_code_part(src).split("=", 1)[1])):
+                        and _k_names(src)):
                     # Compiled 2026-11-28: `ikc = kc`, `ikc = kc * 2` and
                     # `ikc = (kc < 20 ? 220 : kc)` all give exactly `i = k`,
                     # and `i(kc)` in place of each `kc` compiles. Only where a
@@ -3455,7 +3469,8 @@ def _explain(log, orchestra):
                             "note starts, so everything right of its `=` must be "
                             "i-rate, and a k variable is not: `i(kname)` reads "
                             "a k variable's value at that moment (a variable "
-                            "by itself, not an expression or an opcode call).")
+                            "by itself, not an expression or an opcode call). "
+                            f"The k names on this line: {_k_names(src)}.")
                 quoted.append(f'your line: {src}{hint}')
             found = None
     if not msgs:
