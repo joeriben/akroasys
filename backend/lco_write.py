@@ -1373,6 +1373,22 @@ def _consult(user_turn, sysp, llm, on_thinking=None, turn=None):
 # A prompt that does not fit at all returns `Requested tokens exceed context
 # window` from the model surface, which is what used to reach the player.
 _ANSWER_ROOM = 4096
+# The longest body that room was sized for (the measured ceiling above).
+_ANSWER_BODY = 2500
+
+
+def _answer_room(sel, count):
+    """What the answer to this selection needs free.
+
+    The author writes out again what it opens. `_ANSWER_ROOM` holds bodies up
+    to `_ANSWER_BODY` tokens; instruments opened beyond that add what they are
+    longer. "church bell + sung vowel" (2026-11-28) opened `cast_bell` and
+    `formant_voice` with others: the pages fitted with 4,293 tokens to spare,
+    the two bodies needed more, the reply ended in the middle of a line at the
+    window's end and the player was told about an unclosed bracket."""
+    bodies = sum(count(it["code"]) for it in sel.get("instruments") or []
+                 if has_code(it.get("code")))
+    return _ANSWER_ROOM + max(0, bodies - _ANSWER_BODY)
 # How often the author is asked to choose again before the request is refused.
 _NARROW_TRIES = 2
 
@@ -1420,7 +1436,14 @@ def _narrow_turn(sel, count, need, window):
     behalf: which entries this sound can do without is exactly the judgement
     the consultation exists for."""
     rows = [r for r in _page_costs(sel, count) if r[2] > 0]
-    room = window - (need - sum(r[2] for r in rows))
+    # `need` carries the answer room of the selection that did NOT fit, long
+    # bodies included (`_answer_room`). A smaller choice does not carry them,
+    # so the room for pages is stated against the plain answer room and the
+    # bodies' cost is said beside it, per instrument.
+    longer = _answer_room(sel, count) - _ANSWER_ROOM
+    room = window - (need - longer - sum(r[2] for r in rows))
+    body = {it["key"]: count(it["code"]) for it in sel.get("instruments") or []
+            if has_code(it.get("code"))}
     named = (sel.get("consultation") or {}).get("named") or {}
     lead = ("The entries you named do not fit" if named.get("instruments") else
             "You named no instrument, so the whole library would be opened, "
@@ -1428,11 +1451,18 @@ def _narrow_turn(sel, count, need, window):
     lines = [f"{lead}. With this conversation and the room your answer needs "
              f"they come to {need} tokens, and your window holds {window}. "
              "What each page costs:"]
-    lines += [f"  {key} — {n}" for _, key, n in rows]
+    lines += [f"  {key} — {n}"
+              + (f" (its body, which you write out again: {body[key]})"
+                 if sec == "instruments" and key in body else "")
+              for sec, key, n in rows]
     lines.append(
         f"You have room for about {max(room, 0)} tokens of pages. It is the "
         "SUM that does not fit: any page that costs less than that fits by "
-        "itself, and so does any group that adds up to less. Choose again: "
+        "itself, and so does any group that adds up to less"
+        + (f", as long as the bodies in it come to no more than {_ANSWER_BODY} "
+           "tokens together; what they are longer comes off that room"
+           if longer > 0 else "")
+        + ". Choose again: "
         "the entries you will actually build from, the instrument this sound "
         "IS first. An entry you leave "
         "out stays on the shelf above, with what it is and what its parameters "
@@ -4094,7 +4124,8 @@ def build_csound_response(text, llm, correction="", previous="",
     if limits is not None:
         count, window = limits
         for asked in range(_NARROW_TRIES + 1):
-            need = _conversation_tokens(count, sysp, base) + _ANSWER_ROOM
+            need = (_conversation_tokens(count, sysp, base)
+                    + _answer_room(sel, count))
             if need <= window:
                 break
             if asked == _NARROW_TRIES:
