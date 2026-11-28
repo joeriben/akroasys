@@ -2506,6 +2506,20 @@ _UNDEFINED = re.compile(r"Variable '(\w+)' used before defined")
 # opened before it. The author was sent that three times and returned the same
 # line three times (corpus 2026-11-28, "a bright bell that slowly gets dirty").
 _AT_LINE = re.compile(r",\s*line\s+(\d+):\s*$", re.IGNORECASE)
+# A name whose first letter is no rate. Csound 6.18 says this two ways, and
+# neither says what is wrong: `cannot create variable m1: NULL type` glued in
+# front of an undefined-variable error (for `m1 mvmfilter ...`, `xdepth = 0.3`),
+# or, for the letter `r`, only `Found: r = k`. On 2026-11-28 the author wrote
+# `r2 = 2.7 + ...` three times in a row against the second message.
+_NO_RATE = re.compile(r"cannot create variable (\w+): NULL type")
+_ASSIGNS = re.compile(r"^\s*(\w+)\s*=(?!=)")
+
+
+def _rate_fact(name):
+    letter = name[1:2] if name[:1] == "g" and len(name) > 1 else name[:1]
+    return (f"the first letter of a variable's name is its rate, and a number "
+            f"or a signal is `i`, `k` or `a` (a `g` may stand before it). "
+            f"`{name}` begins with `{letter}`. Rename it wherever it stands")
 
 
 def _code_part(line):
@@ -3241,9 +3255,15 @@ def _explain(log, orchestra):
     msgs, quoted = [], []
     csd_lines = orchestra.splitlines()
     undefined = None            # the variable the error just read names
+    found = None                # the types Csound found on the failing line
     at = 0                      # the line a parse error says it is on
     squeeze = lambda t: re.sub(r"\s+", "", t)
     for ln in _CTRL.sub("", _ANSI.sub("", log)).splitlines():
+        nr = _NO_RATE.search(ln)
+        if nr:
+            msgs.append(f"error: {_rate_fact(nr.group(1))}")
+            undefined = nr.group(1)
+            continue
         if _ERR_LINE.search(ln):
             # drop Csound's "from file /tmp/....csd (1)," prefix: a temp path is
             # noise in the repair turn, and the author cannot act on it.
@@ -3252,8 +3272,9 @@ def _explain(log, orchestra):
             undefined = u.group(1) if u else None
             continue
         f = _FOUND.match(ln)
-        if f and msgs:
+        if f and msgs and f.group(1).strip():
             msgs[-1] = f"{msgs[-1]} you wrote {f.group(1)}"
+            found = f.group(1)
             continue
         e = _ECHO.search(ln)
         if e and e.group(1).strip():
@@ -3286,9 +3307,21 @@ def _explain(log, orchestra):
                         n = i + 1
                         break
                 undefined = None
+            elif found and found.split()[1:2] == ["="]:
+                # For an assignment Csound 6.18 numbers the line AFTER the one
+                # it means (`r2 = ...` on 117, `Line: 118`), whatever stands on
+                # that next line; for an opcode statement the number is right.
+                if n - 1 > _BODY_OFFSET and "=" in _code_part(csd_lines[n - 2]):
+                    n -= 1
             src = csd_lines[n - 1].strip() if 0 < n <= len(csd_lines) else ""
             if src and n > _BODY_OFFSET:
-                quoted.append(f'your line: {src}{_mechanical_hint(src)}')
+                hint = _mechanical_hint(src)
+                lhs = _ASSIGNS.match(_code_part(src))
+                if (found and found.split()[:2] == ["r", "="] and lhs
+                        and lhs.group(1).lstrip("g")[:1] == "r"):
+                    hint = f" — {_rate_fact(lhs.group(1))}."
+                quoted.append(f'your line: {src}{hint}')
+            found = None
     if not msgs:
         tail = [l for l in log.strip().splitlines() if l.strip()]
         msgs = [tail[-1]] if tail else ["csound failed without a message"]
