@@ -1013,6 +1013,155 @@ def _resolve_coder_model_dir(request):
 
 _gguf_cache = {}  # {gguf_path_str: Llama}
 
+# The author's attention is mostly SLIDING-WINDOW: 40 of Gemma's 48 layers look
+# back 1,024 tokens and no further. llama-cpp-python still asks llama.cpp for a
+# full-size cache on those layers (`swa_full=True` is its default), which at a
+# 65,536-token window is 20.5 GB of GPU memory holding cells no layer can attend
+# to -- measured 2026-11-28 on a 32 GB card: 6.6 GB model + 20.5 GB + 4.1 GB for
+# the 8 global layers + 2.4 GB compute, and the context is refused. With the
+# cache at the size the layers can use, the same window loads in 13.5 GB.
+#
+# What the full-size cache bought was the ROLLBACK: every request shares the
+# system prompt with the one before it, and `Llama.generate` reuses that prefix
+# by removing the cells after it. On a pruned sliding-window cache the removal
+# still reports success, but the window in front of the prefix is gone, and the
+# reply is computed without it -- measured, the logits after such a rollback
+# differ by up to 32 and share none of the top ten tokens with the true ones.
+# `_SwaCheckpoints` keeps the reuse and makes it correct. Set to 1 to load the
+# full-size cache instead, as before.
+_GGUF_SWA_FULL = os.environ.get("T5YNTH_CODER_SWA_FULL") == "1"
+# Sliding-window states kept on the host, about 336 MB each (the window plus one
+# batch, on 40 layers; independent of the context size). Not below 2: the
+# eviction always keeps the shallowest and needs another one to let go.
+#
+# Verified on CUDA only, where llama.cpp runs this model without flash
+# attention. On Metal flash attention is normally on and the state is saved and
+# restored through llama.cpp's other code path; that path is NOT measured here.
+# On a Mac the four states also come out of the same unified memory as the
+# model. `T5YNTH_CODER_SWA_FULL=1` is the way back if either matters.
+_SWA_CHECKPOINTS = 4
+
+
+class _SwaCheckpoints:
+    """Prefix reuse for a model whose sliding-window cache is not full-size.
+
+    Wraps `llm.generate`. Before a prompt is handed on, the cache is brought to a
+    state that is exactly what evaluating the shared prefix would have produced:
+
+    - no rollback, or one short enough that the window in front of it is still
+      in the cache (llama.cpp's own test: `seq_pos_min <= prefix - n_swa`):
+      nothing to restore;
+    - otherwise the sliding-window layers are restored from the deepest saved
+      state that lies on this prompt, and the rest is evaluated from there. The
+      global layers need no restore: their cells are never pruned;
+    - no such state: everything is evaluated again.
+
+    States are saved where a rollback lands: at the point a prompt left the
+    cached one when that cost an evaluation, and at the end of the prompt, which
+    is where the next turn of the same conversation picks up. A state is not
+    saved within one window of an earlier one on the same prompt -- from there
+    the earlier one is a restore and at most `n_swa` tokens away. Nothing here
+    knows the chat template: the place the system prompt ends is found the first
+    time two prompts part there."""
+
+    def __init__(self, llm):
+        import llama_cpp
+        self._c = llama_cpp
+        self._llm = llm
+        self._generate = llm.generate
+        self._n_swa = int(llama_cpp.llama_model_n_swa(llm._model.model))
+        self._flags = llama_cpp.LLAMA_STATE_SEQ_FLAGS_SWA_ONLY
+        self._saved = []   # oldest first: {"toks": tokens up to the position, "buf", "hits"}
+
+    def generate(self, tokens, *args, **kw):
+        if not args and kw.get("reset", True):
+            tokens = list(tokens)
+            try:
+                self._prepare(tokens)
+            except Exception as exc:
+                # Evaluating everything again is always correct.
+                log.warning(f"author cache: prefix reuse failed, re-evaluating: {exc}")
+                self._saved.clear()
+                self._drop_all()
+        return self._generate(tokens, *args, **kw)
+
+    def _drop_all(self):
+        self._llm.reset()
+        self._llm._ctx.kv_cache_seq_rm(-1, 0, -1)
+
+    def _prepare(self, tokens):
+        llm = self._llm
+        end = len(tokens) - 1      # the last prompt token is generate()'s to evaluate
+        if end < 1:
+            return
+        toks = np.asarray(tokens, dtype=np.intc)
+        have = int(llm.n_tokens)
+        m = min(have, len(toks))
+        apart = np.nonzero(np.asarray(llm.input_ids[:m]) != toks[:m])[0]
+        keep = min(int(apart[0]) if apart.size else m, end)
+        marks = {end}
+        if keep < have:            # the cache runs on past what this prompt shares
+            pos_min = int(self._c.llama_memory_seq_pos_min(llm._ctx.memory, 0))
+            if keep > 0 and 0 <= pos_min <= max(0, keep - self._n_swa):
+                llm._ctx.kv_cache_seq_rm(-1, keep, -1)
+                llm.n_tokens = keep
+                llm._requires_eval = True
+            else:
+                self._restore(toks, keep)
+                marks.add(keep)
+        for pos in sorted(marks):
+            if pos < llm.n_tokens:
+                continue
+            if pos > llm.n_tokens:
+                llm.eval(tokens[llm.n_tokens:pos])
+            self._save(toks, pos)
+
+    def _deepest(self, toks, pos):
+        """Index of the deepest saved state on this prompt at or before `pos`."""
+        best = None
+        for i, ck in enumerate(self._saved):
+            n = len(ck["toks"])
+            if (n <= pos and (best is None or n > len(self._saved[best]["toks"]))
+                    and np.array_equal(ck["toks"], toks[:n])):
+                best = i
+        return best
+
+    def _restore(self, toks, keep):
+        llm = self._llm
+        best = self._deepest(toks, keep)
+        if best is not None:
+            ck = self._saved[best]
+            got = self._c.llama_state_seq_set_data_ext(
+                llm._ctx.ctx, ck["buf"], len(ck["buf"]), 0, self._flags)
+            if got == len(ck["buf"]):
+                llm._ctx.kv_cache_seq_rm(-1, len(ck["toks"]), -1)
+                llm.n_tokens = len(ck["toks"])
+                llm._requires_eval = True
+                ck["hits"] += 1
+                return
+            del self._saved[best]
+        self._drop_all()
+
+    def _save(self, toks, pos):
+        import ctypes
+        near = self._deepest(toks, pos)
+        if pos - (len(self._saved[near]["toks"]) if near is not None else 0) < self._n_swa:
+            return
+        ctx = self._llm._ctx.ctx
+        size = int(self._c.llama_state_seq_get_size_ext(ctx, 0, self._flags))
+        buf = (ctypes.c_uint8 * size)()
+        if int(self._c.llama_state_seq_get_data_ext(ctx, buf, size, 0, self._flags)) != size:
+            return
+        # Over the limit one goes, but never the SHALLOWEST: that one is shared
+        # by every later prompt (the system prompt's end). Of the others, the
+        # one restored from least often, the oldest first -- the end of a turn
+        # that nothing came back to.
+        if len(self._saved) >= _SWA_CHECKPOINTS:
+            shallow = min(range(len(self._saved)), key=lambda i: len(self._saved[i]["toks"]))
+            rest = [i for i in range(len(self._saved)) if i != shallow]
+            del self._saved[min(rest, key=lambda i: self._saved[i]["hits"])]
+        self._saved.append({"toks": toks[:pos].copy(), "buf": buf, "hits": 0})
+
 
 def _get_gguf(gguf_path):
     """Lazily load + cache a llama.cpp model. All layers go to the GPU (Metal on
@@ -1028,9 +1177,13 @@ def _get_gguf(gguf_path):
     sys.stdout = sys.stderr  # protect the IPC pipe from llama.cpp's own stdout
     try:
         llm = Llama(model_path=key, n_gpu_layers=-1, n_ctx=_GGUF_N_CTX,
-                    verbose=False)
+                    swa_full=_GGUF_SWA_FULL, verbose=False)
     finally:
         sys.stdout = real_stdout
+    if not _GGUF_SWA_FULL:
+        import llama_cpp
+        if llama_cpp.llama_model_n_swa(llm._model.model) > 0:
+            llm.generate = _SwaCheckpoints(llm).generate
     _gguf_cache[key] = llm
     log.info("LCO author ready.")
     return llm
