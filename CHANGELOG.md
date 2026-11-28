@@ -97,7 +97,9 @@ each entry is marked open in the library.
   two decimal points and an `i()` around an expression are each named as
   what they are. A `#define` with a space before its argument bracket used to
   reach the author as a bare colour code and now comes as Csound's sentence
-  with the line.
+  with the line. A macro called with fewer arguments than it is defined
+  with is told both numbers, and a made-up opcode name is told that this
+  Csound has no opcode of that name.
 
 - **Bells and a drum skin the author can write.** `cast_bell` listed its 29
   resonators one after the other, and the author has to write out again
