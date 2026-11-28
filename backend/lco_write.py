@@ -3332,6 +3332,28 @@ def _opcode_first(msg, src):
             f"If `{name}` was meant as a name, rename it wherever it stands.")
 
 
+_LONE_IDENT = re.compile(r'unexpected T_IDENT[^(\n]*\(token "(\w+)"\)')
+
+
+def _not_an_opcode(msg, src):
+    """A name in the opcode's place that is no opcode of this Csound.
+
+    Compiled 2026-11-28: `asig bpfilter asig, 800, 200` gives only `unexpected
+    T_IDENT (token "bpfilter")`. Csound's lexer calls a word T_OPCODE when it
+    is an opcode and T_IDENT when it is not, so the token type is the fact.
+    Only where the word follows the line's result names directly: a T_IDENT
+    further right is a missing comma or something else."""
+    m = _LONE_IDENT.search(msg or "")
+    if not m:
+        return ""
+    name = m.group(1)
+    if not re.match(r"\s*\w+(?:\[\])?(?:\s*,\s*\w+(?:\[\])?)*\s+"
+                    + re.escape(name) + r"(?:\s|$)", _code_part(src)):
+        return ""
+    return (f" — `{name}` stands where an opcode's name belongs, and this "
+            f"Csound has no opcode called `{name}`")
+
+
 _K_NAME = re.compile(r"(?<![\w$])(?!(?:kr|ksmps)\b)g?k\w+(?!\w*\s*[(\[])")
 _I_OF_K = re.compile(r"\bi\(\s*g?k\w+\s*\)")
 
@@ -3593,7 +3615,8 @@ def _explain(log, orchestra):
             hint = (_undefined_macro(src, csd_lines)
                     or _macro_arity(src, csd_lines) or _two_points(src)
                     or _mechanical_hint(src) or _bracket_hint(src)
-                    or _opcode_first(msgs[-1] if msgs else "", src))
+                    or _opcode_first(msgs[-1] if msgs else "", src)
+                    or _not_an_opcode(msgs[-1] if msgs else "", src))
             if msgs and _STRAY_ENDIF.search(msgs[-1]):
                 hint = _stray_endif(csd_lines, at)
             quoted.append(f"your line: {src}{hint}")
