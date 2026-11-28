@@ -1272,7 +1272,16 @@ _WRITING_HEAD = (
 _WRITING_TAIL = (
     "\n\nNow write the orchestra body for the sound you described, in exactly ONE "
     "```csound fence with its READING line. You have already worked out what this "
-    "sound is; do not reason it out again."
+    "sound is; do not reason it out again.\n"
+    "- The comments in the pages above are notes written FOR YOU. Do not copy "
+    "them into your body. The one comment a line must keep is the "
+    "`; name[lo..hi]: ...` on a parameter line, because that is the knob.\n"
+    "- A parameter line holds the place a knob starts from; it is not the "
+    "movement. What you said MOVES in this sound has to be lines in the body "
+    "that travel around that number — a free-running `lfo`/`poscil` added to "
+    "it on the line that reads it. A named modulation (pwm, vibrato, a sweep, "
+    "a wobble) is a movement the player asked for, so the body performs it; "
+    "leaving it to the player's hand is not writing it."
 )
 
 
