@@ -70,6 +70,8 @@ def author(coder_dir, device="cpu"):
         return out
 
     llm.accepts_messages = True
+    if gguf is not None:
+        llm.count_tokens, llm.context_window = P.gguf_author_limits(gguf)
     return llm, stats
 
 

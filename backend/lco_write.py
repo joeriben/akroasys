@@ -594,7 +594,7 @@ FIRST TURN: THINK, in plain language, and write that thinking down — a short p
   - What IS this sound? Which instrument, mechanism or physical body comes closest?
   - The words are a DESCRIPTION of a sound, not lookup keys. When the prompt names no instrument at all — "a dark growl", "rusty machinery", "like wet glass", "an angry insect" — this is where you work out what it would BE: what excites it, what resonates, what makes it dark or rough or restless. The library has no entry for most of what a player will ask for; you are expected to reason your way there from what the words describe, using the idioms as material.
   - What MOVES in it, and how fast?
-  - Which library entries do you want OPENED? You are shown the shelf below — what each entry is and what its parameters do — but not the Csound. Name the entries you want to see (instruments, sound words, movements), and their code will be handed to you in the next turn. Name what you actually intend to use or look at; naming everything is as useless as naming nothing. If nothing on the shelf fits, say so and the whole library will be opened.
+  - Which library entries do you want OPENED? You are shown the shelf below — what each entry is and what its parameters do — but not the Csound. Name the entries you want to see (instruments, sound words, movements), and their code will be handed to you in the next turn. Name what you actually intend to use or look at; naming everything is as useless as naming nothing. If nothing on the shelf fits, say so and the whole library will be opened — where your window holds it. Where it does not, you are told what each page costs and you choose again.
 Write NO code in this first turn. No fence, no Csound lines. The shelf is a list of names, and you are choosing from it in your own words.
 
 SECOND TURN: the entries you named arrive, quoted in full. NOW write the orchestra body, in exactly ONE fenced block:
@@ -1276,7 +1276,36 @@ _WRITING_TAIL = (
 )
 
 
-def _consult(user_turn, sysp, llm, on_thinking=None):
+# The line a narrowing reply closes with (`_narrow_turn` asks for it). Markdown
+# emphasis around the word is tolerated, the author likes to bold its labels.
+_OPEN_LINE = re.compile(r"^[ \t>*_`#.\d-]*OPEN[*_`]*[ \t]*:[*_` \t]*(.*)$",
+                        re.IGNORECASE)
+
+
+def _chosen(reply):
+    """What the reply's last `OPEN:` line lists, or None when it has none.
+
+    The list may follow the colon or stand under it, one entry per line
+    (`OPEN:` / `- bowed_string` / `- mallet_bar`): read to the next blank line."""
+    lines = reply.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        m = _OPEN_LINE.match(lines[i])
+        if not m:
+            continue
+        if m.group(1).strip():
+            return m.group(1).strip()
+        under = []
+        for ln in lines[i + 1:]:
+            if not ln.strip():
+                if under:
+                    break
+                continue
+            under.append(ln.strip())
+        return ", ".join(under)
+    return None
+
+
+def _consult(user_turn, sysp, llm, on_thinking=None, turn=None):
     """The author's own consultation: it reads the shelf and says what it wants.
 
     Returns `(raw_reply, named, thinking)` — the reply verbatim, so the writing
@@ -1288,11 +1317,20 @@ def _consult(user_turn, sysp, llm, on_thinking=None):
     the whole library, which is the only answer that does not put Python in
     charge of what the author may see.
 
+    `turn` replaces the first question with a later one of the same kind — the
+    conversation so far plus `_narrow_turn`, when what the author asked for did
+    not fit its window. Its reply is read by its closing `OPEN:` line when it
+    has one, and whole when it does not.
+
     The reasoning goes out live under attempt 0. It is the same THINKING the
     panel has always shown, arriving earlier — this IS the author choosing, and
     it would be perverse to hide the one turn that is nothing but reasoning."""
     watcher = _live_watch(on_thinking, None, 0)
-    turn = user_turn + _CONSULT_TURN
+    narrowing = turn is not None
+    if turn is None:
+        turn = user_turn + _CONSULT_TURN
+    elif not getattr(llm, "accepts_messages", False):
+        turn = _flatten_turn(turn)
     raw = llm(turn, sysp, None) if watcher is None else llm(turn, sysp, None, watcher)
     if watcher is not None:
         watcher.flush()
@@ -1305,7 +1343,97 @@ def _consult(user_turn, sysp, llm, on_thinking=None):
     # reply back as the body — so the author's prose is in `body`, not in
     # `thinking`. Taking `thinking` alone would silently read nothing here.
     prose = thinking.strip() or body.strip()
-    return raw, named_entries(prose or raw), prose
+    # The narrowing question asks for a closing `OPEN:` line, because its
+    # natural answer ("I keep bowed_string and drop brass") names what it drops
+    # too, and every name in the reply used to be opened. Where the author
+    # wrote that line it is the choice; where it did not, the reply is read
+    # whole, as the first consultation always is.
+    chosen = _chosen(prose or raw) if narrowing else None
+    return raw, named_entries(chosen if chosen is not None else (prose or raw)), prose
+
+
+# What is kept free for the answer when the pages are fitted into the window.
+# Measured on the shipped author over the 2026-11-28 corpus: a body is 300 to
+# 2,500 tokens. 4,096 holds one body with room to spare. It does NOT promise a
+# repair: a repair round sends the failed body back with about 600 tokens of
+# compiler text and needs room for a body as long again, so on a selection that
+# only just fitted, the first repair has room for bodies up to about 1,750
+# tokens. Past that the repair loop says so (see the check there) instead of
+# starting a round that cannot finish. Reserving the worst case here instead
+# would take 3,000 tokens of pages from every request to cover the rare one.
+# A prompt that does not fit at all returns `Requested tokens exceed context
+# window` from the model surface, which is what used to reach the player.
+_ANSWER_ROOM = 4096
+# How often the author is asked to choose again before the request is refused.
+_NARROW_TRIES = 2
+
+
+def _window(llm):
+    """(count, window) when the model surface can say how large a text is and
+    how much it holds — the local GGUF author can — else None. A surface that
+    cannot say is not checked: an external author's window is its provider's,
+    and guessing one here would refuse requests that fit."""
+    count = getattr(llm, "count_tokens", None)
+    window = getattr(llm, "context_window", None)
+    if not callable(count) or not callable(window):
+        return None
+    return count, int(window())
+
+
+def _conversation_tokens(count, sysp, turn):
+    text = turn if isinstance(turn, str) else "\n".join(m["content"] for m in turn)
+    return count(sysp) + count(text)
+
+
+def _page_costs(sel, count):
+    """[(section, key, tokens)] for every opened entry, largest first: what its
+    page adds to the writing turn, measured the way `tools/lco_token_budget.py`
+    measures it (the entry alone against an empty selection)."""
+    sections = ("instruments", "adjectives", "motions")
+    empty = {s: [] for s in sections}
+    empty["catalogue"] = {s: [] for s in sections}
+    floor = count(render_library(empty, indexed=True))
+    rows = []
+    for s in sections:
+        for e in sel[s]:
+            solo = dict(empty)
+            solo[s] = [e]
+            rows.append((s, e["key"],
+                         count(render_library(solo, indexed=True)) - floor))
+    rows.sort(key=lambda r: -r[2])
+    return rows
+
+
+def _narrow_turn(sel, count, need, window):
+    """The second question, when the pages the author asked for do not fit.
+
+    It is told the sizes and chooses again. Python does not drop a page on its
+    behalf: which entries this sound can do without is exactly the judgement
+    the consultation exists for."""
+    rows = [r for r in _page_costs(sel, count) if r[2] > 0]
+    room = window - (need - sum(r[2] for r in rows))
+    named = (sel.get("consultation") or {}).get("named") or {}
+    lead = ("The entries you named do not fit" if named.get("instruments") else
+            "You named no instrument, so the whole library would be opened, "
+            "and it does not fit")
+    lines = [f"{lead}. With this conversation and the room your answer needs "
+             f"they come to {need} tokens, and your window holds {window}. "
+             "What each page costs:"]
+    lines += [f"  {key} — {n}" for _, key, n in rows]
+    lines.append(
+        f"You have room for about {max(room, 0)} tokens of pages. It is the "
+        "SUM that does not fit: any page that costs less than that fits by "
+        "itself, and so does any group that adds up to less. Choose again: "
+        "the entries you will actually build from, the instrument this sound "
+        "IS first. An entry you leave "
+        "out stays on the shelf above, with what it is and what its parameters "
+        "do, and you may still write that idiom yourself. End your answer "
+        "with one line that begins `OPEN:` and lists the entries to open, "
+        "separated by commas. Only that line is read, so you can say freely "
+        "what you drop and why. It must name at least one instrument: with "
+        "none named, the whole library is opened, which is what did not fit. "
+        "No code in this answer.")
+    return "\n".join(lines)
 
 
 def _writing_turn(sel):
@@ -3855,9 +3983,41 @@ def build_csound_response(text, llm, correction="", previous="",
     # The writing turn CONTINUES the consultation: the author's own choice stays
     # in the conversation, so the pages arrive as an answer to what it asked for
     # rather than as a fresh instruction it has to re-motivate.
-    base = [{"role": "user", "content": user_turn},
-            {"role": "assistant", "content": consult_raw},
-            {"role": "user", "content": _writing_turn(sel)}]
+    talk = [{"role": "user", "content": user_turn},
+            {"role": "assistant", "content": consult_raw}]
+    base = talk + [{"role": "user", "content": _writing_turn(sel)}]
+    # Do the pages the author asked for FIT? Five instruments opened left 3,384
+    # tokens of a 65,536 window, and "an angry insect" asked for 161 more than
+    # it holds: the player got `Requested tokens (65697) exceed context window
+    # of 65536` and no sound. The author is told the sizes and chooses again;
+    # an author that does not narrow is refused in words the player can act on.
+    limits = _window(llm)
+    if limits is not None:
+        count, window = limits
+        for asked in range(_NARROW_TRIES + 1):
+            need = _conversation_tokens(count, sysp, base) + _ANSWER_ROOM
+            if need <= window:
+                break
+            if asked == _NARROW_TRIES:
+                return {"ok": False,
+                        "error": "the author asked for more of the library than "
+                                 f"its context window holds ({need} of {window} "
+                                 "tokens) and did not narrow it when asked. Name "
+                                 "the instrument you mean in the prompt, or give "
+                                 "the author a larger window "
+                                 "(T5YNTH_CODER_N_CTX).",
+                        "attempts": 0}
+            ask = _narrow_turn(sel, count, need, window)
+            again_raw, named, again_thinking = _consult(
+                user_turn, sysp, llm, on_thinking,
+                turn=talk + [{"role": "user", "content": ask}])
+            talk = talk + [{"role": "user", "content": ask},
+                           {"role": "assistant", "content": again_raw}]
+            if again_thinking.strip():
+                consult_thinking = ((consult_thinking or "").rstrip() + "\n\n"
+                                    + again_thinking).strip()
+            sel = open_entries(named)
+            base = talk + [{"role": "user", "content": _writing_turn(sel)}]
     if not getattr(llm, "accepts_messages", False):
         base = _flatten_turn(base)
     turn = base
@@ -3942,6 +4102,19 @@ def build_csound_response(text, llm, correction="", previous="",
         # and what it was sent back for. BEFORE the inference, because the
         # round is a full body regeneration — minutes that would otherwise
         # still be captioned as attempt 1.
+        if attempt > 1 and limits is not None:
+            # A repair sends the failed body back with the compiler's text.
+            # Room for a body as long as the one being repaired, or the round
+            # is not started: the surface would not raise, it would cut the
+            # answer off at the window's edge, and a body cut mid-line comes
+            # back as one more syntax error with no cause the author or the
+            # player could act on, after minutes of generation.
+            count, window = limits
+            if _conversation_tokens(count, sysp, turn) + count(prev_raw) > window:
+                attempts.append("the repair no longer fits the author's "
+                                f"context window ({window} tokens)")
+                tried = attempt - 1
+                break
         tried = attempt
         if attempt > 1 and on_attempt is not None:
             on_attempt(attempt, MAX_TRIES, list(seen_errors))

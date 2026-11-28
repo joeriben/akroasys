@@ -1189,6 +1189,29 @@ def _get_gguf(gguf_path):
     return llm
 
 
+def gguf_author_limits(gguf_path):
+    """(count_tokens, context_window) of the local author, as the two callables
+    `lco_write._window` reads off the model surface: how many tokens a text is
+    in this model's vocabulary, and how many its context holds as loaded."""
+    counted = {}
+
+    def count_tokens(s):
+        # The system prompt is about 46,000 tokens and is asked for at every
+        # check; one entry per distinct text.
+        n = counted.get(s)
+        if n is None:
+            n = len(_get_gguf(gguf_path).tokenize(
+                s.encode("utf-8"), add_bos=False, special=True))
+            if len(counted) < 64:
+                counted[s] = n
+        return n
+
+    def context_window():
+        return _get_gguf(gguf_path).n_ctx()
+
+    return count_tokens, context_window
+
+
 def run_gguf_instruct(text, gguf_path, system_prompt, max_new_tokens=None,
                       on_delta=None):
     """run_instruct's contract on the llama.cpp path: one short user text under an
@@ -4070,6 +4093,14 @@ def main():
                 # not inferred: build_csound_response only sends a message list
                 # to a surface that says it takes one.
                 csound_llm.accepts_messages = True
+                # The local author can say how large a text is and how much it
+                # holds, so build_csound_response can find out BEFORE the
+                # inference that the pages the author asked for do not fit, and
+                # ask it to choose again. The external authors cannot (their
+                # tokenizer and window are the provider's) and are not checked.
+                if author_backend[0] == "local_gguf":
+                    (csound_llm.count_tokens,
+                     csound_llm.context_window) = gguf_author_limits(author_backend[1])
 
                 # The authoring, live. Gated on the request so a client that does
                 # not know the \x04 frame never sees one: the backend ships with
