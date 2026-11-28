@@ -512,11 +512,11 @@ Do not extend or rely on it in the meantime.
 
 ### Where the library lives
 
-`backend/dco_lexicon.json` (`lexicon_version` 21) is the curated source: 29
-instruments, 51 adjectives, 17 motions, of which 12 instruments
-(`analog_osc`, `blown_bottle`, `divider_organ`, `driven_metal`, `drum_head`,
-`fm3`, `fm_bell`, `fm_stack`, `metallic_fm`, `plucked_wire`, `string`,
-`supersaw`) carry measured parameters with named, glossed anchors.
+`backend/dco_lexicon.json` is the curated source. At `lexicon_version` 62 it
+holds 47 instruments, 51 adjectives and 17 motions; 31 of the instruments carry
+measured parameters with glossed anchors, the other 16 have no parameter
+record yet (`tools/lco_token_budget.py` lists every entry with what it costs the
+author's prompt).
 `tools/lco_build_library.py` assembles it into `backend/lco_library.json`,
 which `lco_write.render_library()` renders into the author's prompt;
 `--check` regenerates the library in memory and exits 1 on drift against
