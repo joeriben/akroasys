@@ -3300,6 +3300,40 @@ def _mechanical_hint(line):
             f"changing the arguments will not fix it.")
 
 
+_LONE_OPCODE = re.compile(r'unexpected T_OPCODE\s+\(token "(\w+)"\)')
+
+
+def _opcode_first(msg, src):
+    """What a line that BEGINS with an opcode's name is missing.
+
+    Csound's whole message is `unexpected T_OPCODE (token "tone")`. Two slips
+    give it (both compiled, 2026-11-28): the opcode's result has no name
+    (`tone asig, 1200`), or an opcode's name was taken for a variable
+    (`rms = 1`). Only where the quoted line is more than the bare token: after
+    a `$MACRO` call the echo is the token alone and says which of the two
+    nothing."""
+    m = _LONE_OPCODE.search(msg or "")
+    code = _code_part(src).strip()
+    if not m or not code.startswith(m.group(1)):
+        return ""
+    name, rest = m.group(1), code[len(m.group(1)):]
+    rename = (f" — `{name}` is the name of an opcode, so it cannot be a "
+              f"variable's name. Rename it wherever it stands.")
+    if re.match(r"\s*[-+*/]?=", rest) or re.match(r"\s+init\b", rest):
+        return rename
+    if not rest or not rest[0].isspace():
+        return ""
+    # `tone asig, 100` and `tone butlp asig, 100` read the same from here: the
+    # second word may be an argument or the opcode the author meant.
+    return (f" — a line cannot begin with `{name}`, which is the name of an "
+            f"opcode. If the line calls `{name}`, its result has no name: the "
+            f"result's name comes first, then `{name}`, then its arguments. "
+            f"If `{name}` was meant as a name, rename it wherever it stands.")
+
+
+_K_NAME = re.compile(r"(?<![\w$])g?k\w+")
+
+
 def _stray_endif(csd_lines, at):
     """What an `endif` the parser did not expect means, and which one it is.
 
@@ -3370,7 +3404,8 @@ def _explain(log, orchestra):
             full = csd_lines[at - 1].strip() if _BODY_OFFSET < at <= len(csd_lines) else ""
             if full and squeeze(src) in squeeze(full):
                 src = full
-            hint = _mechanical_hint(src) or _bracket_hint(src)
+            hint = (_mechanical_hint(src) or _bracket_hint(src)
+                    or _opcode_first(msgs[-1] if msgs else "", src))
             if msgs and _STRAY_ENDIF.search(msgs[-1]):
                 hint = _stray_endif(csd_lines, at)
             quoted.append(f"your line: {src}{hint}")
@@ -3407,6 +3442,20 @@ def _explain(log, orchestra):
                 if (found and found.split()[:2] == ["r", "="] and lhs
                         and lhs.group(1).lstrip("g")[:1] == "r"):
                     hint = f" — {_rate_fact(lhs.group(1))}."
+                elif (found and found.split() == ["i", "=", "k"] and not hint
+                        and lhs and lhs.group(1).lstrip("g")[:1] == "i"
+                        and _K_NAME.search(_code_part(src).split("=", 1)[1])):
+                    # Compiled 2026-11-28: `ikc = kc`, `ikc = kc * 2` and
+                    # `ikc = (kc < 20 ? 220 : kc)` all give exactly `i = k`,
+                    # and `i(kc)` in place of each `kc` compiles. Only where a
+                    # k name stands right of the `=`: after a continued line
+                    # Csound's number lands on the next line, which may be an
+                    # innocent `iy = 3`, and `ix = timek()` has no variable.
+                    hint = (" — a name beginning with `i` is set once, when the "
+                            "note starts, so everything right of its `=` must be "
+                            "i-rate, and a k variable is not: `i(kname)` reads "
+                            "a k variable's value at that moment (a variable "
+                            "by itself, not an expression or an opcode call).")
                 quoted.append(f'your line: {src}{hint}')
             found = None
     if not msgs:
