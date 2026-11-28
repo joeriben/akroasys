@@ -3471,6 +3471,35 @@ def _stray_endif(csd_lines, at):
             f"{where} This `endif` or one above it is one too many")
 
 
+_DEFINE_SPACED = re.compile(r"^\s*#\s*define\s+\w+\s+\([^)]*\)\s*#")
+
+
+def _define_spaced(csd_lines):
+    """The body's `#define NAME (ARGS)` lines, with what is wrong with them.
+
+    Compiled 2026-11-28: `#define  WF (X) # … #` stops the preprocessor with
+    "define macro unexpected character ((0x28) awaiting #" and no line number;
+    `#define WF(X) # … #` compiles. So the lines are found in the body itself.
+
+    Only an argument list is meant: brackets closed and the `#` of the macro's
+    text after them. `#define K (2)` gives the same message and wants `#2#`,
+    not a bracket moved; it gets Csound's words alone. Lines inside `/* … */`
+    are not read, Csound does not read them either.
+    """
+    out, in_comment = [], False
+    for ln in csd_lines[_BODY_OFFSET:]:
+        if in_comment:
+            in_comment = "*/" not in ln
+            continue
+        if _DEFINE_SPACED.match(ln):
+            out.append(f"your line: {ln.strip()} — in a `#define` the opening "
+                       "bracket follows the macro's name directly, with no "
+                       "space between them")
+        if "/*" in ln and "*/" not in ln.split("/*", 1)[1]:
+            in_comment = True
+    return out
+
+
 def _explain(log, orchestra):
     """Csound's own complaint, plus the line of the AUTHORED body it points at.
 
@@ -3575,8 +3604,21 @@ def _explain(log, orchestra):
                 quoted.append(f'your line: {src}{hint}')
             found = None
     if not msgs:
-        tail = [l for l in log.strip().splitlines() if l.strip()]
+        # The preprocessor complains without the word "error" and without a
+        # line (`define macro unexpected character ((0x28) awaiting #`,
+        # compiled 2026-11-28); its sentence is the last one before "cannot
+        # compile orchestra", and what follows that is the performance
+        # summary. Read from the cleaned log: the raw one ends in a bare
+        # colour reset, which is what the author used to be handed.
+        tail = [l.strip() for l in _CTRL.sub("", _ANSI.sub("", log)).splitlines()
+                if l.strip()]
+        stop = next((i for i, l in enumerate(tail)
+                     if l.lower().startswith("cannot compile orchestra")), None)
+        if stop is not None:
+            tail = tail[:stop]
         msgs = [tail[-1]] if tail else ["csound failed without a message"]
+        if "define macro unexpected character ((0x28)" in msgs[0]:
+            quoted.extend(_define_spaced(csd_lines))
     # de-duplicate while keeping order: the same error is often echoed per pass
     seen, parts = set(), []
     for part in msgs + quoted:
