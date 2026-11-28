@@ -1531,11 +1531,28 @@ def _repair_turn(seen_errors):
 # `instr` are matched with a capital first letter as well (`KSMPS = 64`,
 # `Instr 1`), which is no sigil either. `SR = ...` is left alone: `S` is the
 # string sigil.
+#
+# The last two arms are the PAGE's parameter record (`render_library`), not the
+# host's lines: "  parameter `third` 0.0..1.0, default 0.0: ..." and
+# "    third=0.0 \u2014 minor: ...". A page prints them straight under its code, and
+# the author, copying a body through to its last line, has carried them on into
+# the fence ("church bell", 2026-11-28: three drafts, each ending in the bell's
+# record, each refused at the backtick). Neither shape can be Csound: a backtick
+# is no Csound character, and an em dash stands in code only behind a `;`.
+# A parameter's name may hold a space (`index 2=0.0 \u2014 bare: ...`, fm3). The
+# third arm is the heading lines of the section a page prints under the record
+# ("  # how the code changes across `index 2`:", "    # minor \u2014 the code
+# above already is this one"): a `#` that is followed by a space opens no
+# Csound directive. NOT covered: that section's "    # 0  (bare: ...)" lines,
+# which carry neither mark, and the index's shapes ("      third (0.0..1.0):
+# ..."); none has been seen in a reply.
 _STRIP = re.compile(
     r"^\s*((?i:</?Cs\w+)|sr\s*=|kr\s*=|K(?i:r)\s*=|ksmps\s*=|K(?i:smps)\s*=|"
     r"instr\b|I(?i:nstr)\b|(?i:nchnls|0dbfs|endin\b|out\b|outs\b|outch\b)|"
     r"ftgen\b|\w+\s+ftgen\b|i\s+\d|f\s+\d|e\s*$|"
-    r"(?i:SET\s*:))")
+    r"(?i:SET\s*:)|"
+    r"parameter\s+`|[A-Za-z_][\w ]*=\s*-?[\d.]+\s+\u2014(?:\s|$)|"
+    r"#\s+[^;]*[`\u2014])")
 
 # A knob the author asks the SYNTH to set, written inside the fence beside
 # READING. It is not Csound and must never reach the compiler (hence the _STRIP
