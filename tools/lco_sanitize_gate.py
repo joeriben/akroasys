@@ -67,6 +67,37 @@ k0qg2   = ((kfreq * koct1) * 5.4000 < 15000 ? 0.500 : 0)
 a0q2   mode aexq0, k0qf2, 1150
 asig    = (a0q0 * k0qg0 + a0q1 * k0qg1 + a0q2 * k0qg2) * 0.150"""
 
+# The library writes its modal banks as preprocessor macros, under a head of
+# `;` lines that declare what the body does. Neither a `#define` line nor a
+# `$NAME(...)` call has the shape of an opcode line, and the first two lines
+# that DO stand inside the definition — so a reply without a fence was cut
+# below the `#define`, and every call failed as an undefined macro.
+MACRO_REASONING = ("What IS this sound: a metal bar, standing, not struck\n"
+                   "five modes, rung by continuous noise while the key is held")
+MACRO_BODY = "\n".join([
+    "; FOLLOWS kfreq: yes",
+    "; five beam modes rung by continuous noise (Mathews & Smith 2003)",
+    "#define BARM(R'Q'W) #",
+    "kf      limit kfreq * koct1 * $R, 20, 15000",
+    "am      mvmfilter aex, kf, $Q / (3.14159265 * kf)",
+    "asum    += am * $W",
+    "#",
+    "aex     rand 0.09, 0.5, 1",
+    "asum    = 0",
+    "$BARM(1'260'0.85)",
+    "$BARM(2.76'300'0.70)",
+    "asig    = asum * kvol1",
+])
+# The other shape a macro takes: a whole definition on one line, an expression.
+MACRO_ONE_LINE = "\n".join([
+    "; a sine through a folding stage",
+    "#define FOLDM(X) #(($X) - 2 * (abs(($X) - 0.6) - abs(($X) + 0.6)))#",
+    "#define FOLDG(X) #(0.5 * ($X) * ($X))#",
+    "kfold   = 3.5 ; fold[1..10]: how hard the sine is folded",
+    "ain     poscil kfold, kfreq * koct1",
+    "asig    = $FOLDM(ain) * $FOLDG(kfold) * kvol1",
+])
+
 # (name, reply, what the body must start with, predicate on the thinking)
 CASES = [
     ("well-formed",
@@ -168,6 +199,46 @@ CASES = [
      "asig poscil 0.4, kfreq\nREADING: plain\n",
      "asig poscil", lambda t: t == ""),
 
+    # No fence, and the body opens the way the library's bodies do: with its
+    # declarations. They are Csound, written as part of the orchestra, and
+    # belong above the cut; below it they were quoted as the reasoning.
+    ("no fence, the body opens with its comment head",
+     REASONING + "\n\n; FOLLOWS kfreq: yes\n; the bow: continuous noise\n"
+     + BODY + "\nREADING: bowed cello\n",
+     "; FOLLOWS kfreq: yes", lambda t: t.endswith("never perfectly steady")),
+
+    ("no fence, a macro body under its comment head",
+     MACRO_REASONING + "\n\n" + MACRO_BODY + "\nREADING: standing bar\n",
+     "; FOLLOWS kfreq: yes", lambda t: t == MACRO_REASONING),
+
+    ("no fence, one-line macro definitions",
+     MACRO_REASONING + "\n\n" + MACRO_ONE_LINE + "\nREADING: folded sine\n",
+     "; a sine through", lambda t: t == MACRO_REASONING),
+
+    ("no fence and no reasoning, a macro body",
+     MACRO_BODY + "\nREADING: standing bar\n",
+     "; FOLLOWS kfreq: yes", lambda t: t == ""),
+
+    # Four shapes an adversarial pass over the case-sensitive _STRIP and the
+    # macro arms reproduced, each of which reached the compiler and failed there.
+    ("header lines in capitals inside the fence",
+     "A bell.\n\n```csound\nKSMPS = 64\nNCHNLS = 2\n0DBFS = 1\nInstr 1\n"
+     "aexc    rand 0.05\nasig    mode aexc, kfreq * koct1, 900\n"
+     "Outs asig, asig\nEndin\nREADING: bell\n```\n",
+     "aexc    rand", lambda t: t == "A bell."),
+    ("no fence, a formula between dollar signs above the code",
+     "A struck bar: modes at\n$f_n = f_1 (2n+1)^2 / 9$\n\n"
+     "aexc    rand 0.05\nasig    mode aexc, kfreq * koct1, 900\nREADING: bar\n",
+     "aexc    rand", lambda t: "$f_n" in t),
+    ("no fence, a lone hash in the reasoning",
+     "Plan\n#\naexc    rand 0.05\nasig    mode aexc, kfreq * koct1, 900\n"
+     "READING: x\n",
+     "aexc    rand", lambda t: t.startswith("Plan")),
+    ("no fence, a macro whose first line is a compound assignment",
+     "A bar.\nnoise rings it\n\n#define M(R) #\nasum += $R\n#\n"
+     "aex     rand 0.05\nasum    = 0\n$M(1)\nasig    = asum\nREADING: x\n",
+     "#define M(R) #", lambda t: t == "A bar.\nnoise rings it"),
+
     ("nothing but a fence",
      "```csound\nasig poscil 0.4, kfreq\nREADING: bare\n```",
      "asig poscil", lambda t: t == ""),
@@ -245,6 +316,56 @@ for name, reply, _, _ in CASES:
     if thinking.strip() and thinking.strip() == body.strip():
         failures.append(f"{name}: thinking IS the body")
 
+# ── What is still IN the body ───────────────────────────────────────────────
+# The cases above ask where the body STARTS. That cannot see a line taken out
+# of the middle, and both ways of getting this wrong are silent until the
+# compiler speaks: a `#define` left behind in the reasoning ("Undefined macro"),
+# and a variable the header rule mistook for the header. Csound is
+# case-sensitive: `kr` is the control rate, `kR` is a variable — the library's
+# drum_head has 55 lines of it — and a rule that reads any case took all of
+# them out of a fenced, well-formed reply.
+# (name, reply, lines that must be in the body, lines that must not)
+KEEPS = [
+    ("a variable named kR is not the header's kr",
+     "A rubbed skin.\n\n```csound\nkrad    = 0.375 * koct1\nkR      = krad * krad\n"
+     "Sr      = \"skin\"\nasig    poscil kR, kfreq\nREADING: skin\n```\n",
+     ["krad    = 0.375 * koct1", "kR      = krad * krad", 'Sr      = "skin"',
+      "asig    poscil kR, kfreq"], []),
+    ("a header, an instr wrapper and an output are the host's",
+     "```csound\nsr = 44100\nkr = 4410\nksmps = 64\nnchnls = 2\n0dbfs = 1\n"
+     "instr 1\nasig poscil 0.4, kfreq\nouts asig, asig\nendin\nREADING: x\n```\n",
+     ["asig poscil 0.4, kfreq"],
+     ["sr = 44100", "kr = 4410", "ksmps = 64", "nchnls = 2", "0dbfs = 1",
+      "instr 1", "outs asig, asig", "endin"]),
+    # The two arms that are not Csound still read any case.
+    ("CSD tags and the SET line in any case",
+     "```csound\n<csinstruments>\nasig poscil 0.4, kfreq\nSet: osc1_level = 0.8\n"
+     "</CsInstruments>\nREADING: x\n```\n",
+     ["asig poscil 0.4, kfreq"],
+     ["<csinstruments>", "Set: osc1_level = 0.8", "</CsInstruments>"]),
+    ("no fence, a macro body: every line of it",
+     MACRO_REASONING + "\n\n" + MACRO_BODY + "\nREADING: standing bar\n",
+     MACRO_BODY.splitlines(), MACRO_REASONING.splitlines()),
+    ("no fence, one-line macro definitions: every line of them",
+     MACRO_REASONING + "\n\n" + MACRO_ONE_LINE + "\nREADING: folded sine\n",
+     MACRO_ONE_LINE.splitlines(), MACRO_REASONING.splitlines()),
+    ("a fenced macro body: every line of it",
+     MACRO_REASONING + "\n\n```csound\n" + MACRO_BODY + "\nREADING: standing bar\n```\n",
+     MACRO_BODY.splitlines(), MACRO_REASONING.splitlines()),
+]
+
+for name, reply, must_keep, must_drop in KEEPS:
+    body, _, _ = L.sanitize(reply)
+    have = [ln.strip() for ln in body.splitlines()]
+    lost = [ln for ln in must_keep if ln.strip() not in have]
+    kept = [ln for ln in must_drop if ln.strip() in have]
+    if lost:
+        failures.append(f"keeps/{name}: the body lost {lost!r}")
+    elif kept:
+        failures.append(f"keeps/{name}: the body still carries {kept!r}")
+    else:
+        print(f"  ok   keeps: {name}", flush=True)
+
 # ── The LIVE reasoning has to end up saying the same thing ──────────────────
 # _live_watch runs on a buffer truncated at an arbitrary character, so it can
 # fail in ways sanitize() cannot: a fence pattern ending in `$` matches the end
@@ -264,6 +385,16 @@ LIVE_CASES = [
     ("no fence anywhere",
      "A struck bell, metal, long decay\nit needs an impulse and modes\n"
      "aexc mpulse 1, 0\nasig mode aexc, 440, 900\nkdet linseg 1, 3, 0.98\nREADING: bell\n"),
+    # The same without a marker, for the two shapes whose first code line the
+    # line matcher used to miss: the comment head and the macro definition.
+    ("no fence, a comment head above the code",
+     "A struck bell, metal, long decay\nit needs an impulse and modes\n"
+     "; FOLLOWS kfreq: yes\n; the strike: one sample of energy\n"
+     "aexc mpulse 1, 0\nasig mode aexc, 440, 900\nREADING: bell\n"),
+    ("no fence, a macro body under its comment head",
+     MACRO_REASONING + "\n\n" + MACRO_BODY + "\nREADING: standing bar\n"),
+    ("no fence, one-line macro definitions",
+     MACRO_REASONING + "\n\n" + MACRO_ONE_LINE + "\nREADING: folded sine\n"),
     ("the fence opens at the end of a sentence",
      "A bell. It moves as it decays. ```csound\n"
      "asig mode aexc, 440, 900\nREADING: bell\n```\n"),
@@ -382,4 +513,5 @@ if failures:
         print("  " + f)
     sys.exit(1)
 print(f"PASS — {len(CASES)} reply shapes, the orchestra came out of every one; "
-      f"{len(LIVE_CASES)} of them streamed live without losing or leaking a line")
+      f"{len(KEEPS)} bodies kept every line that is theirs and none of the host's; "
+      f"{len(LIVE_CASES)} streamed live without losing or leaking a line")

@@ -1383,11 +1383,22 @@ def _repair_turn(seen_errors):
 # rather than fail the authoring over a formality; anything that changes the
 # SOUND is left untouched.
 
+# Csound is case-sensitive and so is this. `kr` is the header's control rate;
+# `kR` is a variable, and so are `Sr` and `iNstr`. Matched in any case, this
+# took all 55 `kR = ...` lines out of the library's own drum_head, on the fenced
+# path too, and the compiler then reported `Variable 'kR' used before defined`
+# against a body that compiles as it stands. Only the two arms that are not
+# Csound keep reading any case: the CSD tags and the SET line. A header word
+# whose first letter is no type sigil (`nchnls`, `0dbfs`, `endin`, `out`) cannot
+# be a variable in any case and is still matched in any; `kr`, `ksmps` and
+# `instr` are matched with a capital first letter as well (`KSMPS = 64`,
+# `Instr 1`), which is no sigil either. `SR = ...` is left alone: `S` is the
+# string sigil.
 _STRIP = re.compile(
-    r"^\s*(</?Cs\w+|sr\s*=|kr\s*=|ksmps\s*=|nchnls|0dbfs|instr\b|endin\b|"
-    r"ftgen\b|\w+\s+ftgen\b|out\b|outs\b|outch\b|i\s+\d|f\s+\d|e\s*$|"
-    r"SET\s*:)",
-    re.IGNORECASE)
+    r"^\s*((?i:</?Cs\w+)|sr\s*=|kr\s*=|K(?i:r)\s*=|ksmps\s*=|K(?i:smps)\s*=|"
+    r"instr\b|I(?i:nstr)\b|(?i:nchnls|0dbfs|endin\b|out\b|outs\b|outch\b)|"
+    r"ftgen\b|\w+\s+ftgen\b|i\s+\d|f\s+\d|e\s*$|"
+    r"(?i:SET\s*:))")
 
 # A knob the author asks the SYNTH to set, written inside the fence beside
 # READING. It is not Csound and must never reach the compiler (hence the _STRIP
@@ -1466,6 +1477,22 @@ _CODE_LINE = re.compile(
     r"|g?[akifS]\w*\s*=\s*\S"                  # kx = ...
     r"|g?[akifS]\w*\s+[a-z]\w*(?:[\s,(]|$)"   # avar opcode args
     r"|(?:if|else|elseif|endif|until|while|od|kgoto|igoto|then)\b"
+    # The preprocessor is code as well: a macro definition (`#define BARM(R'Q) #`,
+    # closed on its own line or by a lone `#` further down) and a line that is a
+    # macro call (`$BARM(1'260)`). Library bodies are written that way, and
+    # without these arms an unfenced reply lost the `#define` line to the
+    # reasoning: the two-line run started INSIDE the definition, and every call
+    # then failed as an undefined macro. `#define` cannot be a Markdown heading
+    # (that needs a space after the `#`), and a sentence about a macro carries
+    # an English word, which _codeishness rejects before it asks here.
+    # The call must be the WHOLE line: `$f_n = f_1 (2n+1)^2 / 9$` is a formula in
+    # the reasoning. The lone `#` that closes a definition is not an arm here:
+    # it is neutral, like a blank line (_NEUTRAL), because the same line stands
+    # in reasoning as an empty heading. And `asum += $W` is an assignment like
+    # any other; the macro bodies are made of such lines.
+    r"|#(?:define|undef)\b"
+    r"|\$[A-Za-z_]\w*(?:\([^()$]*\))?\s*$"
+    r"|g?[akifS]\w*\s*[-+*/]=\s*\S"
     r")")
 _SENTENCE_END = re.compile(r"[.!?:]\s*$")
 # Lowercase a/k/i/f and capital S are Csound TYPE sigils and also the first
@@ -1684,23 +1711,34 @@ def _first_code_run(txt):
     single-line rule would cut most replies mid-reasoning. Blank lines are
     neutral — they neither start a run nor break one. Same rule the live stream
     uses, so what the panel shows while the author writes and what the compiler
-    is finally handed cannot disagree."""
+    is finally handed cannot disagree.
+
+    `;` comment lines are neutral in the same way, but a block of them standing
+    DIRECTLY above the run is the run's own head and the cut is taken above it:
+    the library's bodies open with their declarations (`; FOLLOWS kfreq: yes`,
+    `; DECAY: SELF`) and their source, and an author who writes the orchestra
+    without a fence writes those lines too. Cut below them, they were quoted to
+    the panel as the machine's reasoning and were missing from the body."""
     lines = (txt or "").splitlines(keepends=True)
     run_start, run = None, 0
+    lead = None                 # where the comment block directly above begins
     at = 0
     for ln in lines:
         stripped = ln.split(";", 1)[0].strip()
-        if not stripped:
+        if not stripped or stripped == "#":
+            if lead is None and stripped != "#" and ln.strip():
+                lead = at
             at += len(ln)
             continue
         if _codeishness(ln):
             if run == 0:
-                run_start = at
+                run_start = at if lead is None else lead
             run += 1
             if run >= 2:
                 return run_start
         else:
             run, run_start = 0, None
+        lead = None
         at += len(ln)
     return 0
 
@@ -1743,8 +1781,9 @@ def _live_watch(on_thinking, on_body, attempt):
     With no marker anywhere the body starts at the first RUN of two code lines
     — a run, not a single line, because "aexc is the bow, continuous noise" is
     a sentence about the code and reads as code to any line matcher; blank and
-    `;`-comment lines are neutral, exactly as in _first_code_run, so the live
-    cut and sanitize's cannot land on different lines.
+    `;`-comment lines are neutral, and a comment block directly above the run
+    belongs to it, exactly as in _first_code_run, so the live cut and
+    sanitize's cannot land on different lines.
 
     The caller must invoke ``watcher.flush()`` once the generation ends: the
     reply's last line has no newline behind it (an unclosed final fence is the
@@ -1757,7 +1796,7 @@ def _live_watch(on_thinking, on_body, attempt):
         # cut/run/runstart implement _first_code_run incrementally, for the
         # only segment that needs it (the no-marker reply, segment 0).
         return {"lines": [], "code": 0, "reading": False,
-                "cut": None, "run": 0, "runstart": None}
+                "cut": None, "run": 0, "runstart": None, "lead": None}
 
     segs = [_segment()]
     state = {"buf": "", "kept": [], "held": [], "closed": False, "sent": None,
@@ -1770,18 +1809,25 @@ def _live_watch(on_thinking, on_body, attempt):
         if _READING.match(line):
             seg["reading"] = True
         # A blank or `;`-only line is NEUTRAL — it neither starts a code run
-        # nor breaks one (_first_code_run's rule, verbatim).
-        if not line.split(";", 1)[0].strip():
+        # nor breaks one — and the first `;` line of a block is remembered,
+        # because a run that begins right under it begins THERE
+        # (_first_code_run's rule, verbatim).
+        stripped = line.split(";", 1)[0].strip()
+        if not stripped or stripped == "#":
+            if seg["lead"] is None and stripped != "#" and line.strip():
+                seg["lead"] = len(seg["lines"]) - 1
             return
         if _codeishness(line):
             if seg["run"] == 0:
-                seg["runstart"] = len(seg["lines"]) - 1
+                seg["runstart"] = (len(seg["lines"]) - 1 if seg["lead"] is None
+                                   else seg["lead"])
             seg["run"] += 1
             seg["code"] += 1
             if seg["cut"] is None and seg["run"] >= 2:
                 seg["cut"] = seg["runstart"]
         else:
             seg["run"], seg["runstart"] = 0, None
+        seg["lead"] = None
 
     def picked():
         # _pick_body's rule over the segments so far.
