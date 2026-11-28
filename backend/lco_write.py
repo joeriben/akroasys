@@ -3386,6 +3386,27 @@ def _undefined_macro(src, csd_lines):
     return ""
 
 
+def _global_unset(name, csd_lines):
+    """What an undefined `g` name means: a page's own set-up lines were left out.
+
+    Compiled 2026-11-28: a body that reads `giWfold` without the page's
+    `giWfold ftgenonce ...` line gets `Variable 'giWfold' used before defined`,
+    which reads like a typo in the name. Only for a `g` name that no line of
+    the orchestra begins with: one that is set further down is a question of
+    order, and Csound's sentence already says that."""
+    if not re.match(r"g[aikSfw]\w+$", name):
+        return ""
+    # Set = the name stands in a line's output list (`giA, giB init 1, 2`), or
+    # anywhere on a `#define` line, whose text may set it where it is called.
+    sets = re.compile(rf"^\s*(?:[\w\[\]]+\s*,\s*)*{re.escape(name)}\b(?!\s*$)"
+                      rf"|^\s*#define\b.*(?<![\w$]){re.escape(name)}\b")
+    if any(sets.search(_code_part(line)) for line in csd_lines):
+        return ""
+    return (f" — no line of this orchestra sets `{name}`. A `g` name is global, "
+            "and a body that reads one also carries the lines that set it. If "
+            "the name comes from a page, the page has those lines")
+
+
 def _stray_endif(csd_lines, at):
     """What an `endif` the parser did not expect means, and which one it is.
 
@@ -3470,6 +3491,7 @@ def _explain(log, orchestra):
         m = _LINE_NO.match(ln)
         if m:
             n = int(m.group(1))
+            unset = None        # the undefined name this line number belongs to
             if undefined:
                 # The first body line that READS the name is the one that used
                 # it before it was defined. Body lines only: a body that never
@@ -3481,6 +3503,7 @@ def _explain(log, orchestra):
                     if token.search(_code_part(csd_lines[i])):
                         n = i + 1
                         break
+                unset = undefined
                 undefined = None
             elif found and found.split()[1:2] == ["="]:
                 # For an assignment Csound 6.18 numbers the line AFTER the one
@@ -3492,6 +3515,8 @@ def _explain(log, orchestra):
             if src and n > _BODY_OFFSET:
                 hint = _mechanical_hint(src)
                 lhs = _ASSIGNS.match(_code_part(src))
+                if not hint and unset:
+                    hint = _global_unset(unset, csd_lines)
                 if (found and found.split()[:2] == ["r", "="] and lhs
                         and lhs.group(1).lstrip("g")[:1] == "r"):
                     hint = f" — {_rate_fact(lhs.group(1))}."
