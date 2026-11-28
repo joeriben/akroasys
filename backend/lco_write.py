@@ -2513,6 +2513,14 @@ _AT_LINE = re.compile(r",\s*line\s+(\d+):\s*$", re.IGNORECASE)
 # `r2 = 2.7 + ...` three times in a row against the second message.
 _NO_RATE = re.compile(r"cannot create variable (\w+): NULL type")
 _ASSIGNS = re.compile(r"^\s*(\w+)\s*=(?!=)")
+# An `endif` where no `if ... then` is open. Csound 6.18 says only `unexpected
+# ENDIF_TOKEN  (token "endif")` and echoes `endif`: neither which of the body's
+# `endif`s it is nor why. (With `, expecting ...` after ENDIF_TOKEN it is a
+# different error: an unfinished statement on the line before.) On 2026-11-28
+# the author closed an `if` one line early while copying `cast_bell`, was sent
+# "your line: endif" and returned the same draft, twice on two prompts.
+_STRAY_ENDIF = re.compile(r"unexpected ENDIF_TOKEN\s+\(token")
+_LOOP_OPEN = re.compile(r"(?:while|until)\b.*\bdo$")
 
 
 def _rate_fact(name):
@@ -3245,6 +3253,36 @@ def _mechanical_hint(line):
             f"changing the arguments will not fix it.")
 
 
+def _stray_endif(csd_lines, at):
+    """What an `endif` the parser did not expect means, and which one it is.
+
+    Two causes give this exact message (both compiled, 2026-11-28): no
+    `if ... then` is open, or the `endif` stands inside a `while`/`until ...
+    do` whose `od` has not come yet. Which `endif`: the body line before it,
+    quoted, because a body has several and Csound's echo is the bare word.
+    Not which one to delete: the stray one may be this one or an `endif`
+    written too early above it. Without a usable line number (Csound's count
+    restarts after a multi-line `#define`) the loop is looked for in the whole
+    body and no line is quoted."""
+    known = (_BODY_OFFSET < at <= len(csd_lines)
+             and _code_part(csd_lines[at - 1]).strip() == "endif")
+    above = [_code_part(line).strip() for line in
+             csd_lines[_BODY_OFFSET:at - 1 if known else len(csd_lines)]]
+    where = next((f" It is the `endif` after `{line}`."
+                  for line in reversed(above) if line), "") if known else ""
+    loops = (sum(bool(_LOOP_OPEN.match(line)) for line in above)
+             - sum(line == "od" for line in above))
+    if loops > 0:
+        return (" — this `endif` stands where the parser expects something "
+                "else: a `while ... do` or `until ... do` above it has no "
+                "`od` yet, and the `od` comes before the `endif` of the `if` "
+                f"around the loop.{where} Otherwise no `if ... then` is open "
+                "here and this `endif` or one above it is one too many")
+    return (" — no `if ... then` is open at this `endif`: each `if ... then` "
+            "takes exactly one, an `if ... goto` or `if ... kgoto` takes none."
+            f"{where} This `endif` or one above it is one too many")
+
+
 def _explain(log, orchestra):
     """Csound's own complaint, plus the line of the AUTHORED body it points at.
 
@@ -3285,8 +3323,10 @@ def _explain(log, orchestra):
             full = csd_lines[at - 1].strip() if _BODY_OFFSET < at <= len(csd_lines) else ""
             if full and squeeze(src) in squeeze(full):
                 src = full
-            quoted.append(f"your line: {src}"
-                          f"{_mechanical_hint(src) or _bracket_hint(src)}")
+            hint = _mechanical_hint(src) or _bracket_hint(src)
+            if msgs and _STRAY_ENDIF.search(msgs[-1]):
+                hint = _stray_endif(csd_lines, at)
+            quoted.append(f"your line: {src}{hint}")
             continue
         a = _AT_LINE.search(ln)
         if a:
