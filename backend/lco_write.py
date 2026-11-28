@@ -3386,6 +3386,40 @@ def _undefined_macro(src, csd_lines):
     return ""
 
 
+_TWO_POINTS = re.compile(r"(?<![\w.])\d*\.\d+\.\d*")
+_I_EXPR_MSG = re.compile(r"Use of i\(\) with expression not permitted on line (\d+)")
+_I_OF_EXPR = re.compile(r"(?<![\w$])i\s*\((?!\s*\w+\s*\))")
+
+
+def _two_points(src):
+    """A number written with two decimal points (`.0.0101`), named.
+
+    Compiled 2026-11-28: Csound reads `.0` and then complains about the
+    `.0101` after it as an unexpected number, not about the number written."""
+    m = _TWO_POINTS.search(_code_part(src))
+    return (f" — `{m.group(0)}` has two decimal points and is not a number"
+            if m else "")
+
+
+def _i_of_expression(n, csd_lines):
+    """The line Csound means by "Use of i() with expression", and the fact.
+
+    Compiled 2026-11-28: `ix = i(kc * 2)` gives this message with a line
+    number and no echo. The number is right in a body without macros and
+    meaningless after a `$MACRO` call ("line 4"), so the numbered line is
+    quoted only if it has an `i(` around more than one name; else the one
+    body line that has, if there is exactly one; else no line."""
+    body = range(_BODY_OFFSET, len(csd_lines) - _AFTER_BODY)
+    hits = [i for i in body if _I_OF_EXPR.search(_code_part(csd_lines[i]))]
+    at = n - 1 if n - 1 in hits else hits[0] if len(hits) == 1 else None
+    fact = (" — `i()` takes one k variable by itself, as in `i(kc)`, not an "
+            "expression: inside an expression each k variable gets its own "
+            "`i()`")
+    if at is None:
+        return f"about i(): {fact[3:]}"
+    return f"your line: {csd_lines[at].strip()}{fact}"
+
+
 def _global_unset(name, csd_lines):
     """What an undefined `g` name means: a page's own set-up lines were left out.
 
@@ -3460,6 +3494,9 @@ def _explain(log, orchestra):
             # drop Csound's "from file /tmp/....csd (1)," prefix: a temp path is
             # noise in the repair turn, and the author cannot act on it.
             msgs.append(re.sub(r"^.*?from file .*?,\s*", "", ln.strip()))
+            ie = _I_EXPR_MSG.search(ln)
+            if ie:
+                quoted.append(_i_of_expression(int(ie.group(1)), csd_lines))
             u = _UNDEFINED.search(ln)
             undefined = u.group(1) if u else None
             continue
@@ -3477,7 +3514,7 @@ def _explain(log, orchestra):
             full = csd_lines[at - 1].strip() if _BODY_OFFSET < at <= len(csd_lines) else ""
             if full and squeeze(src) in squeeze(full):
                 src = full
-            hint = (_undefined_macro(src, csd_lines)
+            hint = (_undefined_macro(src, csd_lines) or _two_points(src)
                     or _mechanical_hint(src) or _bracket_hint(src)
                     or _opcode_first(msgs[-1] if msgs else "", src))
             if msgs and _STRAY_ENDIF.search(msgs[-1]):
