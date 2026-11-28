@@ -3348,6 +3348,44 @@ def _k_names(src):
     return ", ".join(f"`{n}`" for n in names)
 
 
+_MACRO_CALL = re.compile(r"\$([A-Za-z_]\w*)")
+_MACRO_DEF = re.compile(r"^\s*#define\s+(\w+)(?:\(([^)]*)\))?")
+
+
+def _undefined_macro(src, csd_lines):
+    """A `$NAME` on the quoted line that no `#define` above it covers.
+
+    Compiled 2026-11-28: a body that calls `$WFOLDF(afx)` without the page's
+    `#define WFOLDF(X) # ... #`, or with it further down, gives only
+    `unexpected ERROR_TOKEN (token "$")`. Covered means: defined by name, a
+    parameter of some definition (the quoted line may be a line of a macro's
+    own text), or one of Csound's built-in `$M_...` constants. Says what is
+    missing, not what the definition is: the page has it. Not seen: `#undef`,
+    a definition inside a false `#ifdef` or a block comment."""
+    squeeze = lambda t: re.sub(r"\s+", "", t)
+    want = squeeze(src)
+    line_of = next((i for i, line in enumerate(csd_lines)
+                    if want and want in squeeze(line)), len(csd_lines))
+    above, below = set(), set()
+    for i, line in enumerate(csd_lines):
+        d = _MACRO_DEF.match(line)
+        if d:
+            (above if i < line_of else below).add(d.group(1))
+            above.update(a.strip() for a in re.split(r"['#]", d.group(2) or ""))
+    for name in _MACRO_CALL.findall(_code_part(src)):
+        if name in above or name.startswith("M_"):
+            continue
+        if name in below:
+            return (f" — `${name}` calls a macro whose `#define {name}` line "
+                    "stands below this call. A macro exists from its `#define` "
+                    "line on, so that line goes above the first call")
+        return (f" — `${name}` calls a macro, and this orchestra has no "
+                f"`#define {name}` line. A page that calls a macro is "
+                "written out together with its `#define` lines, above the "
+                "first call")
+    return ""
+
+
 def _stray_endif(csd_lines, at):
     """What an `endif` the parser did not expect means, and which one it is.
 
@@ -3418,7 +3456,8 @@ def _explain(log, orchestra):
             full = csd_lines[at - 1].strip() if _BODY_OFFSET < at <= len(csd_lines) else ""
             if full and squeeze(src) in squeeze(full):
                 src = full
-            hint = (_mechanical_hint(src) or _bracket_hint(src)
+            hint = (_undefined_macro(src, csd_lines)
+                    or _mechanical_hint(src) or _bracket_hint(src)
                     or _opcode_first(msgs[-1] if msgs else "", src))
             if msgs and _STRAY_ENDIF.search(msgs[-1]):
                 hint = _stray_endif(csd_lines, at)
