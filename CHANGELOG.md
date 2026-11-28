@@ -103,10 +103,11 @@ each entry is marked open in the library.
   samples), which "timpani" opens. `cast_bell` and `tubular_bell` also had a line
   layout in their strike block that the author copied with one `endif` too
   many; both are laid out unambiguously now. "Church bell", "tubular bells,
-  soft hammer", "a bell with a major third, heavy clapper", "timpani" and
-  "kettledrum roll" give a sound;
-  a bell together with a second large instrument, and the drum skin with
-  anything added after it, often still do not.
+  soft hammer", "a bell with a major third, heavy clapper" and "kettledrum
+  roll" gave a sound in every run since; "timpani" and "taiko" in some runs
+  and not in others. The author's answer to the same prompt depends on what
+  it was asked before in the same session, so one prompt is not one result:
+  of 34 test prompts, 28 gave a sound in the last run.
 
 - **The page's parameter list no longer ends up in the code.** The author
   sometimes copied the parameter record that follows an instrument's code on
