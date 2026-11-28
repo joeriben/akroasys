@@ -92,7 +92,12 @@ each entry is marked open in the library.
   letter (`r2`, `m1`) is now called that, where Csound only reports a type
   mismatch, an `endif` too many is called that, with the line it follows, and
   an `i` variable given a k-rate value gets the sentence about `i()`. A line
-  that begins with an opcode's name is told what is missing.
+  that begins with an opcode's name is told what is missing. A macro called
+  without its `#define`, a global variable that no line sets, a number with
+  two decimal points and an `i()` around an expression are each named as
+  what they are. A `#define` with a space before its argument bracket used to
+  reach the author as a bare colour code and now comes as Csound's sentence
+  with the line.
 
 - **Bells and a drum skin the author can write.** `cast_bell` listed its 29
   resonators one after the other, and the author has to write out again
@@ -107,7 +112,7 @@ each entry is marked open in the library.
   roll" gave a sound in every run since; "timpani" and "taiko" in some runs
   and not in others. The author's answer to the same prompt depends on what
   it was asked before in the same session, so one prompt is not one result:
-  of 34 test prompts, 28 gave a sound in the last run.
+  of 34 test prompts, 29 gave a sound in the last run.
 
 - **The page's parameter list no longer ends up in the code.** The author
   sometimes copied the parameter record that follows an instrument's code on
